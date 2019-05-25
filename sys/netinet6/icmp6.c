@@ -140,7 +140,7 @@ static int icmp6_rip6_input(struct mbuf **, int);
 static int icmp6_ratelimit(const struct in6_addr *, const int, const int);
 static const char *icmp6_redirect_diag(struct in6_addr *,
 	struct in6_addr *, struct in6_addr *);
-static struct mbuf *ni6_input(struct mbuf *, int);
+static struct mbuf *ni6_input(struct mbuf *, int, struct prison *);
 static struct mbuf *ni6_nametodns(const char *, int, int);
 static int ni6_dnsmatch(const char *, int, const char *, int);
 static int ni6_addrs(struct icmp6_nodeinfo *, struct mbuf *,
@@ -627,6 +627,7 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 	case ICMP6_WRUREQUEST:	/* ICMP6_FQDN_QUERY */
 	    {
 		enum { WRU, FQDN } mode;
+		struct prison *pr;
 
 		if (!V_icmp6_nodeinfo)
 			break;
@@ -638,6 +639,14 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 		else
 			goto badlen;
 
+		pr = NULL;
+		sx_slock(&allprison_lock);
+		TAILQ_FOREACH(pr, &allprison, pr_list)
+			if (pr->pr_vnet == ifp->if_vnet)
+				break; 
+		sx_sunlock(&allprison_lock);
+		if (pr == NULL)
+			pr = curthread->td_ucred->cr_prison;
 		if (mode == FQDN) {
 #ifndef PULLDOWN_TEST
 			IP6_EXTHDR_CHECK(m, off, sizeof(struct icmp6_nodeinfo),
@@ -645,11 +654,10 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 #endif
 			n = m_copym(m, 0, M_COPYALL, M_NOWAIT);
 			if (n)
-				n = ni6_input(n, off);
+				n = ni6_input(n, off, pr);
 			/* XXX meaningless if n == NULL */
 			noff = sizeof(struct ip6_hdr);
 		} else {
-			struct prison *pr;
 			u_char *p;
 			int maxhlen, hlen;
 
@@ -683,13 +691,6 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 				n = NULL;
 				break;
 			}
-			maxhlen = M_TRAILINGSPACE(n) -
-			    (sizeof(*nip6) + sizeof(*nicmp6) + 4);
-			pr = curthread->td_ucred->cr_prison;
-			mtx_lock(&pr->pr_mtx);
-			hlen = strlen(pr->pr_hostname);
-			if (maxhlen > hlen)
-				maxhlen = hlen;
 			/*
 			 * Copy IPv6 and ICMPv6 only.
 			 */
@@ -699,6 +700,13 @@ icmp6_input(struct mbuf **mp, int *offp, int proto)
 			bcopy(icmp6, nicmp6, sizeof(struct icmp6_hdr));
 			p = (u_char *)(nicmp6 + 1);
 			bzero(p, 4);
+
+			maxhlen = M_TRAILINGSPACE(n) -
+			    (sizeof(*nip6) + sizeof(*nicmp6) + 4);
+			mtx_lock(&pr->pr_mtx);
+			hlen = strlen(pr->pr_hostname);
+			if (maxhlen > hlen)
+				maxhlen = hlen;
 			/* meaningless TTL */
 			bcopy(pr->pr_hostname, p + 4, maxhlen);
 			mtx_unlock(&pr->pr_mtx);
@@ -1167,11 +1175,10 @@ icmp6_mtudisc_update(struct ip6ctlparam *ip6cp, int validated)
  *   with hostname changes by sethostname(3)
  */
 static struct mbuf *
-ni6_input(struct mbuf *m, int off)
+ni6_input(struct mbuf *m, int off, struct prison *pr)
 {
 	struct icmp6_nodeinfo *ni6, *nni6;
 	struct mbuf *n = NULL;
-	struct prison *pr;
 	u_int16_t qtype;
 	int subjlen;
 	int replylen = sizeof(struct ip6_hdr) + sizeof(struct icmp6_nodeinfo);
@@ -1323,7 +1330,6 @@ ni6_input(struct mbuf *m, int off)
 			 *   wildcard match, if gethostname(3) side has
 			 *   truncated hostname.
 			 */
-			pr = curthread->td_ucred->cr_prison;
 			mtx_lock(&pr->pr_mtx);
 			n = ni6_nametodns(pr->pr_hostname,
 			    strlen(pr->pr_hostname), 0);
@@ -1448,7 +1454,6 @@ ni6_input(struct mbuf *m, int off)
 		/*
 		 * XXX do we really have FQDN in hostname?
 		 */
-		pr = curthread->td_ucred->cr_prison;
 		mtx_lock(&pr->pr_mtx);
 		n->m_next = ni6_nametodns(pr->pr_hostname,
 		    strlen(pr->pr_hostname), oldfqdn);
@@ -1655,6 +1660,7 @@ static int
 ni6_addrs(struct icmp6_nodeinfo *ni6, struct mbuf *m, struct ifnet **ifpp,
     struct in6_addr *subj)
 {
+	struct epoch_tracker et;
 	struct ifnet *ifp;
 	struct in6_ifaddr *ifa6;
 	struct ifaddr *ifa;
@@ -1676,10 +1682,9 @@ ni6_addrs(struct icmp6_nodeinfo *ni6, struct mbuf *m, struct ifnet **ifpp,
 		}
 	}
 
-	IFNET_RLOCK_NOSLEEP();
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifp, &V_ifnet, if_link) {
 		addrsofif = 0;
-		IF_ADDR_RLOCK(ifp);
 		CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
 			if (ifa->ifa_addr->sa_family != AF_INET6)
 				continue;
@@ -1730,16 +1735,15 @@ ni6_addrs(struct icmp6_nodeinfo *ni6, struct mbuf *m, struct ifnet **ifpp,
 			}
 			addrsofif++; /* count the address */
 		}
-		IF_ADDR_RUNLOCK(ifp);
 		if (iffound) {
 			*ifpp = ifp;
-			IFNET_RUNLOCK_NOSLEEP();
+			NET_EPOCH_EXIT(et);
 			return (addrsofif);
 		}
 
 		addrs += addrsofif;
 	}
-	IFNET_RUNLOCK_NOSLEEP();
+	NET_EPOCH_EXIT(et);
 
 	return (addrs);
 }
@@ -1748,6 +1752,7 @@ static int
 ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *nni6,
     struct ifnet *ifp0, int resid)
 {
+	struct epoch_tracker et;
 	struct ifnet *ifp;
 	struct in6_ifaddr *ifa6;
 	struct ifaddr *ifa;
@@ -1760,12 +1765,11 @@ ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *nni6,
 	if (ifp0 == NULL && !(niflags & NI_NODEADDR_FLAG_ALL))
 		return (0);	/* needless to copy */
 
-	IFNET_RLOCK_NOSLEEP();
+	NET_EPOCH_ENTER(et);
 	ifp = ifp0 ? ifp0 : CK_STAILQ_FIRST(&V_ifnet);
   again:
 
 	for (; ifp; ifp = CK_STAILQ_NEXT(ifp, if_link)) {
-		IF_ADDR_RLOCK(ifp);
 		CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
 			if (ifa->ifa_addr->sa_family != AF_INET6)
 				continue;
@@ -1820,13 +1824,12 @@ ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *nni6,
 			/* now we can copy the address */
 			if (resid < sizeof(struct in6_addr) +
 			    sizeof(u_int32_t)) {
-				IF_ADDR_RUNLOCK(ifp);
 				/*
 				 * We give up much more copy.
 				 * Set the truncate flag and return.
 				 */
 				nni6->ni_flags |= NI_NODEADDR_FLAG_TRUNCATE;
-				IFNET_RUNLOCK_NOSLEEP();
+				NET_EPOCH_EXIT(et);
 				return (copied);
 			}
 
@@ -1867,7 +1870,6 @@ ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *nni6,
 			resid -= (sizeof(struct in6_addr) + sizeof(u_int32_t));
 			copied += (sizeof(struct in6_addr) + sizeof(u_int32_t));
 		}
-		IF_ADDR_RUNLOCK(ifp);
 		if (ifp0)	/* we need search only on the specified IF */
 			break;
 	}
@@ -1879,7 +1881,7 @@ ni6_store_addrs(struct icmp6_nodeinfo *ni6, struct icmp6_nodeinfo *nni6,
 		goto again;
 	}
 
-	IFNET_RUNLOCK_NOSLEEP();
+	NET_EPOCH_EXIT(et);
 
 	return (copied);
 }
@@ -2561,13 +2563,14 @@ icmp6_redirect_output(struct mbuf *m0, struct rtentry *rt)
 
 	{
 		/* target lladdr option */
+		struct epoch_tracker et;
 		int len;
 		struct nd_opt_hdr *nd_opt;
 		char *lladdr;
 
-		IF_AFDATA_RLOCK(ifp);
+		NET_EPOCH_ENTER(et);
 		ln = nd6_lookup(router_ll6, 0, ifp);
-		IF_AFDATA_RUNLOCK(ifp);
+		NET_EPOCH_EXIT(et);
 		if (ln == NULL)
 			goto nolladdropt;
 

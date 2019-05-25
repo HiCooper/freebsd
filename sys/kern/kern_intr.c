@@ -91,7 +91,7 @@ struct proc *intrproc;
 
 static MALLOC_DEFINE(M_ITHREAD, "ithread", "Interrupt Threads");
 
-static int intr_storm_threshold = 1000;
+static int intr_storm_threshold = 0;
 SYSCTL_INT(_hw, OID_AUTO, intr_storm_threshold, CTLFLAG_RWTUN,
     &intr_storm_threshold, 0,
     "Number of consecutive interrupts before storm protection is enabled");
@@ -209,10 +209,20 @@ intr_event_update(struct intr_event *ie)
 	}
 
 	/*
-	 * If the handler names were too long, add +'s to indicate missing
-	 * names. If we run out of room and still have +'s to add, change
-	 * the last character from a + to a *.
+	 * If there is only one handler and its name is too long, just copy in
+	 * as much of the end of the name (includes the unit number) as will
+	 * fit.  Otherwise, we have multiple handlers and not all of the names
+	 * will fit.  Add +'s to indicate missing names.  If we run out of room
+	 * and still have +'s to add, change the last character from a + to a *.
 	 */
+	if (missed == 1 && space == 1) {
+		ih = CK_SLIST_FIRST(&ie->ie_handlers);
+		missed = strlen(ie->ie_fullname) + strlen(ih->ih_name) + 2 -
+		    sizeof(ie->ie_fullname);
+		strcat(ie->ie_fullname, (missed == 0) ? " " : "-");
+		strcat(ie->ie_fullname, &ih->ih_name[missed]);
+		missed = 0;
+	}
 	last = &ie->ie_fullname[sizeof(ie->ie_fullname) - 2];
 	while (missed-- > 0) {
 		if (strlen(ie->ie_fullname) + 1 == sizeof(ie->ie_fullname)) {
@@ -368,6 +378,25 @@ intr_event_bind_ithread(struct intr_event *ie, int cpu)
 {
 
 	return (_intr_event_bind(ie, cpu, false, true));
+}
+
+/*
+ * Bind an interrupt event's ithread to the specified cpuset.
+ */
+int
+intr_event_bind_ithread_cpuset(struct intr_event *ie, cpuset_t *cs)
+{
+	lwpid_t id;
+
+	mtx_lock(&ie->ie_lock);
+	if (ie->ie_thread != NULL) {
+		id = ie->ie_thread->it_thread->td_tid;
+		mtx_unlock(&ie->ie_lock);
+		return (cpuset_setthread(id, cs));
+	} else {
+		mtx_unlock(&ie->ie_lock);
+	}
+	return (ENODEV);
 }
 
 static struct intr_event *
@@ -721,6 +750,28 @@ intr_event_barrier(struct intr_event *ie)
 	atomic_thread_fence_acq();
 }
 
+static void
+intr_handler_barrier(struct intr_handler *handler)
+{
+	struct intr_event *ie;
+
+	ie = handler->ih_event;
+	mtx_assert(&ie->ie_lock, MA_OWNED);
+	KASSERT((handler->ih_flags & IH_DEAD) == 0,
+	    ("update for a removed handler"));
+
+	if (ie->ie_thread == NULL) {
+		intr_event_barrier(ie);
+		return;
+	}
+	if ((handler->ih_flags & IH_CHANGED) == 0) {
+		handler->ih_flags |= IH_CHANGED;
+		intr_event_schedule_thread(ie);
+	}
+	while ((handler->ih_flags & IH_CHANGED) != 0)
+		msleep(handler, &ie->ie_lock, 0, "ih_barr", 0);
+}
+
 /*
  * Sleep until an ithread finishes executing an interrupt handler.
  *
@@ -839,6 +890,49 @@ intr_event_remove_handler(void *cookie)
 #endif
 	mtx_unlock(&ie->ie_lock);
 	free(handler, M_ITHREAD);
+	return (0);
+}
+
+int
+intr_event_suspend_handler(void *cookie)
+{
+	struct intr_handler *handler = (struct intr_handler *)cookie;
+	struct intr_event *ie;
+
+	if (handler == NULL)
+		return (EINVAL);
+	ie = handler->ih_event;
+	KASSERT(ie != NULL,
+	    ("interrupt handler \"%s\" has a NULL interrupt event",
+	    handler->ih_name));
+	mtx_lock(&ie->ie_lock);
+	handler->ih_flags |= IH_SUSP;
+	intr_handler_barrier(handler);
+	mtx_unlock(&ie->ie_lock);
+	return (0);
+}
+
+int
+intr_event_resume_handler(void *cookie)
+{
+	struct intr_handler *handler = (struct intr_handler *)cookie;
+	struct intr_event *ie;
+
+	if (handler == NULL)
+		return (EINVAL);
+	ie = handler->ih_event;
+	KASSERT(ie != NULL,
+	    ("interrupt handler \"%s\" has a NULL interrupt event",
+	    handler->ih_name));
+
+	/*
+	 * intr_handler_barrier() acts not only as a barrier,
+	 * it also allows to check for any pending interrupts.
+	 */
+	mtx_lock(&ie->ie_lock);
+	handler->ih_flags &= ~IH_SUSP;
+	intr_handler_barrier(handler);
+	mtx_unlock(&ie->ie_lock);
 	return (0);
 }
 
@@ -1016,8 +1110,19 @@ intr_event_execute_handlers(struct proc *p, struct intr_event *ie)
 		 */
 		ihp = ih;
 
+		if ((ih->ih_flags & IH_CHANGED) != 0) {
+			mtx_lock(&ie->ie_lock);
+			ih->ih_flags &= ~IH_CHANGED;
+			wakeup(ih);
+			mtx_unlock(&ie->ie_lock);
+		}
+
 		/* Skip filter only handlers */
 		if (ih->ih_handler == NULL)
+			continue;
+
+		/* Skip suspended handlers */
+		if ((ih->ih_flags & IH_SUSP) != 0)
 			continue;
 
 		/*
@@ -1178,8 +1283,9 @@ intr_event_handle(struct intr_event *ie, struct trapframe *frame)
 	struct intr_handler *ih;
 	struct trapframe *oldframe;
 	struct thread *td;
-	int ret, thread;
 	int phase;
+	int ret;
+	bool filter, thread;
 
 	td = curthread;
 
@@ -1198,7 +1304,8 @@ intr_event_handle(struct intr_event *ie, struct trapframe *frame)
 	 * a trapframe as its argument.
 	 */
 	td->td_intr_nesting_level++;
-	thread = 0;
+	filter = false;
+	thread = false;
 	ret = 0;
 	critical_enter();
 	oldframe = td->td_intr_frame;
@@ -1214,8 +1321,10 @@ intr_event_handle(struct intr_event *ie, struct trapframe *frame)
 	atomic_thread_fence_seq_cst();
 
 	CK_SLIST_FOREACH(ih, &ie->ie_handlers, ih_next) {
+		if ((ih->ih_flags & IH_SUSP) != 0)
+			continue;
 		if (ih->ih_filter == NULL) {
-			thread = 1;
+			thread = true;
 			continue;
 		}
 		CTR4(KTR_INTR, "%s: exec %p(%p) for %s", __func__,
@@ -1230,24 +1339,25 @@ intr_event_handle(struct intr_event *ie, struct trapframe *frame)
 		    (ret & ~(FILTER_SCHEDULE_THREAD | FILTER_HANDLED)) == 0),
 		    ("%s: incorrect return value %#x from %s", __func__, ret,
 		    ih->ih_name));
+		filter = filter || ret == FILTER_HANDLED;
 
-		/* 
+		/*
 		 * Wrapper handler special handling:
 		 *
-		 * in some particular cases (like pccard and pccbb), 
+		 * in some particular cases (like pccard and pccbb),
 		 * the _real_ device handler is wrapped in a couple of
 		 * functions - a filter wrapper and an ithread wrapper.
-		 * In this case (and just in this case), the filter wrapper 
+		 * In this case (and just in this case), the filter wrapper
 		 * could ask the system to schedule the ithread and mask
 		 * the interrupt source if the wrapped handler is composed
 		 * of just an ithread handler.
 		 *
-		 * TODO: write a generic wrapper to avoid people rolling 
-		 * their own
+		 * TODO: write a generic wrapper to avoid people rolling
+		 * their own.
 		 */
 		if (!thread) {
 			if (ret == FILTER_SCHEDULE_THREAD)
-				thread = 1;
+				thread = true;
 		}
 	}
 	atomic_add_rel_int(&ie->ie_active[phase], -1);
@@ -1271,6 +1381,11 @@ intr_event_handle(struct intr_event *ie, struct trapframe *frame)
 	}
 	critical_exit();
 	td->td_intr_nesting_level--;
+#ifdef notyet
+	/* The interrupt is not aknowledged by any filter and has no ithread. */
+	if (!thread && !filter)
+		return (EINVAL);
+#endif
 	return (0);
 }
 

@@ -63,6 +63,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kdb.h>
 #include <sys/kernel.h>
 #include <sys/kthread.h>
+#include <sys/ktr.h>
 #include <sys/lockf.h>
 #include <sys/malloc.h>
 #include <sys/mount.h>
@@ -156,7 +157,7 @@ SYSCTL_ULONG(_vfs, OID_AUTO, mnt_free_list_batch, CTLFLAG_RW,
  */
 enum vtype iftovt_tab[16] = {
 	VNON, VFIFO, VCHR, VNON, VDIR, VNON, VBLK, VNON,
-	VREG, VNON, VLNK, VNON, VSOCK, VNON, VNON, VBAD,
+	VREG, VNON, VLNK, VNON, VSOCK, VNON, VNON, VNON
 };
 int vttoif_tab[10] = {
 	0, S_IFREG, S_IFDIR, S_IFBLK, S_IFCHR, S_IFLNK,
@@ -1756,8 +1757,16 @@ flushbuflist(struct bufv *bufv, int flags, struct bufobj *bo, int slpflag,
 
 	retval = 0;
 	TAILQ_FOREACH_SAFE(bp, &bufv->bv_hd, b_bobufs, nbp) {
-		if (((flags & V_NORMAL) && (bp->b_xflags & BX_ALTDATA)) ||
-		    ((flags & V_ALT) && (bp->b_xflags & BX_ALTDATA) == 0)) {
+		/*
+		 * If we are flushing both V_NORMAL and V_ALT buffers then
+		 * do not skip any buffers. If we are flushing only V_NORMAL
+		 * buffers then skip buffers marked as BX_ALTDATA. If we are
+		 * flushing only V_ALT buffers then skip buffers not marked
+		 * as BX_ALTDATA.
+		 */
+		if (((flags & (V_NORMAL | V_ALT)) != (V_NORMAL | V_ALT)) &&
+		   (((flags & V_NORMAL) && (bp->b_xflags & BX_ALTDATA) != 0) ||
+		    ((flags & V_ALT) && (bp->b_xflags & BX_ALTDATA) == 0))) {
 			continue;
 		}
 		if (nbp != NULL) {
@@ -1840,7 +1849,7 @@ again:
 		 * reused.  Dirty buffers will have the hint applied once
 		 * they've been written.
 		 */
-		if (bp->b_vp->v_object != NULL)
+		if ((bp->b_flags & B_VMIO) != 0)
 			bp->b_flags |= B_NOREUSE;
 		brelse(bp);
 		BO_RLOCK(bo);
@@ -1854,15 +1863,15 @@ again:
  * sync activity.
  */
 int
-vtruncbuf(struct vnode *vp, struct ucred *cred, off_t length, int blksize)
+vtruncbuf(struct vnode *vp, off_t length, int blksize)
 {
 	struct buf *bp, *nbp;
 	int anyfreed;
-	int trunclbn;
+	daddr_t trunclbn;
 	struct bufobj *bo;
 
-	CTR5(KTR_VFS, "%s: vp %p with cred %p and block %d:%ju", __func__,
-	    vp, cred, blksize, (uintmax_t)length);
+	CTR4(KTR_VFS, "%s: vp %p with block %d:%ju", __func__,
+	    vp, blksize, (uintmax_t)length);
 
 	/*
 	 * Round up to the *next* lbn.
@@ -3138,7 +3147,7 @@ loop:
 
 			if ((vp->v_type == VNON ||
 			    (error == 0 && vattr.va_nlink > 0)) &&
-			    (vp->v_writecount == 0 || vp->v_type != VREG)) {
+			    (vp->v_writecount <= 0 || vp->v_type != VREG)) {
 				VOP_UNLOCK(vp, 0);
 				vdropl(vp);
 				continue;
@@ -3483,8 +3492,6 @@ vn_printf(struct vnode *vp, const char *fmt, ...)
 		strlcat(buf, "|VV_ETERNALDEV", sizeof(buf));
 	if (vp->v_vflag & VV_CACHEDLABEL)
 		strlcat(buf, "|VV_CACHEDLABEL", sizeof(buf));
-	if (vp->v_vflag & VV_TEXT)
-		strlcat(buf, "|VV_TEXT", sizeof(buf));
 	if (vp->v_vflag & VV_COPYONWRITE)
 		strlcat(buf, "|VV_COPYONWRITE", sizeof(buf));
 	if (vp->v_vflag & VV_SYSTEM)
@@ -3500,7 +3507,7 @@ vn_printf(struct vnode *vp, const char *fmt, ...)
 	if (vp->v_vflag & VV_FORCEINSMQ)
 		strlcat(buf, "|VV_FORCEINSMQ", sizeof(buf));
 	flags = vp->v_vflag & ~(VV_ROOT | VV_ISTTY | VV_NOSYNC | VV_ETERNALDEV |
-	    VV_CACHEDLABEL | VV_TEXT | VV_COPYONWRITE | VV_SYSTEM | VV_PROCDEP |
+	    VV_CACHEDLABEL | VV_COPYONWRITE | VV_SYSTEM | VV_PROCDEP |
 	    VV_NOKNOTE | VV_DELETED | VV_MD | VV_FORCEINSMQ);
 	if (flags != 0) {
 		snprintf(buf2, sizeof(buf2), "|VV(0x%lx)", flags);

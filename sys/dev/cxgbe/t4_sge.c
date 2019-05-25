@@ -1379,6 +1379,9 @@ t4_intr_all(void *arg)
 
 	MPASS(sc->intr_count == 1);
 
+	if (sc->intr_type == INTR_INTX)
+		t4_write_reg(sc, MYPF_REG(A_PCIE_PF_CLI), 0);
+
 	t4_intr_err(arg);
 	t4_intr_evt(fwq);
 }
@@ -1391,9 +1394,19 @@ void
 t4_intr_err(void *arg)
 {
 	struct adapter *sc = arg;
+	uint32_t v;
+	const bool verbose = (sc->debug_flags & DF_VERBOSE_SLOWINTR) != 0;
 
-	t4_write_reg(sc, MYPF_REG(A_PCIE_PF_CLI), 0);
-	t4_slow_intr_handler(sc);
+	if (sc->flags & ADAP_ERR)
+		return;
+
+	v = t4_read_reg(sc, MYPF_REG(A_PL_PF_INT_CAUSE));
+	if (v & F_PFSW) {
+		sc->swintr++;
+		t4_write_reg(sc, MYPF_REG(A_PL_PF_INT_CAUSE), v);
+	}
+
+	t4_slow_intr_handler(sc, verbose);
 }
 
 /*
@@ -2033,6 +2046,9 @@ t4_eth_rx(struct sge_iq *iq, const struct rss_header *rss, struct mbuf *m0)
 		rxq->vlan_extraction++;
 	}
 
+#ifdef NUMA
+	m0->m_pkthdr.numa_domain = ifp->if_numa_domain;
+#endif
 #if defined(INET) || defined(INET6)
 	if (iq->flags & IQ_LRO_ENABLED) {
 		if (sort_before_lro(lro)) {
@@ -2309,7 +2325,7 @@ static inline int
 needs_eo(struct mbuf *m)
 {
 
-	return (m->m_pkthdr.snd_tag != NULL);
+	return (m->m_pkthdr.csum_flags & CSUM_SND_TAG);
 }
 #endif
 
@@ -2523,8 +2539,11 @@ restart:
 	 * checksumming is enabled.  needs_l4_csum happens to check for all the
 	 * right things.
 	 */
-	if (__predict_false(needs_eo(m0) && !needs_l4_csum(m0)))
+	if (__predict_false(needs_eo(m0) && !needs_l4_csum(m0))) {
+		m_snd_tag_rele(m0->m_pkthdr.snd_tag);
 		m0->m_pkthdr.snd_tag = NULL;
+		m0->m_pkthdr.csum_flags &= ~CSUM_SND_TAG;
+	}
 #endif
 
 	if (!needs_tso(m0) &&
@@ -3435,6 +3454,8 @@ alloc_rxq(struct vi_info *vi, struct sge_rxq *rxq, int intr_idx, int idx,
 	if (vi->ifp->if_capenable & IFCAP_LRO)
 		rxq->iq.flags |= IQ_LRO_ENABLED;
 #endif
+	if (vi->ifp->if_capenable & IFCAP_HWRXTSTMP)
+		rxq->iq.flags |= IQ_RX_TIMESTAMP;
 	rxq->ifp = vi->ifp;
 
 	children = SYSCTL_CHILDREN(oid);
@@ -3632,9 +3653,8 @@ alloc_nm_txq(struct vi_info *vi, struct sge_nm_txq *nm_txq, int iqidx, int idx,
 	nm_txq->nid = idx;
 	nm_txq->iqidx = iqidx;
 	nm_txq->cpl_ctrl0 = htobe32(V_TXPKT_OPCODE(CPL_TX_PKT) |
-	    V_TXPKT_INTF(pi->tx_chan) | V_TXPKT_PF(G_FW_VIID_PFN(vi->viid)) |
-	    V_TXPKT_VF(G_FW_VIID_VIN(vi->viid)) |
-	    V_TXPKT_VF_VLD(G_FW_VIID_VIVLD(vi->viid)));
+	    V_TXPKT_INTF(pi->tx_chan) | V_TXPKT_PF(sc->pf) |
+	    V_TXPKT_VF(vi->vin) | V_TXPKT_VF_VLD(vi->vfvld));
 	nm_txq->cntxt_id = INVALID_NM_TXQ_CNTXT_ID;
 
 	snprintf(name, sizeof(name), "%d", idx);
@@ -4035,10 +4055,8 @@ alloc_txq(struct vi_info *vi, struct sge_txq *txq, int idx,
 		    V_TXPKT_INTF(pi->tx_chan));
 	else
 		txq->cpl_ctrl0 = htobe32(V_TXPKT_OPCODE(CPL_TX_PKT) |
-		    V_TXPKT_INTF(pi->tx_chan) |
-		    V_TXPKT_PF(G_FW_VIID_PFN(vi->viid)) |
-		    V_TXPKT_VF(G_FW_VIID_VIN(vi->viid)) |
-		    V_TXPKT_VF_VLD(G_FW_VIID_VIVLD(vi->viid)));
+		    V_TXPKT_INTF(pi->tx_chan) | V_TXPKT_PF(sc->pf) |
+		    V_TXPKT_VF(vi->vin) | V_TXPKT_VF_VLD(vi->vfvld));
 	txq->tc_idx = -1;
 	txq->sdesc = malloc(eq->sidx * sizeof(struct tx_sdesc), M_CXGBE,
 	    M_ZERO | M_WAITOK);
@@ -5649,7 +5667,7 @@ send_etid_flowc_wr(struct cxgbe_snd_tag *cst, struct port_info *pi,
     struct vi_info *vi)
 {
 	struct wrq_cookie cookie;
-	u_int pfvf = G_FW_VIID_PFN(vi->viid) << S_FW_VIID_PFN;
+	u_int pfvf = pi->adapter->pf << S_FW_VIID_PFN;
 	struct fw_flowc_wr *flowc;
 
 	mtx_assert(&cst->lock, MA_OWNED);
@@ -5907,6 +5925,21 @@ ethofld_tx(struct cxgbe_snd_tag *cst)
 			cst->tx_nocompl	= 0;
 		}
 		(void) mbufq_dequeue(&cst->pending_tx);
+
+		/*
+		 * Drop the mbuf's reference on the tag now rather
+		 * than waiting until m_freem().  This ensures that
+		 * cxgbe_snd_tag_free gets called when the inp drops
+		 * its reference on the tag and there are no more
+		 * mbufs in the pending_tx queue and can flush any
+		 * pending requests.  Otherwise if the last mbuf
+		 * doesn't request a completion the etid will never be
+		 * released.
+		 */
+		m->m_pkthdr.snd_tag = NULL;
+		m->m_pkthdr.csum_flags &= ~CSUM_SND_TAG;
+		m_snd_tag_rele(&cst->com);
+
 		mbufq_enqueue(&cst->pending_fwack, m);
 	}
 }
@@ -5918,6 +5951,7 @@ ethofld_transmit(struct ifnet *ifp, struct mbuf *m0)
 	int rc;
 
 	MPASS(m0->m_nextpkt == NULL);
+	MPASS(m0->m_pkthdr.csum_flags & CSUM_SND_TAG);
 	MPASS(m0->m_pkthdr.snd_tag != NULL);
 	cst = mst_to_cst(m0->m_pkthdr.snd_tag);
 
@@ -5952,8 +5986,18 @@ ethofld_transmit(struct ifnet *ifp, struct mbuf *m0)
 	mbufq_enqueue(&cst->pending_tx, m0);
 	cst->plen += m0->m_pkthdr.len;
 
+	/*
+	 * Hold an extra reference on the tag while generating work
+	 * requests to ensure that we don't try to free the tag during
+	 * ethofld_tx() in case we are sending the final mbuf after
+	 * the inp was freed.
+	 */
+	m_snd_tag_ref(&cst->com);
 	ethofld_tx(cst);
-	rc = 0;
+	mtx_unlock(&cst->lock);
+	m_snd_tag_rele(&cst->com);
+	return (0);
+
 done:
 	mtx_unlock(&cst->lock);
 	if (__predict_false(rc != 0))
@@ -6000,7 +6044,6 @@ ethofld_fw4_ack(struct sge_iq *iq, const struct rss_header *rss, struct mbuf *m0
 
 			cst->flags &= ~EO_FLUSH_RPL_PENDING;
 			cst->tx_credits += cpl->credits;
-freetag:
 			cxgbe_snd_tag_free_locked(cst);
 			return (0);	/* cst is gone. */
 		}
@@ -6018,21 +6061,26 @@ freetag:
 	cst->tx_credits += cpl->credits;
 	MPASS(cst->tx_credits <= cst->tx_total);
 
-	m = mbufq_first(&cst->pending_tx);
-	if (m != NULL && cst->tx_credits >= mbuf_eo_len16(m))
-		ethofld_tx(cst);
-
-	if (__predict_false((cst->flags & EO_SND_TAG_REF) == 0) &&
-	    cst->ncompl == 0) {
-		if (cst->tx_credits == cst->tx_total)
-			goto freetag;
-		else {
-			MPASS((cst->flags & EO_FLUSH_RPL_PENDING) == 0);
-			send_etid_flush_wr(cst);
-		}
+	if (cst->flags & EO_SND_TAG_REF) {
+		/*
+		 * As with ethofld_transmit(), hold an extra reference
+		 * so that the tag is stable across ethold_tx().
+		 */
+		m_snd_tag_ref(&cst->com);	
+		m = mbufq_first(&cst->pending_tx);
+		if (m != NULL && cst->tx_credits >= mbuf_eo_len16(m))
+			ethofld_tx(cst);
+		mtx_unlock(&cst->lock);
+		m_snd_tag_rele(&cst->com);
+	} else {
+		/*
+		 * There shouldn't be any pending packets if the tag
+		 * was freed by the kernel since any pending packet
+		 * should hold a reference to the tag.
+		 */
+		MPASS(mbufq_first(&cst->pending_tx) == NULL);
+		mtx_unlock(&cst->lock);
 	}
-
-	mtx_unlock(&cst->lock);
 
 	return (0);
 }

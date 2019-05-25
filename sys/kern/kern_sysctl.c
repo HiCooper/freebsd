@@ -322,13 +322,6 @@ sysctl_load_tunable_by_oid_locked(struct sysctl_oid *oidp)
 		freeenv(penv);
 }
 
-static int
-sbuf_printf_drain(void *arg __unused, const char *data, int len)
-{
-
-	return (printf("%.*s", len, data));
-}
-
 /*
  * Locate the path to a given oid.  Returns the length of the resulting path,
  * or -1 if the oid was not found.  nodes must have room for CTL_MAXNAME
@@ -1772,7 +1765,7 @@ sysctl_new_kernel(struct sysctl_req *req, void *p, size_t l)
 		return (0);
 	if (req->newlen - req->newidx < l)
 		return (EINVAL);
-	bcopy((char *)req->newptr + req->newidx, p, l);
+	bcopy((const char *)req->newptr + req->newidx, p, l);
 	req->newidx += l;
 	return (0);
 }
@@ -1898,7 +1891,7 @@ sysctl_new_user(struct sysctl_req *req, void *p, size_t l)
 		return (EINVAL);
 	WITNESS_WARN(WARN_GIANTOK | WARN_SLEEPOK, NULL,
 	    "sysctl_new_user()");
-	error = copyin((char *)req->newptr + req->newidx, p, l);
+	error = copyin((const char *)req->newptr + req->newidx, p, l);
 	req->newidx += l;
 	return (error);
 }
@@ -2126,8 +2119,8 @@ sys___sysctl(struct thread *td, struct sysctl_args *uap)
  */
 int
 userland_sysctl(struct thread *td, int *name, u_int namelen, void *old,
-    size_t *oldlenp, int inkernel, void *new, size_t newlen, size_t *retval,
-    int flags)
+    size_t *oldlenp, int inkernel, const void *new, size_t newlen,
+    size_t *retval, int flags)
 {
 	int error = 0, memlocked;
 	struct sysctl_req req;

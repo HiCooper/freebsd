@@ -228,7 +228,20 @@ ip6_fragment(struct ifnet *ifp, struct mbuf *m0, int hlen, u_char nextproto,
 			IP6STAT_INC(ip6s_odropped);
 			return (ENOBUFS);
 		}
-		m->m_flags = m0->m_flags & M_COPYFLAGS;
+
+		/*
+		 * Make sure the complete packet header gets copied
+		 * from the originating mbuf to the newly created
+		 * mbuf. This also ensures that existing firewall
+		 * classification(s), VLAN tags and so on get copied
+		 * to the resulting fragmented packet(s):
+		 */
+		if (m_dup_pkthdr(m, m0, M_NOWAIT) == 0) {
+			m_free(m);
+			IP6STAT_INC(ip6s_odropped);
+			return (ENOBUFS);
+		}
+
 		*mnext = m;
 		mnext = &m->m_nextpkt;
 		m->m_data += max_linkhdr;
@@ -253,8 +266,6 @@ ip6_fragment(struct ifnet *ifp, struct mbuf *m0, int hlen, u_char nextproto,
 		}
 		m_cat(m, m_frgpart);
 		m->m_pkthdr.len = fraglen + hlen + sizeof(*ip6f);
-		m->m_pkthdr.fibnum = m0->m_pkthdr.fibnum;
-		m->m_pkthdr.rcvif = NULL;
 		ip6f->ip6f_reserved = 0;
 		ip6f->ip6f_ident = id;
 		ip6f->ip6f_nxt = nextproto;
@@ -263,6 +274,51 @@ ip6_fragment(struct ifnet *ifp, struct mbuf *m0, int hlen, u_char nextproto,
 	}
 
 	return (0);
+}
+
+static int
+ip6_output_send(struct inpcb *inp, struct ifnet *ifp, struct ifnet *origifp,
+    struct mbuf *m, struct sockaddr_in6 *dst, struct route_in6 *ro)
+{
+	struct m_snd_tag *mst;
+	int error;
+
+	MPASS((m->m_pkthdr.csum_flags & CSUM_SND_TAG) == 0);
+	mst = NULL;
+
+#ifdef RATELIMIT
+	if (inp != NULL) {
+		if ((inp->inp_flags2 & INP_RATE_LIMIT_CHANGED) != 0 ||
+		    (inp->inp_snd_tag != NULL &&
+		    inp->inp_snd_tag->ifp != ifp))
+			in_pcboutput_txrtlmt(inp, ifp, m);
+
+		if (inp->inp_snd_tag != NULL)
+			mst = inp->inp_snd_tag;
+	}
+#endif
+	if (mst != NULL) {
+		KASSERT(m->m_pkthdr.rcvif == NULL,
+		    ("trying to add a send tag to a forwarded packet"));
+		if (mst->ifp != ifp) {
+			error = EAGAIN;
+			goto done;
+		}
+
+		/* stamp send tag on mbuf */
+		m->m_pkthdr.snd_tag = m_snd_tag_ref(mst);
+		m->m_pkthdr.csum_flags |= CSUM_SND_TAG;
+	}
+
+	error = nd6_output_ifp(ifp, origifp, m, dst, (struct route *)ro);
+
+done:
+	/* Check for route change invalidating send tags. */
+#ifdef RATELIMIT
+	if (error == EAGAIN)
+		in_pcboutput_eagain(inp);
+#endif
+	return (error);
 }
 
 /*
@@ -322,6 +378,9 @@ ip6_output(struct mbuf *m0, struct ip6_pktopts *opt,
 			m->m_pkthdr.flowid = inp->inp_flowid;
 			M_HASHTYPE_SET(m, inp->inp_flowtype);
 		}
+#ifdef NUMA
+		m->m_pkthdr.numa_domain = inp->inp_numa_domain;
+#endif
 	}
 
 #if defined(IPSEC) || defined(IPSEC_SUPPORT)
@@ -571,52 +630,72 @@ again:
 		counter_u64_add(rt->rt_pksent, 1);
 	}
 
-
-	/*
-	 * The outgoing interface must be in the zone of source and
-	 * destination addresses.
-	 */
-	origifp = ifp;
-
+	/* Setup data structures for scope ID checks. */
 	src0 = ip6->ip6_src;
-	if (in6_setscope(&src0, origifp, &zone))
-		goto badscope;
 	bzero(&src_sa, sizeof(src_sa));
 	src_sa.sin6_family = AF_INET6;
 	src_sa.sin6_len = sizeof(src_sa);
 	src_sa.sin6_addr = ip6->ip6_src;
-	if (sa6_recoverscope(&src_sa) || zone != src_sa.sin6_scope_id)
-		goto badscope;
 
 	dst0 = ip6->ip6_dst;
-	if (in6_setscope(&dst0, origifp, &zone))
-		goto badscope;
 	/* re-initialize to be sure */
 	bzero(&dst_sa, sizeof(dst_sa));
 	dst_sa.sin6_family = AF_INET6;
 	dst_sa.sin6_len = sizeof(dst_sa);
 	dst_sa.sin6_addr = ip6->ip6_dst;
-	if (sa6_recoverscope(&dst_sa) || zone != dst_sa.sin6_scope_id) {
-		goto badscope;
+
+	/* Check for valid scope ID. */
+	if (in6_setscope(&src0, ifp, &zone) == 0 &&
+	    sa6_recoverscope(&src_sa) == 0 && zone == src_sa.sin6_scope_id &&
+	    in6_setscope(&dst0, ifp, &zone) == 0 &&
+	    sa6_recoverscope(&dst_sa) == 0 && zone == dst_sa.sin6_scope_id) {
+		/*
+		 * The outgoing interface is in the zone of the source
+		 * and destination addresses.
+		 *
+		 * Because the loopback interface cannot receive
+		 * packets with a different scope ID than its own,
+		 * there is a trick is to pretend the outgoing packet
+		 * was received by the real network interface, by
+		 * setting "origifp" different from "ifp". This is
+		 * only allowed when "ifp" is a loopback network
+		 * interface. Refer to code in nd6_output_ifp() for
+		 * more details.
+		 */
+		origifp = ifp;
+	
+		/*
+		 * We should use ia_ifp to support the case of sending
+		 * packets to an address of our own.
+		 */
+		if (ia != NULL && ia->ia_ifp)
+			ifp = ia->ia_ifp;
+
+	} else if ((ifp->if_flags & IFF_LOOPBACK) == 0 ||
+	    sa6_recoverscope(&src_sa) != 0 ||
+	    sa6_recoverscope(&dst_sa) != 0 ||
+	    dst_sa.sin6_scope_id == 0 ||
+	    (src_sa.sin6_scope_id != 0 &&
+	    src_sa.sin6_scope_id != dst_sa.sin6_scope_id) ||
+	    (origifp = ifnet_byindex(dst_sa.sin6_scope_id)) == NULL) {
+		/*
+		 * If the destination network interface is not a
+		 * loopback interface, or the destination network
+		 * address has no scope ID, or the source address has
+		 * a scope ID set which is different from the
+		 * destination address one, or there is no network
+		 * interface representing this scope ID, the address
+		 * pair is considered invalid.
+		 */
+		IP6STAT_INC(ip6s_badscope);
+		in6_ifstat_inc(ifp, ifs6_out_discard);
+		if (error == 0)
+			error = EHOSTUNREACH; /* XXX */
+		goto bad;
 	}
 
-	/* We should use ia_ifp to support the case of
-	 * sending packets to an address of our own.
-	 */
-	if (ia != NULL && ia->ia_ifp)
-		ifp = ia->ia_ifp;
+	/* All scope ID checks are successful. */
 
-	/* scope check is done. */
-	goto routefound;
-
-  badscope:
-	IP6STAT_INC(ip6s_badscope);
-	in6_ifstat_inc(origifp, ifs6_out_discard);
-	if (error == 0)
-		error = EHOSTUNREACH; /* XXX */
-	goto bad;
-
-  routefound:
 	if (rt && !IN6_IS_ADDR_MULTICAST(&ip6->ip6_dst)) {
 		if (opt && opt->ip6po_nextroute.ro_rt) {
 			/*
@@ -772,16 +851,21 @@ again:
 	}
 
 	/* Jump over all PFIL processing if hooks are not active. */
-	if (!PFIL_HOOKED(&V_inet6_pfil_hook))
+	if (!PFIL_HOOKED_OUT(V_inet6_pfil_head))
 		goto passout;
 
 	odst = ip6->ip6_dst;
 	/* Run through list of hooks for output packets. */
-	error = pfil_run_hooks(&V_inet6_pfil_hook, &m, ifp, PFIL_OUT, 0, inp);
-	if (error != 0 || m == NULL)
+	switch (pfil_run_hooks(V_inet6_pfil_head, &m, ifp, PFIL_OUT, inp)) {
+	case PFIL_PASS:
+		ip6 = mtod(m, struct ip6_hdr *);
+		break;
+	case PFIL_DROPPED:
+		error = EPERM;
+		/* FALLTHROUGH */
+	case PFIL_CONSUMED:
 		goto done;
-	/* adjust pointer */
-	ip6 = mtod(m, struct ip6_hdr *);
+	}
 
 	needfiblookup = 0;
 	/* See if destination IP address was changed by packet filter. */
@@ -929,23 +1013,7 @@ passout:
 			    m->m_pkthdr.len);
 			ifa_free(&ia6->ia_ifa);
 		}
-#ifdef RATELIMIT
-		if (inp != NULL) {
-			if (inp->inp_flags2 & INP_RATE_LIMIT_CHANGED)
-				in_pcboutput_txrtlmt(inp, ifp, m);
-			/* stamp send tag on mbuf */
-			m->m_pkthdr.snd_tag = inp->inp_snd_tag;
-		} else {
-			m->m_pkthdr.snd_tag = NULL;
-		}
-#endif
-		error = nd6_output_ifp(ifp, origifp, m, dst,
-		    (struct route *)ro);
-#ifdef RATELIMIT
-		/* check for route change */
-		if (error == EAGAIN)
-			in_pcboutput_eagain(inp);
-#endif
+		error = ip6_output_send(inp, ifp, origifp, m, dst, ro);
 		goto done;
 	}
 
@@ -1044,23 +1112,7 @@ sendorfree:
 				counter_u64_add(ia->ia_ifa.ifa_obytes,
 				    m->m_pkthdr.len);
 			}
-#ifdef RATELIMIT
-			if (inp != NULL) {
-				if (inp->inp_flags2 & INP_RATE_LIMIT_CHANGED)
-					in_pcboutput_txrtlmt(inp, ifp, m);
-				/* stamp send tag on mbuf */
-				m->m_pkthdr.snd_tag = inp->inp_snd_tag;
-			} else {
-				m->m_pkthdr.snd_tag = NULL;
-			}
-#endif
-			error = nd6_output_ifp(ifp, origifp, m, dst,
-			    (struct route *)ro);
-#ifdef RATELIMIT
-			/* check for route change */
-			if (error == EAGAIN)
-				in_pcboutput_eagain(inp);
-#endif
+			error = ip6_output_send(inp, ifp, origifp, m, dst, ro);
 		} else
 			m_freem(m);
 	}
@@ -2196,8 +2248,11 @@ ip6_raw_ctloutput(struct socket *so, struct sockopt *sopt)
 					    sizeof(optval));
 			if (error)
 				break;
-			if ((optval % 2) != 0) {
-				/* the API assumes even offset values */
+			if (optval < -1 || (optval % 2) != 0) {
+				/*
+				 * The API assumes non-negative even offset
+				 * values or -1 as a special value.
+				 */
 				error = EINVAL;
 			} else if (so->so_proto->pr_protocol ==
 			    IPPROTO_ICMPV6) {

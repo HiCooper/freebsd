@@ -40,6 +40,7 @@
 #include <sys/queue.h>
 #ifdef _KERNEL
 #include <sys/systm.h>
+#include <sys/refcount.h>
 #include <vm/uma.h>
 #ifdef WITNESS
 #include <sys/lock.h>
@@ -98,6 +99,7 @@ struct mbuf;
 #define	MLEN		((int)(MSIZE - MHSIZE))
 #define	MHLEN		((int)(MSIZE - MPKTHSIZE))
 #define	MINCLSIZE	(MHLEN + 1)
+#define	M_NODOM		255
 
 #ifdef _KERNEL
 /*-
@@ -137,6 +139,7 @@ struct m_tag {
  */
 struct m_snd_tag {
 	struct ifnet *ifp;		/* network interface tag belongs to */
+	volatile u_int refcount;
 };
 
 /*
@@ -158,7 +161,7 @@ struct pkthdr {
 	uint32_t	 flowid;	/* packet's 4-tuple system */
 	uint32_t	 csum_flags;	/* checksum and offload features */
 	uint16_t	 fibnum;	/* this packet should use this fib */
-	uint8_t		 cosqos;	/* class/quality of service */
+	uint8_t		 numa_domain;	/* NUMA domain of recvd pkt */
 	uint8_t		 rsstype;	/* hash type */
 	union {
 		uint64_t	rcv_tstmp;	/* timestamp in ns */
@@ -407,33 +410,6 @@ struct mbuf {
 #define	M_HASHTYPE_ISHASH(m)	(M_HASHTYPE_GET(m) & M_HASHTYPE_HASHPROP)
 
 /*
- * COS/QOS class and quality of service tags.
- * It uses DSCP code points as base.
- */
-#define	QOS_DSCP_CS0		0x00
-#define	QOS_DSCP_DEF		QOS_DSCP_CS0
-#define	QOS_DSCP_CS1		0x20
-#define	QOS_DSCP_AF11		0x28
-#define	QOS_DSCP_AF12		0x30
-#define	QOS_DSCP_AF13		0x38
-#define	QOS_DSCP_CS2		0x40
-#define	QOS_DSCP_AF21		0x48
-#define	QOS_DSCP_AF22		0x50
-#define	QOS_DSCP_AF23		0x58
-#define	QOS_DSCP_CS3		0x60
-#define	QOS_DSCP_AF31		0x68
-#define	QOS_DSCP_AF32		0x70
-#define	QOS_DSCP_AF33		0x78
-#define	QOS_DSCP_CS4		0x80
-#define	QOS_DSCP_AF41		0x88
-#define	QOS_DSCP_AF42		0x90
-#define	QOS_DSCP_AF43		0x98
-#define	QOS_DSCP_CS5		0xa0
-#define	QOS_DSCP_EF		0xb8
-#define	QOS_DSCP_CS6		0xc0
-#define	QOS_DSCP_CS7		0xe0
-
-/*
  * External mbuf storage buffer types.
  */
 #define	EXT_CLUSTER	1	/* mbuf cluster */
@@ -443,6 +419,7 @@ struct mbuf {
 #define	EXT_JUMBO16	5	/* jumbo cluster 16184 bytes */
 #define	EXT_PACKET	6	/* mbuf+cluster from packet zone */
 #define	EXT_MBUF	7	/* external mbuf reference */
+#define	EXT_RXRING	8	/* data in NIC receive ring */
 
 #define	EXT_VENDOR1	224	/* for vendor-internal use */
 #define	EXT_VENDOR2	225	/* for vendor-internal use */
@@ -519,6 +496,8 @@ struct mbuf {
 #define	CSUM_L5_VALID		0x20000000	/* checksum is correct */
 #define	CSUM_COALESCED		0x40000000	/* contains merged segments */
 
+#define	CSUM_SND_TAG		0x80000000	/* Packet header has send tag */
+
 /*
  * CSUM flag description for use with printf(9) %b identifier.
  */
@@ -528,7 +507,7 @@ struct mbuf {
     "\12CSUM_IP6_UDP\13CSUM_IP6_TCP\14CSUM_IP6_SCTP\15CSUM_IP6_TSO" \
     "\16CSUM_IP6_ISCSI" \
     "\31CSUM_L3_CALC\32CSUM_L3_VALID\33CSUM_L4_CALC\34CSUM_L4_VALID" \
-    "\35CSUM_L5_CALC\36CSUM_L5_VALID\37CSUM_COALESCED"
+    "\35CSUM_L5_CALC\36CSUM_L5_VALID\37CSUM_COALESCED\40CSUM_SND_TAG"
 
 /* CSUM flags compatibility mappings. */
 #define	CSUM_IP_CHECKED		CSUM_L3_CALC
@@ -658,6 +637,8 @@ int		 m_sanity(struct mbuf *, int);
 struct mbuf	*m_split(struct mbuf *, int, int);
 struct mbuf	*m_uiotombuf(struct uio *, int, int, int, int);
 struct mbuf	*m_unshare(struct mbuf *, int);
+void		 m_snd_tag_init(struct m_snd_tag *, struct ifnet *);
+void		 m_snd_tag_destroy(struct m_snd_tag *);
 
 static __inline int
 m_gettype(int size)
@@ -1020,6 +1001,17 @@ m_align(struct mbuf *m, int len)
  */
 #define	MCHTYPE(m, t)	m_chtype((m), (t))
 
+/* Return the rcvif of a packet header. */
+static __inline struct ifnet *
+m_rcvif(struct mbuf *m)
+{
+
+	M_ASSERTPKTHDR(m);
+	if (m->m_pkthdr.csum_flags & CSUM_SND_TAG)
+		return (NULL);
+	return (m->m_pkthdr.rcvif);
+}
+
 /* Length to m_copy to copy all. */
 #define	M_COPYALL	1000000000
 
@@ -1210,6 +1202,22 @@ m_tag_find(struct mbuf *m, int type, struct m_tag *start)
 	    m_tag_locate(m, MTAG_ABI_COMPAT, type, start));
 }
 
+static inline struct m_snd_tag *
+m_snd_tag_ref(struct m_snd_tag *mst)
+{
+
+	refcount_acquire(&mst->refcount);
+	return (mst);
+}
+
+static inline void
+m_snd_tag_rele(struct m_snd_tag *mst)
+{
+
+	if (refcount_release(&mst->refcount))
+		m_snd_tag_destroy(mst);
+}
+
 static __inline struct mbuf *
 m_free(struct mbuf *m)
 {
@@ -1218,6 +1226,8 @@ m_free(struct mbuf *m)
 	MBUF_PROBE1(m__free, m);
 	if ((m->m_flags & (M_PKTHDR|M_NOFREE)) == (M_PKTHDR|M_NOFREE))
 		m_tag_delete_chain(m, NULL);
+	if (m->m_flags & M_PKTHDR && m->m_pkthdr.csum_flags & CSUM_SND_TAG)
+		m_snd_tag_rele(m->m_pkthdr.snd_tag);
 	if (m->m_flags & M_EXT)
 		mb_free_ext(m);
 	else if ((m->m_flags & M_NOFREE) == 0)

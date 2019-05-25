@@ -118,10 +118,22 @@ uintptr_t moea64_get_unique_vsid(void);
  *
  */
 
-#define PV_LOCK_COUNT	PA_LOCK_COUNT*3
+#define PV_LOCK_PER_DOM	PA_LOCK_COUNT*3
+#define PV_LOCK_COUNT	PV_LOCK_PER_DOM*MAXMEMDOM
 static struct mtx_padalign pv_lock[PV_LOCK_COUNT];
  
-#define PV_LOCKPTR(pa)	((struct mtx *)(&pv_lock[pa_index(pa) % PV_LOCK_COUNT]))
+/*
+ * Cheap NUMA-izing of the pv locks, to reduce contention across domains.
+ * NUMA domains on POWER9 appear to be indexed as sparse memory spaces, with the
+ * index at (N << 45).
+ */
+#ifdef __powerpc64__
+#define PV_LOCK_IDX(pa)	(pa_index(pa) % PV_LOCK_PER_DOM + \
+			(((pa) >> 45) % MAXMEMDOM) * PV_LOCK_PER_DOM)
+#else
+#define PV_LOCK_IDX(pa)	(pa_index(pa) % PV_LOCK_COUNT)
+#endif
+#define PV_LOCKPTR(pa)	((struct mtx *)(&pv_lock[PV_LOCK_IDX(pa)]))
 #define PV_LOCK(pa)		mtx_lock(PV_LOCKPTR(pa))
 #define PV_UNLOCK(pa)		mtx_unlock(PV_LOCKPTR(pa))
 #define PV_LOCKASSERT(pa) 	mtx_assert(PV_LOCKPTR(pa), MA_OWNED)
@@ -146,8 +158,9 @@ extern void *slbtrap, *slbtrapend;
  */
 static struct	mem_region *regions;
 static struct	mem_region *pregions;
+static struct	numa_mem_region *numa_pregions;
 static u_int	phys_avail_count;
-static int	regions_sz, pregions_sz;
+static int	regions_sz, pregions_sz, numapregions_sz;
 
 extern void bs_remap_earlyboot(void);
 
@@ -1048,6 +1061,8 @@ moea64_late_bootstrap(mmu_t mmup, vm_offset_t kernelstart, vm_offset_t kernelend
 			PMAP_UNLOCK(kernel_pmap);
 		}
 	}
+
+	numa_mem_regions(&numa_pregions, &numapregions_sz);
 }
 
 static void
@@ -2807,7 +2822,7 @@ moea64_sync_icache(mmu_t mmu, pmap_t pm, vm_offset_t va, vm_size_t sz)
 
 	PMAP_LOCK(pm);
 	while (sz > 0) {
-		lim = round_page(va);
+		lim = round_page(va+1);
 		len = MIN(lim - va, sz);
 		pvo = moea64_pvo_find_va(pm, va & ~ADDR_POFF);
 		if (pvo != NULL && !(pvo->pvo_pte.pa & LPTE_I)) {

@@ -46,6 +46,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/taskqueue.h>
 #include <sys/kernel.h>
+#include <sys/ktr.h>
 #include <sys/vnode.h>
 #include <sys/mount.h>
 #include <sys/bio.h>
@@ -154,7 +155,7 @@ ffs_mount(struct mount *mp)
 	struct fs *fs;
 	pid_t fsckpid = 0;
 	int error, error1, flags;
-	uint64_t mntorflags;
+	uint64_t mntorflags, saved_mnt_flag;
 	accmode_t accmode;
 	struct nameidata ndp;
 	char *fspec;
@@ -371,25 +372,40 @@ ffs_mount(struct mount *mp)
 				return (error);
 			if ((error = vn_start_write(NULL, &mp, V_WAIT)) != 0)
 				return (error);
+			error = vfs_write_suspend_umnt(mp);
+			if (error != 0)
+				return (error);
 			fs->fs_ronly = 0;
 			MNT_ILOCK(mp);
-			mp->mnt_flag &= ~MNT_RDONLY;
+			saved_mnt_flag = MNT_RDONLY;
+			if (MOUNTEDSOFTDEP(mp) && (mp->mnt_flag &
+			    MNT_ASYNC) != 0)
+				saved_mnt_flag |= MNT_ASYNC;
+			mp->mnt_flag &= ~saved_mnt_flag;
 			MNT_IUNLOCK(mp);
 			fs->fs_mtime = time_second;
 			/* check to see if we need to start softdep */
 			if ((fs->fs_flags & FS_DOSOFTDEP) &&
 			    (error = softdep_mount(devvp, mp, fs, td->td_ucred))){
-				vn_finished_write(mp);
+				fs->fs_ronly = 1;
+				MNT_ILOCK(mp);
+				mp->mnt_flag |= saved_mnt_flag;
+				MNT_IUNLOCK(mp);
+				vfs_write_resume(mp, 0);
 				return (error);
 			}
 			fs->fs_clean = 0;
 			if ((error = ffs_sbupdate(ump, MNT_WAIT, 0)) != 0) {
-				vn_finished_write(mp);
+				fs->fs_ronly = 1;
+				MNT_ILOCK(mp);
+				mp->mnt_flag |= saved_mnt_flag;
+				MNT_IUNLOCK(mp);
+				vfs_write_resume(mp, 0);
 				return (error);
 			}
 			if (fs->fs_snapinum[0] != 0)
 				ffs_snapshot_mount(mp);
-			vn_finished_write(mp);
+			vfs_write_resume(mp, 0);
 		}
 		/*
 		 * Soft updates is incompatible with "async",
@@ -1692,6 +1708,7 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 	ip->i_ea_refs = 0;
 	ip->i_nextclustercg = -1;
 	ip->i_flag = fs->fs_magic == FS_UFS1_MAGIC ? 0 : IN_UFS2;
+	ip->i_mode = 0; /* ensure error cases below throw away vnode */
 #ifdef QUOTA
 	{
 		int i;

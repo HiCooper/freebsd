@@ -99,8 +99,6 @@ struct fork_args {
 };
 #endif
 
-EVENTHANDLER_LIST_DECLARE(process_fork);
-
 /* ARGSUSED */
 int
 sys_fork(struct thread *td, struct fork_args *uap)
@@ -185,7 +183,7 @@ sys_rfork(struct thread *td, struct rfork_args *uap)
 	return (error);
 }
 
-int	nprocs = 1;		/* process 0 */
+int __exclusive_cache_line	nprocs = 1;		/* process 0 */
 int	lastpid = 0;
 SYSCTL_INT(_kern, OID_AUTO, lastpid, CTLFLAG_RD, &lastpid, 0,
     "Last used PID");
@@ -238,19 +236,18 @@ extern bitstr_t proc_id_grpidmap;
 extern bitstr_t proc_id_sessidmap;
 extern bitstr_t proc_id_reapmap;
 
+/*
+ * Find an unused process ID
+ *
+ * If RFHIGHPID is set (used during system boot), do not allocate
+ * low-numbered pids.
+ */
 static int
 fork_findpid(int flags)
 {
 	pid_t result;
 	int trypid;
 
-	/*
-	 * Find an unused process ID.  We remember a range of unused IDs
-	 * ready to use (from lastpid+1 through pidchecked-1).
-	 *
-	 * If RFHIGHPID is set (used during system boot), do not allocate
-	 * low-numbered pids.
-	 */
 	trypid = lastpid + 1;
 	if (flags & RFHIGHPID) {
 		if (trypid < 10)
@@ -280,7 +277,7 @@ retry:
 	if (bit_test(&proc_id_grpidmap, result) ||
 	    bit_test(&proc_id_sessidmap, result) ||
 	    bit_test(&proc_id_reapmap, result)) {
-		trypid++;
+		trypid = result + 1;
 		goto retry;
 	}
 
@@ -467,7 +464,8 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	 * Increase reference counts on shared objects.
 	 */
 	p2->p_flag = P_INMEM;
-	p2->p_flag2 = p1->p_flag2 & (P2_NOTRACE | P2_NOTRACE_EXEC | P2_TRAPCAP);
+	p2->p_flag2 = p1->p_flag2 & (P2_ASLR_DISABLE | P2_ASLR_ENABLE |
+	    P2_ASLR_IGNSTART | P2_NOTRACE | P2_NOTRACE_EXEC | P2_TRAPCAP);
 	p2->p_swtick = ticks;
 	if (p1->p_flag & P_PROFIL)
 		startprofclock(p2);
@@ -757,6 +755,51 @@ do_fork(struct thread *td, struct fork_req *fr, struct proc *p2, struct thread *
 	}
 }
 
+void
+fork_rfppwait(struct thread *td)
+{
+	struct proc *p, *p2;
+
+	MPASS(td->td_pflags & TDP_RFPPWAIT);
+
+	p = td->td_proc;
+	/*
+	 * Preserve synchronization semantics of vfork.  If
+	 * waiting for child to exec or exit, fork set
+	 * P_PPWAIT on child, and there we sleep on our proc
+	 * (in case of exit).
+	 *
+	 * Do it after the ptracestop() above is finished, to
+	 * not block our debugger until child execs or exits
+	 * to finish vfork wait.
+	 */
+	td->td_pflags &= ~TDP_RFPPWAIT;
+	p2 = td->td_rfppwait_p;
+again:
+	PROC_LOCK(p2);
+	while (p2->p_flag & P_PPWAIT) {
+		PROC_LOCK(p);
+		if (thread_suspend_check_needed()) {
+			PROC_UNLOCK(p2);
+			thread_suspend_check(0);
+			PROC_UNLOCK(p);
+			goto again;
+		} else {
+			PROC_UNLOCK(p);
+		}
+		cv_timedwait(&p2->p_pwait, &p2->p_mtx, hz);
+	}
+	PROC_UNLOCK(p2);
+
+	if (td->td_dbgflags & TDB_VFORK) {
+		PROC_LOCK(p);
+		if (p->p_ptevents & PTRACE_VFORK)
+			ptracestop(td, SIGTRAP, NULL);
+		td->td_dbgflags &= ~TDB_VFORK;
+		PROC_UNLOCK(p);
+	}
+}
+
 int
 fork1(struct thread *td, struct fork_req *fr)
 {
@@ -838,16 +881,20 @@ fork1(struct thread *td, struct fork_req *fr)
 	 * processes; don't let root exceed the limit.
 	 */
 	nprocs_new = atomic_fetchadd_int(&nprocs, 1) + 1;
-	if ((nprocs_new >= maxproc - 10 && priv_check_cred(td->td_ucred, PRIV_MAXPROC) != 0) || nprocs_new >= maxproc) {
-		error = EAGAIN;
-		sx_xlock(&allproc_lock);
-		if (ppsratecheck(&lastfail, &curfail, 1)) {
-			printf("maxproc limit exceeded by uid %u (pid %d); "
-			    "see tuning(7) and login.conf(5)\n",
-			    td->td_ucred->cr_ruid, p1->p_pid);
+	if (nprocs_new >= maxproc - 10) {
+		if (priv_check_cred(td->td_ucred, PRIV_MAXPROC) != 0 ||
+		    nprocs_new >= maxproc) {
+			error = EAGAIN;
+			sx_xlock(&allproc_lock);
+			if (ppsratecheck(&lastfail, &curfail, 1)) {
+				printf("maxproc limit exceeded by uid %u "
+				    "(pid %d); see tuning(7) and "
+				    "login.conf(5)\n",
+				    td->td_ucred->cr_ruid, p1->p_pid);
+			}
+			sx_xunlock(&allproc_lock);
+			goto fail2;
 		}
-		sx_xunlock(&allproc_lock);
-		goto fail2;
 	}
 
 	/*

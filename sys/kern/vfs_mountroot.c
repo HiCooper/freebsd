@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/conf.h>
 #include <sys/cons.h>
+#include <sys/eventhandler.h>
 #include <sys/fcntl.h>
 #include <sys/jail.h>
 #include <sys/kernel.h>
@@ -211,7 +212,7 @@ set_rootvnode(void)
 	struct proc *p;
 
 	if (VFS_ROOT(TAILQ_FIRST(&mountlist), LK_EXCLUSIVE, &rootvnode))
-		panic("Cannot find root vnode");
+		panic("set_rootvnode: Cannot find root vnode");
 
 	VOP_UNLOCK(rootvnode, 0);
 
@@ -309,7 +310,8 @@ vfs_mountroot_shuffle(struct thread *td, struct mount *mpdevfs)
 	if (mporoot != mpdevfs)
 		cache_purgevfs(mpdevfs, true);
 
-	VFS_ROOT(mporoot, LK_EXCLUSIVE, &vporoot);
+	if (VFS_ROOT(mporoot, LK_EXCLUSIVE, &vporoot))
+		panic("vfs_mountroot_shuffle: Cannot find root vnode");
 
 	VI_LOCK(vporoot);
 	vporoot->v_iflag &= ~VI_MOUNT;
@@ -388,7 +390,7 @@ vfs_mountroot_shuffle(struct thread *td, struct mount *mpdevfs)
 	if (mporoot == mpdevfs) {
 		vfs_unbusy(mpdevfs);
 		/* Unlink the no longer needed /dev/dev -> / symlink */
-		error = kern_unlinkat(td, AT_FDCWD, "/dev/dev",
+		error = kern_funlinkat(td, AT_FDCWD, "/dev/dev", FD_NONE,
 		    UIO_SYSSPACE, 0, 0);
 		if (error)
 			printf("mountroot: unable to unlink /dev/dev "

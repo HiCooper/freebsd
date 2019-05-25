@@ -81,6 +81,7 @@ device		cryptodev
 device		da
 device  	ds1307
 device		ds1553
+device		iflib
 device		em
 device		alc
 device  	dpaa
@@ -106,7 +107,7 @@ device  	sdhci
 device		sec
 device  	spibus
 device  	spigen
-device		tun
+device		tuntap
 device		uart
 options 	USB_DEBUG	# enable debug msgs
 #device		uhci

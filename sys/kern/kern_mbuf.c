@@ -46,7 +46,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/mutex.h>
 #include <sys/protosw.h>
 #include <sys/smp.h>
+#include <sys/socket.h>
 #include <sys/sysctl.h>
+
+#include <net/if.h>
+#include <net/if_var.h>
 
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
@@ -111,6 +115,10 @@ static quad_t maxmbufmem;	/* overall real memory limit for all mbufs */
 
 SYSCTL_QUAD(_kern_ipc, OID_AUTO, maxmbufmem, CTLFLAG_RDTUN | CTLFLAG_NOFETCH, &maxmbufmem, 0,
     "Maximum real memory allocatable to various mbuf types");
+
+static counter_u64_t snd_tag_count;
+SYSCTL_COUNTER_U64(_kern_ipc, OID_AUTO, num_snd_tags, CTLFLAG_RW,
+    &snd_tag_count, "# of active mbuf send tags");
 
 /*
  * tunable_mbinit() has to be run before any mbuf allocations are done.
@@ -378,6 +386,8 @@ mbuf_init(void *dummy)
 	 */
 	EVENTHANDLER_REGISTER(vm_lowmem, mb_reclaim, NULL,
 	    EVENTHANDLER_PRI_FIRST);
+
+	snd_tag_count = counter_u64_alloc(M_WAITOK);
 }
 SYSINIT(mbuf, SI_SUB_MBUF, SI_ORDER_FIRST, mbuf_init, NULL);
 
@@ -847,7 +857,8 @@ mb_free_ext(struct mbuf *m)
 	 */
 	if (m->m_flags & M_NOFREE) {
 		freembuf = 0;
-		KASSERT(m->m_ext.ext_type == EXT_EXTREF,
+		KASSERT(m->m_ext.ext_type == EXT_EXTREF ||
+		    m->m_ext.ext_type == EXT_RXRING,
 		    ("%s: no-free mbuf %p has wrong type", __func__, m));
 	} else
 		freembuf = 1;
@@ -890,6 +901,10 @@ mb_free_ext(struct mbuf *m)
 			KASSERT(m->m_ext.ext_free != NULL,
 			    ("%s: ext_free not set", __func__));
 			m->m_ext.ext_free(m);
+			break;
+		case EXT_RXRING:
+			KASSERT(m->m_ext.ext_free == NULL,
+			    ("%s: ext_free is set", __func__));
 			break;
 		default:
 			KASSERT(m->m_ext.ext_type == 0,
@@ -1031,8 +1046,7 @@ m_getjcl(int how, short type, int flags, int size)
  * Allocate a given length worth of mbufs and/or clusters (whatever fits
  * best) and return a pointer to the top of the allocated chain.  If an
  * existing mbuf chain is provided, then we will append the new chain
- * to the existing one but still return the top of the newly allocated
- * chain.
+ * to the existing one and return a pointer to the provided mbuf.
  */
 struct mbuf *
 m_getm2(struct mbuf *m, int len, int how, short type, int flags)
@@ -1144,4 +1158,25 @@ m_freem(struct mbuf *mb)
 	MBUF_PROBE1(m__freem, mb);
 	while (mb != NULL)
 		mb = m_free(mb);
+}
+
+void
+m_snd_tag_init(struct m_snd_tag *mst, struct ifnet *ifp)
+{
+
+	if_ref(ifp);
+	mst->ifp = ifp;
+	refcount_init(&mst->refcount, 1);
+	counter_u64_add(snd_tag_count, 1);
+}
+
+void
+m_snd_tag_destroy(struct m_snd_tag *mst)
+{
+	struct ifnet *ifp;
+
+	ifp = mst->ifp;
+	ifp->if_snd_tag_free(mst);
+	if_rele(ifp);
+	counter_u64_add(snd_tag_count, -1);
 }

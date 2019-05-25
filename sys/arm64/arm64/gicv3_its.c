@@ -42,8 +42,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/cpuset.h>
 #include <sys/endian.h>
 #include <sys/kernel.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
+#include <sys/mutex.h>
 #include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/rman.h>
@@ -1722,6 +1724,7 @@ static int
 gicv3_its_acpi_attach(device_t dev)
 {
 	struct gicv3_its_softc *sc;
+	struct gic_v3_devinfo *di;
 	int err;
 
 	sc = device_get_softc(dev);
@@ -1729,13 +1732,13 @@ gicv3_its_acpi_attach(device_t dev)
 	if (err != 0)
 		return (err);
 
-	sc->sc_pic = intr_pic_register(dev,
-	    device_get_unit(dev) + ACPI_MSI_XREF);
+	di = device_get_ivars(dev);
+	sc->sc_pic = intr_pic_register(dev, di->msi_xref);
 	intr_pic_add_handler(device_get_parent(dev), sc->sc_pic,
 	    gicv3_its_intr, sc, sc->sc_irq_base, sc->sc_irq_length);
 
 	/* Register this device to handle MSI interrupts */
-	intr_msi_register(dev, device_get_unit(dev) + ACPI_MSI_XREF);
+	intr_msi_register(dev, di->msi_xref);
 
 	return (0);
 }

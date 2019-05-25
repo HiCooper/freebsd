@@ -48,7 +48,7 @@
  */
 /*-
  * Copyright (c) 2003 Networks Associates Technology, Inc.
- * Copyright (c) 2014-2018 The FreeBSD Foundation
+ * Copyright (c) 2014-2019 The FreeBSD Foundation
  * All rights reserved.
  *
  * This software was developed for the FreeBSD Project by Jake Burkholder,
@@ -107,6 +107,7 @@ __FBSDID("$FreeBSD$");
  *	and to when physical maps must be made correct.
  */
 
+#include "opt_ddb.h"
 #include "opt_pmap.h"
 #include "opt_vm.h"
 
@@ -121,6 +122,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/mman.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
+#include <sys/rangeset.h>
 #include <sys/rwlock.h>
 #include <sys/sx.h>
 #include <sys/turnstile.h>
@@ -129,6 +131,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/sched.h>
 #include <sys/sysctl.h>
 #include <sys/smp.h>
+#ifdef DDB
+#include <sys/kdb.h>
+#include <ddb/ddb.h>
+#endif
 
 #include <vm/vm.h>
 #include <vm/vm_param.h>
@@ -155,6 +161,7 @@ __FBSDID("$FreeBSD$");
 #ifdef SMP
 #include <machine/smp.h>
 #endif
+#include <machine/sysarch.h>
 #include <machine/tss.h>
 
 static __inline boolean_t
@@ -285,6 +292,13 @@ pmap_modified_bit(pmap_t pmap)
 	return (mask);
 }
 
+static __inline pt_entry_t
+pmap_pku_mask_bit(pmap_t pmap)
+{
+
+	return (pmap->pm_type == PT_X86 ? X86_PG_PKU_MASK : 0);
+}
+
 #if !defined(DIAGNOSTIC)
 #ifdef __GNUC_GNU_INLINE__
 #define PMAP_INLINE	__attribute__((__gnu_inline__)) inline
@@ -353,10 +367,6 @@ pt_entry_t pg_nx;
 
 static SYSCTL_NODE(_vm, OID_AUTO, pmap, CTLFLAG_RD, 0, "VM/pmap parameters");
 
-static int pat_works = 1;
-SYSCTL_INT(_vm_pmap, OID_AUTO, pat_works, CTLFLAG_RD, &pat_works, 1,
-    "Is page attribute table fully functional?");
-
 static int pg_ps_enabled = 1;
 SYSCTL_INT(_vm_pmap, OID_AUTO, pg_ps_enabled, CTLFLAG_RDTUN | CTLFLAG_NOFETCH,
     &pg_ps_enabled, 0, "Are large page mappings enabled?");
@@ -411,6 +421,8 @@ static int pmap_flags = PMAP_PDE_SUPERPAGE;	/* flags for x86 pmaps */
 
 static vmem_t *large_vmem;
 static u_int lm_ents;
+#define	PMAP_LARGEMAP_MAX_ADDRESS()			\
+    (LARGEMAP_MIN_ADDRESS + NBPML4 * (u_long)lm_ents)
 
 int pmap_pcid_enabled = 1;
 SYSCTL_INT(_vm_pmap, OID_AUTO, pcid_enabled, CTLFLAG_RDTUN | CTLFLAG_NOFETCH,
@@ -428,6 +440,22 @@ static pml4_entry_t *pti_pml4;
 static vm_pindex_t pti_pg_idx;
 static bool pti_finalized;
 
+struct pmap_pkru_range {
+	struct rs_el	pkru_rs_el;
+	u_int		pkru_keyidx;
+	int		pkru_flags;
+};
+
+static uma_zone_t pmap_pkru_ranges_zone;
+static bool pmap_pkru_same(pmap_t pmap, vm_offset_t sva, vm_offset_t eva);
+static pt_entry_t pmap_pkru_get(pmap_t pmap, vm_offset_t va);
+static void pmap_pkru_on_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva);
+static void *pkru_dup_range(void *ctx, void *data);
+static void pkru_free_range(void *ctx, void *node);
+static int pmap_pkru_copy(pmap_t dst_pmap, pmap_t src_pmap);
+static int pmap_pkru_deassign(pmap_t pmap, vm_offset_t sva, vm_offset_t eva);
+static void pmap_pkru_deassign_all(pmap_t pmap);
+
 static int
 pmap_pcid_save_cnt_proc(SYSCTL_HANDLER_ARGS)
 {
@@ -440,28 +468,75 @@ pmap_pcid_save_cnt_proc(SYSCTL_HANDLER_ARGS)
 	}
 	return (sysctl_handle_64(oidp, &res, 0, req));
 }
-SYSCTL_PROC(_vm_pmap, OID_AUTO, pcid_save_cnt, CTLTYPE_U64 | CTLFLAG_RW |
+SYSCTL_PROC(_vm_pmap, OID_AUTO, pcid_save_cnt, CTLTYPE_U64 | CTLFLAG_RD |
     CTLFLAG_MPSAFE, NULL, 0, pmap_pcid_save_cnt_proc, "QU",
     "Count of saved TLB context on switch");
 
 static LIST_HEAD(, pmap_invl_gen) pmap_invl_gen_tracker =
     LIST_HEAD_INITIALIZER(&pmap_invl_gen_tracker);
 static struct mtx invl_gen_mtx;
-static u_long pmap_invl_gen = 0;
 /* Fake lock object to satisfy turnstiles interface. */
 static struct lock_object invl_gen_ts = {
 	.lo_name = "invlts",
 };
-
-static bool
-pmap_not_in_di(void)
-{
-
-	return (curthread->td_md.md_invl_gen.gen == 0);
-}
+static struct pmap_invl_gen pmap_invl_gen_head = {
+	.gen = 1,
+	.next = NULL,
+};
+static u_long pmap_invl_gen = 1;
 
 #define	PMAP_ASSERT_NOT_IN_DI() \
     KASSERT(pmap_not_in_di(), ("DI already started"))
+
+static bool
+pmap_di_locked(void)
+{
+	int tun;
+
+	if ((cpu_feature2 & CPUID2_CX16) == 0)
+		return (true);
+	tun = 0;
+	TUNABLE_INT_FETCH("vm.pmap.di_locked", &tun);
+	return (tun != 0);
+}
+
+static int
+sysctl_pmap_di_locked(SYSCTL_HANDLER_ARGS)
+{
+	int locked;
+
+	locked = pmap_di_locked();
+	return (sysctl_handle_int(oidp, &locked, 0, req));
+}
+SYSCTL_PROC(_vm_pmap, OID_AUTO, di_locked, CTLTYPE_INT | CTLFLAG_RDTUN |
+    CTLFLAG_MPSAFE, 0, 0, sysctl_pmap_di_locked, "",
+    "Locked delayed invalidation");
+
+static bool pmap_not_in_di_l(void);
+static bool pmap_not_in_di_u(void);
+DEFINE_IFUNC(, bool, pmap_not_in_di, (void))
+{
+
+	return (pmap_di_locked() ? pmap_not_in_di_l : pmap_not_in_di_u);
+}
+
+static bool
+pmap_not_in_di_l(void)
+{
+	struct pmap_invl_gen *invl_gen;
+
+	invl_gen = &curthread->td_md.md_invl_gen;
+	return (invl_gen->gen == 0);
+}
+
+static void
+pmap_thread_init_invl_gen_l(struct thread *td)
+{
+	struct pmap_invl_gen *invl_gen;
+
+	invl_gen = &td->td_md.md_invl_gen;
+	invl_gen->gen = 0;
+}
 
 /*
  * Start a new Delayed Invalidation (DI) block of code, executed by
@@ -472,7 +547,7 @@ pmap_not_in_di(void)
  * pmap active.
  */
 static void
-pmap_delayed_invl_started(void)
+pmap_delayed_invl_start_l(void)
 {
 	struct pmap_invl_gen *invl_gen;
 	u_long currgen;
@@ -504,13 +579,13 @@ pmap_delayed_invl_started(void)
  * current thread's DI.
  */
 static void
-pmap_delayed_invl_finished(void)
+pmap_delayed_invl_finish_l(void)
 {
 	struct pmap_invl_gen *invl_gen, *next;
 	struct turnstile *ts;
 
 	invl_gen = &curthread->td_md.md_invl_gen;
-	KASSERT(invl_gen->gen != 0, ("missed invl_started"));
+	KASSERT(invl_gen->gen != 0, ("missed invl_start"));
 	mtx_lock(&invl_gen_mtx);
 	next = LIST_NEXT(invl_gen, link);
 	if (next == NULL) {
@@ -529,6 +604,285 @@ pmap_delayed_invl_finished(void)
 	mtx_unlock(&invl_gen_mtx);
 	invl_gen->gen = 0;
 }
+
+static bool
+pmap_not_in_di_u(void)
+{
+	struct pmap_invl_gen *invl_gen;
+
+	invl_gen = &curthread->td_md.md_invl_gen;
+	return (((uintptr_t)invl_gen->next & PMAP_INVL_GEN_NEXT_INVALID) != 0);
+}
+
+static void
+pmap_thread_init_invl_gen_u(struct thread *td)
+{
+	struct pmap_invl_gen *invl_gen;
+
+	invl_gen = &td->td_md.md_invl_gen;
+	invl_gen->gen = 0;
+	invl_gen->next = (void *)PMAP_INVL_GEN_NEXT_INVALID;
+}
+
+static bool
+pmap_di_load_invl(struct pmap_invl_gen *ptr, struct pmap_invl_gen *out)
+{
+	uint64_t new_high, new_low, old_high, old_low;
+	char res;
+
+	old_low = new_low = 0;
+	old_high = new_high = (uintptr_t)0;
+
+	__asm volatile("lock;cmpxchg16b\t%1;sete\t%0"
+	    : "=r" (res), "+m" (*ptr), "+a" (old_low), "+d" (old_high)
+	    : "b"(new_low), "c" (new_high)
+	    : "memory", "cc");
+	if (res == 0) {
+		if ((old_high & PMAP_INVL_GEN_NEXT_INVALID) != 0)
+			return (false);
+		out->gen = old_low;
+		out->next = (void *)old_high;
+	} else {
+		out->gen = new_low;
+		out->next = (void *)new_high;
+	}
+	return (true);
+}
+
+static bool
+pmap_di_store_invl(struct pmap_invl_gen *ptr, struct pmap_invl_gen *old_val,
+    struct pmap_invl_gen *new_val)
+{
+	uint64_t new_high, new_low, old_high, old_low;
+	char res;
+
+	new_low = new_val->gen;
+	new_high = (uintptr_t)new_val->next;
+	old_low = old_val->gen;
+	old_high = (uintptr_t)old_val->next;
+
+	__asm volatile("lock;cmpxchg16b\t%1;sete\t%0"
+	    : "=r" (res), "+m" (*ptr), "+a" (old_low), "+d" (old_high)
+	    : "b"(new_low), "c" (new_high)
+	    : "memory", "cc");
+	return (res);
+}
+
+#ifdef PV_STATS
+static long invl_start_restart;
+SYSCTL_LONG(_vm_pmap, OID_AUTO, invl_start_restart, CTLFLAG_RD,
+    &invl_start_restart, 0,
+    "");
+static long invl_finish_restart;
+SYSCTL_LONG(_vm_pmap, OID_AUTO, invl_finish_restart, CTLFLAG_RD,
+    &invl_finish_restart, 0,
+    "");
+static int invl_max_qlen;
+SYSCTL_INT(_vm_pmap, OID_AUTO, invl_max_qlen, CTLFLAG_RD,
+    &invl_max_qlen, 0,
+    "");
+#endif
+
+static struct lock_delay_config __read_frequently di_delay;
+LOCK_DELAY_SYSINIT_DEFAULT(di_delay);
+
+static void
+pmap_delayed_invl_start_u(void)
+{
+	struct pmap_invl_gen *invl_gen, *p, prev, new_prev;
+	struct thread *td;
+	struct lock_delay_arg lda;
+	uintptr_t prevl;
+	u_char pri;
+#ifdef PV_STATS
+	int i, ii;
+#endif
+
+	td = curthread;
+	invl_gen = &td->td_md.md_invl_gen;
+	PMAP_ASSERT_NOT_IN_DI();
+	lock_delay_arg_init(&lda, &di_delay);
+	invl_gen->saved_pri = 0;
+	pri = td->td_base_pri;
+	if (pri > PVM) {
+		thread_lock(td);
+		pri = td->td_base_pri;
+		if (pri > PVM) {
+			invl_gen->saved_pri = pri;
+			sched_prio(td, PVM);
+		}
+		thread_unlock(td);
+	}
+again:
+	PV_STAT(i = 0);
+	for (p = &pmap_invl_gen_head;; p = prev.next) {
+		PV_STAT(i++);
+		prevl = atomic_load_ptr(&p->next);
+		if ((prevl & PMAP_INVL_GEN_NEXT_INVALID) != 0) {
+			PV_STAT(atomic_add_long(&invl_start_restart, 1));
+			lock_delay(&lda);
+			goto again;
+		}
+		if (prevl == 0)
+			break;
+		prev.next = (void *)prevl;
+	}
+#ifdef PV_STATS
+	if ((ii = invl_max_qlen) < i)
+		atomic_cmpset_int(&invl_max_qlen, ii, i);
+#endif
+
+	if (!pmap_di_load_invl(p, &prev) || prev.next != NULL) {
+		PV_STAT(atomic_add_long(&invl_start_restart, 1));
+		lock_delay(&lda);
+		goto again;
+	}
+
+	new_prev.gen = prev.gen;
+	new_prev.next = invl_gen;
+	invl_gen->gen = prev.gen + 1;
+
+	/* Formal fence between store to invl->gen and updating *p. */
+	atomic_thread_fence_rel();
+
+	/*
+	 * After inserting an invl_gen element with invalid bit set,
+	 * this thread blocks any other thread trying to enter the
+	 * delayed invalidation block.  Do not allow to remove us from
+	 * the CPU, because it causes starvation for other threads.
+	 */
+	critical_enter();
+
+	/*
+	 * ABA for *p is not possible there, since p->gen can only
+	 * increase.  So if the *p thread finished its di, then
+	 * started a new one and got inserted into the list at the
+	 * same place, its gen will appear greater than the previously
+	 * read gen.
+	 */
+	if (!pmap_di_store_invl(p, &prev, &new_prev)) {
+		critical_exit();
+		PV_STAT(atomic_add_long(&invl_start_restart, 1));
+		lock_delay(&lda);
+		goto again;
+	}
+
+	/*
+	 * There we clear PMAP_INVL_GEN_NEXT_INVALID in
+	 * invl_gen->next, allowing other threads to iterate past us.
+	 * pmap_di_store_invl() provides fence between the generation
+	 * write and the update of next.
+	 */
+	invl_gen->next = NULL;
+	critical_exit();
+}
+
+static bool
+pmap_delayed_invl_finish_u_crit(struct pmap_invl_gen *invl_gen,
+    struct pmap_invl_gen *p)
+{
+	struct pmap_invl_gen prev, new_prev;
+	u_long mygen;
+
+	/*
+	 * Load invl_gen->gen after setting invl_gen->next
+	 * PMAP_INVL_GEN_NEXT_INVALID.  This prevents larger
+	 * generations to propagate to our invl_gen->gen.  Lock prefix
+	 * in atomic_set_ptr() worked as seq_cst fence.
+	 */
+	mygen = atomic_load_long(&invl_gen->gen);
+
+	if (!pmap_di_load_invl(p, &prev) || prev.next != invl_gen)
+		return (false);
+
+	KASSERT(prev.gen < mygen,
+	    ("invalid di gen sequence %lu %lu", prev.gen, mygen));
+	new_prev.gen = mygen;
+	new_prev.next = (void *)((uintptr_t)invl_gen->next &
+	    ~PMAP_INVL_GEN_NEXT_INVALID);
+
+	/* Formal fence between load of prev and storing update to it. */
+	atomic_thread_fence_rel();
+
+	return (pmap_di_store_invl(p, &prev, &new_prev));
+}
+
+static void
+pmap_delayed_invl_finish_u(void)
+{
+	struct pmap_invl_gen *invl_gen, *p;
+	struct thread *td;
+	struct lock_delay_arg lda;
+	uintptr_t prevl;
+
+	td = curthread;
+	invl_gen = &td->td_md.md_invl_gen;
+	KASSERT(invl_gen->gen != 0, ("missed invl_start: gen 0"));
+	KASSERT(((uintptr_t)invl_gen->next & PMAP_INVL_GEN_NEXT_INVALID) == 0,
+	    ("missed invl_start: INVALID"));
+	lock_delay_arg_init(&lda, &di_delay);
+
+again:
+	for (p = &pmap_invl_gen_head; p != NULL; p = (void *)prevl) {
+		prevl = atomic_load_ptr(&p->next);
+		if ((prevl & PMAP_INVL_GEN_NEXT_INVALID) != 0) {
+			PV_STAT(atomic_add_long(&invl_finish_restart, 1));
+			lock_delay(&lda);
+			goto again;
+		}
+		if ((void *)prevl == invl_gen)
+			break;
+	}
+
+	/*
+	 * It is legitimate to not find ourself on the list if a
+	 * thread before us finished its DI and started it again.
+	 */
+	if (__predict_false(p == NULL)) {
+		PV_STAT(atomic_add_long(&invl_finish_restart, 1));
+		lock_delay(&lda);
+		goto again;
+	}
+
+	critical_enter();
+	atomic_set_ptr((uintptr_t *)&invl_gen->next,
+	    PMAP_INVL_GEN_NEXT_INVALID);
+	if (!pmap_delayed_invl_finish_u_crit(invl_gen, p)) {
+		atomic_clear_ptr((uintptr_t *)&invl_gen->next,
+		    PMAP_INVL_GEN_NEXT_INVALID);
+		critical_exit();
+		PV_STAT(atomic_add_long(&invl_finish_restart, 1));
+		lock_delay(&lda);
+		goto again;
+	}
+	critical_exit();
+	if (invl_gen->saved_pri != 0) {
+		thread_lock(td);
+		sched_prio(td, invl_gen->saved_pri);
+		thread_unlock(td);
+	}
+}
+
+#ifdef DDB
+DB_SHOW_COMMAND(di_queue, pmap_di_queue)
+{
+	struct pmap_invl_gen *p, *pn;
+	struct thread *td;
+	uintptr_t nextl;
+	bool first;
+
+	for (p = &pmap_invl_gen_head, first = true; p != NULL; p = pn,
+	    first = false) {
+		nextl = atomic_load_ptr(&p->next);
+		pn = (void *)(nextl & ~PMAP_INVL_GEN_NEXT_INVALID);
+		td = first ? NULL : __containerof(p, struct thread,
+		    td_md.md_invl_gen);
+		db_printf("gen %lu inv %d td %p tid %d\n", p->gen,
+		    (nextl & PMAP_INVL_GEN_NEXT_INVALID) != 0, td,
+		    td != NULL ? td->td_tid : -1);
+	}
+}
+#endif
 
 #ifdef PV_STATS
 static long invl_wait;
@@ -558,7 +912,7 @@ pmap_delayed_invl_genp(vm_page_t m)
  * processor.
  */
 static void
-pmap_delayed_invl_wait(vm_page_t m)
+pmap_delayed_invl_wait_l(vm_page_t m)
 {
 	struct turnstile *ts;
 	u_long *m_gen;
@@ -582,6 +936,54 @@ pmap_delayed_invl_wait(vm_page_t m)
 	}
 }
 
+static void
+pmap_delayed_invl_wait_u(vm_page_t m)
+{
+	u_long *m_gen;
+#ifdef PV_STATS
+	bool accounted = false;
+#endif
+
+	m_gen = pmap_delayed_invl_genp(m);
+	while (*m_gen > atomic_load_long(&pmap_invl_gen_head.gen)) {
+#ifdef PV_STATS
+		if (!accounted) {
+			atomic_add_long(&invl_wait, 1);
+			accounted = true;
+		}
+#endif
+		kern_yield(PRI_USER);
+	}
+}
+
+DEFINE_IFUNC(, void, pmap_thread_init_invl_gen, (struct thread *))
+{
+
+	return (pmap_di_locked() ? pmap_thread_init_invl_gen_l :
+	    pmap_thread_init_invl_gen_u);
+}
+
+DEFINE_IFUNC(static, void, pmap_delayed_invl_start, (void))
+{
+
+	return (pmap_di_locked() ? pmap_delayed_invl_start_l :
+	    pmap_delayed_invl_start_u);
+}
+
+DEFINE_IFUNC(static, void, pmap_delayed_invl_finish, (void))
+{
+
+	return (pmap_di_locked() ? pmap_delayed_invl_finish_l :
+	    pmap_delayed_invl_finish_u);
+}
+
+DEFINE_IFUNC(static, void, pmap_delayed_invl_wait, (vm_page_t))
+{
+
+	return (pmap_di_locked() ? pmap_delayed_invl_wait_l :
+	    pmap_delayed_invl_wait_u);
+}
+
 /*
  * Mark the page m's PV list as participating in the current thread's
  * DI block.  Any threads concurrently using m's PV list to remove or
@@ -591,7 +993,7 @@ pmap_delayed_invl_wait(vm_page_t m)
  * The function works by setting the DI generation number for m's PV
  * list to at least the DI generation number of the current thread.
  * This forces a caller of pmap_delayed_invl_wait() to block until
- * current thread calls pmap_delayed_invl_finished().
+ * current thread calls pmap_delayed_invl_finish().
  */
 static void
 pmap_delayed_invl_page(vm_page_t m)
@@ -660,6 +1062,7 @@ static void pmap_invalidate_pde_page(pmap_t pmap, vm_offset_t va,
 		    pd_entry_t pde);
 static void pmap_kenter_attr(vm_offset_t va, vm_paddr_t pa, int mode);
 static vm_page_t pmap_large_map_getptp_unlocked(void);
+static vm_paddr_t pmap_large_map_kextract(vm_offset_t va);
 static void pmap_pde_attr(pd_entry_t *pde, int cache_bits, int mask);
 #if VM_NRESERVLEVEL > 0
 static void pmap_promote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
@@ -1222,7 +1625,6 @@ pmap_bootstrap(vm_paddr_t *firstaddr)
 void
 pmap_init_pat(void)
 {
-	int pat_table[PAT_INDEX_SIZE];
 	uint64_t pat_msr;
 	u_long cr0, cr4;
 	int i;
@@ -1233,44 +1635,31 @@ pmap_init_pat(void)
 
 	/* Set default PAT index table. */
 	for (i = 0; i < PAT_INDEX_SIZE; i++)
-		pat_table[i] = -1;
-	pat_table[PAT_WRITE_BACK] = 0;
-	pat_table[PAT_WRITE_THROUGH] = 1;
-	pat_table[PAT_UNCACHEABLE] = 3;
-	pat_table[PAT_WRITE_COMBINING] = 3;
-	pat_table[PAT_WRITE_PROTECTED] = 3;
-	pat_table[PAT_UNCACHED] = 3;
+		pat_index[i] = -1;
+	pat_index[PAT_WRITE_BACK] = 0;
+	pat_index[PAT_WRITE_THROUGH] = 1;
+	pat_index[PAT_UNCACHEABLE] = 3;
+	pat_index[PAT_WRITE_COMBINING] = 6;
+	pat_index[PAT_WRITE_PROTECTED] = 5;
+	pat_index[PAT_UNCACHED] = 2;
 
-	/* Initialize default PAT entries. */
+	/*
+	 * Initialize default PAT entries.
+	 * Leave the indices 0-3 at the default of WB, WT, UC-, and UC.
+	 * Program 5 and 6 as WP and WC.
+	 *
+	 * Leave 4 and 7 as WB and UC.  Note that a recursive page table
+	 * mapping for a 2M page uses a PAT value with the bit 3 set due
+	 * to its overload with PG_PS.
+	 */
 	pat_msr = PAT_VALUE(0, PAT_WRITE_BACK) |
 	    PAT_VALUE(1, PAT_WRITE_THROUGH) |
 	    PAT_VALUE(2, PAT_UNCACHED) |
 	    PAT_VALUE(3, PAT_UNCACHEABLE) |
 	    PAT_VALUE(4, PAT_WRITE_BACK) |
-	    PAT_VALUE(5, PAT_WRITE_THROUGH) |
-	    PAT_VALUE(6, PAT_UNCACHED) |
+	    PAT_VALUE(5, PAT_WRITE_PROTECTED) |
+	    PAT_VALUE(6, PAT_WRITE_COMBINING) |
 	    PAT_VALUE(7, PAT_UNCACHEABLE);
-
-	if (pat_works) {
-		/*
-		 * Leave the indices 0-3 at the default of WB, WT, UC-, and UC.
-		 * Program 5 and 6 as WP and WC.
-		 * Leave 4 and 7 as WB and UC.
-		 */
-		pat_msr &= ~(PAT_MASK(5) | PAT_MASK(6));
-		pat_msr |= PAT_VALUE(5, PAT_WRITE_PROTECTED) |
-		    PAT_VALUE(6, PAT_WRITE_COMBINING);
-		pat_table[PAT_UNCACHED] = 2;
-		pat_table[PAT_WRITE_PROTECTED] = 5;
-		pat_table[PAT_WRITE_COMBINING] = 6;
-	} else {
-		/*
-		 * Just replace PAT Index 2 with WC instead of UC-.
-		 */
-		pat_msr &= ~PAT_MASK(2);
-		pat_msr |= PAT_VALUE(2, PAT_WRITE_COMBINING);
-		pat_table[PAT_WRITE_COMBINING] = 2;
-	}
 
 	/* Disable PGE. */
 	cr4 = rcr4();
@@ -1286,8 +1675,6 @@ pmap_init_pat(void)
 
 	/* Update PAT and index table. */
 	wrmsr(MSR_PAT, pat_msr);
-	for (i = 0; i < PAT_INDEX_SIZE; i++)
-		pat_index[i] = pat_table[i];
 
 	/* Flush caches and TLBs again. */
 	wbinvd();
@@ -1814,8 +2201,7 @@ pmap_invalidate_page_nopcid(pmap_t pmap, vm_offset_t va)
 {
 }
 
-DEFINE_IFUNC(static, void, pmap_invalidate_page_mode, (pmap_t, vm_offset_t),
-    static)
+DEFINE_IFUNC(static, void, pmap_invalidate_page_mode, (pmap_t, vm_offset_t))
 {
 
 	if (pmap_pcid_enabled)
@@ -1912,7 +2298,7 @@ pmap_invalidate_range_nopcid(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 }
 
 DEFINE_IFUNC(static, void, pmap_invalidate_range_mode, (pmap_t, vm_offset_t,
-    vm_offset_t), static)
+    vm_offset_t))
 {
 
 	if (pmap_pcid_enabled)
@@ -2029,7 +2415,7 @@ pmap_invalidate_all_nopcid(pmap_t pmap)
 		invltlb();
 }
 
-DEFINE_IFUNC(static, void, pmap_invalidate_all_mode, (pmap_t), static)
+DEFINE_IFUNC(static, void, pmap_invalidate_all_mode, (pmap_t))
 {
 
 	if (pmap_pcid_enabled)
@@ -2308,7 +2694,7 @@ pmap_invalidate_pde_page(pmap_t pmap, vm_offset_t va, pd_entry_t pde)
 }
 
 DEFINE_IFUNC(, void, pmap_invalidate_cache_range,
-    (vm_offset_t sva, vm_offset_t eva), static)
+    (vm_offset_t sva, vm_offset_t eva))
 {
 
 	if ((cpu_feature & CPUID_SS) != 0)
@@ -2578,6 +2964,9 @@ pmap_kextract(vm_offset_t va)
 
 	if (va >= DMAP_MIN_ADDRESS && va < DMAP_MAX_ADDRESS) {
 		pa = DMAP_TO_PHYS(va);
+	} else if (LARGEMAP_MIN_ADDRESS <= va &&
+	    va < PMAP_LARGEMAP_MAX_ADDRESS()) {
+		pa = pmap_large_map_kextract(va);
 	} else {
 		pde = *vtopde(va);
 		if (pde & PG_PS) {
@@ -2848,6 +3237,8 @@ pmap_unuse_pt(pmap_t pmap, vm_offset_t va, pd_entry_t ptepde,
 void
 pmap_pinit0(pmap_t pmap)
 {
+	struct proc *p;
+	struct thread *td;
 	int i;
 
 	PMAP_LOCK_INIT(pmap);
@@ -2866,6 +3257,20 @@ pmap_pinit0(pmap_t pmap)
 		pmap->pm_pcids[i].pm_gen = 1;
 	}
 	pmap_activate_boot(pmap);
+	td = curthread;
+	if (pti) {
+		p = td->td_proc;
+		PROC_LOCK(p);
+		p->p_md.md_flags |= P_MD_KPTI;
+		PROC_UNLOCK(p);
+	}
+	pmap_thread_init_invl_gen(td);
+
+	if ((cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0) {
+		pmap_pkru_ranges_zone = uma_zcreate("pkru ranges",
+		    sizeof(struct pmap_pkru_range), NULL, NULL, NULL, NULL,
+		    UMA_ALIGN_PTR, 0);
+	}
 }
 
 void
@@ -2946,13 +3351,17 @@ pmap_pinit_type(pmap_t pmap, enum pmap_type pm_type, int flags)
 	if (pm_type == PT_X86) {
 		pmap->pm_cr3 = pml4phys;
 		pmap_pinit_pml4(pml4pg);
-		if (pti) {
+		if ((curproc->p_md.md_flags & P_MD_KPTI) != 0) {
 			pml4pgu = vm_page_alloc(NULL, 0, VM_ALLOC_NORMAL |
 			    VM_ALLOC_NOOBJ | VM_ALLOC_WIRED | VM_ALLOC_WAITOK);
 			pmap->pm_pml4u = (pml4_entry_t *)PHYS_TO_DMAP(
 			    VM_PAGE_TO_PHYS(pml4pgu));
 			pmap_pinit_pml4_pti(pml4pgu);
 			pmap->pm_ucr3 = VM_PAGE_TO_PHYS(pml4pgu);
+		}
+		if ((cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0) {
+			rangeset_init(&pmap->pm_pkru, pkru_dup_range,
+			    pkru_free_range, pmap, M_NOWAIT);
 		}
 	}
 
@@ -3250,6 +3659,9 @@ pmap_release(pmap_t pmap)
 		vm_page_unwire_noq(m);
 		vm_page_free(m);
 	}
+	if (pmap->pm_type == PT_X86 &&
+	    (cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0)
+		rangeset_fini(&pmap->pm_pkru);
 }
 
 static int
@@ -3410,7 +3822,7 @@ reclaim_pv_chunk_leave_pmap(pmap_t pmap, pmap_t locked_pmap, bool start_di)
 	if (pmap != locked_pmap)
 		PMAP_UNLOCK(pmap);
 	if (start_di)
-		pmap_delayed_invl_finished();
+		pmap_delayed_invl_finish();
 }
 
 /*
@@ -3493,13 +3905,13 @@ reclaim_pv_chunk(pmap_t locked_pmap, struct rwlock **lockp)
 				RELEASE_PV_LIST_LOCK(lockp);
 				PMAP_LOCK(pmap);
 				if (start_di)
-					pmap_delayed_invl_started();
+					pmap_delayed_invl_start();
 				mtx_lock(&pv_chunks_mutex);
 				continue;
 			} else if (pmap != locked_pmap) {
 				if (PMAP_TRYLOCK(pmap)) {
 					if (start_di)
-						pmap_delayed_invl_started();
+						pmap_delayed_invl_start();
 					mtx_lock(&pv_chunks_mutex);
 					continue;
 				} else {
@@ -3512,7 +3924,7 @@ reclaim_pv_chunk(pmap_t locked_pmap, struct rwlock **lockp)
 					goto next_chunk;
 				}
 			} else if (start_di)
-				pmap_delayed_invl_started();
+				pmap_delayed_invl_start();
 			PG_G = pmap_global_bit(pmap);
 			PG_A = pmap_accessed_bit(pmap);
 			PG_M = pmap_modified_bit(pmap);
@@ -4080,7 +4492,7 @@ pmap_demote_pde_locked(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
 {
 	pd_entry_t newpde, oldpde;
 	pt_entry_t *firstpte, newpte;
-	pt_entry_t PG_A, PG_G, PG_M, PG_RW, PG_V;
+	pt_entry_t PG_A, PG_G, PG_M, PG_PKU_MASK, PG_RW, PG_V;
 	vm_paddr_t mptepa;
 	vm_page_t mpte;
 	struct spglist free;
@@ -4093,6 +4505,7 @@ pmap_demote_pde_locked(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
 	PG_RW = pmap_rw_bit(pmap);
 	PG_V = pmap_valid_bit(pmap);
 	PG_PTE_CACHE = pmap_cache_mask(pmap, 0);
+	PG_PKU_MASK = pmap_pku_mask_bit(pmap);
 
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
 	oldpde = *pde;
@@ -4130,8 +4543,10 @@ pmap_demote_pde_locked(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
 			    " in pmap %p", va, pmap);
 			return (FALSE);
 		}
-		if (va < VM_MAXUSER_ADDRESS)
+		if (va < VM_MAXUSER_ADDRESS) {
+			mpte->wire_count = NPTEPG;
 			pmap_resident_count_inc(pmap, 1);
+		}
 	}
 	mptepa = VM_PAGE_TO_PHYS(mpte);
 	firstpte = (pt_entry_t *)PHYS_TO_DMAP(mptepa);
@@ -4144,12 +4559,12 @@ pmap_demote_pde_locked(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
 	newpte = pmap_swap_pat(pmap, newpte);
 
 	/*
-	 * If the page table page is new, initialize it.
+	 * If the page table page is not leftover from an earlier promotion,
+	 * initialize it.
 	 */
-	if (mpte->wire_count == 1) {
-		mpte->wire_count = NPTEPG;
+	if ((oldpde & PG_PROMOTED) == 0)
 		pmap_fill_ptp(firstpte, newpte);
-	}
+
 	KASSERT((*firstpte & PG_FRAME) == (newpte & PG_FRAME),
 	    ("pmap_demote_pde: firstpte and newpte map different physical"
 	    " addresses"));
@@ -4430,7 +4845,7 @@ pmap_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 	anyvalid = 0;
 	SLIST_INIT(&free);
 
-	pmap_delayed_invl_started();
+	pmap_delayed_invl_start();
 	PMAP_LOCK(pmap);
 
 	/*
@@ -4525,8 +4940,9 @@ pmap_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
 out:
 	if (anyvalid)
 		pmap_invalidate_all(pmap);
+	pmap_pkru_on_remove(pmap, sva, eva);
 	PMAP_UNLOCK(pmap);
-	pmap_delayed_invl_finished();
+	pmap_delayed_invl_finish();
 	vm_page_free_pages_toq(&free, true);
 }
 
@@ -4710,8 +5126,8 @@ pmap_protect(pmap_t pmap, vm_offset_t sva, vm_offset_t eva, vm_prot_t prot)
 	/*
 	 * Although this function delays and batches the invalidation
 	 * of stale TLB entries, it does not need to call
-	 * pmap_delayed_invl_started() and
-	 * pmap_delayed_invl_finished(), because it does not
+	 * pmap_delayed_invl_start() and
+	 * pmap_delayed_invl_finish(), because it does not
 	 * ordinarily destroy mappings.  Stale TLB entries from
 	 * protection-only changes need only be invalidated before the
 	 * pmap lock is released, because protection-only changes do
@@ -4836,7 +5252,7 @@ pmap_promote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
 {
 	pd_entry_t newpde;
 	pt_entry_t *firstpte, oldpte, pa, *pte;
-	pt_entry_t PG_G, PG_A, PG_M, PG_RW, PG_V;
+	pt_entry_t PG_G, PG_A, PG_M, PG_RW, PG_V, PG_PKU_MASK;
 	vm_page_t mpte;
 	int PG_PTE_CACHE;
 
@@ -4845,6 +5261,7 @@ pmap_promote_pde(pmap_t pmap, pd_entry_t *pde, vm_offset_t va,
 	PG_M = pmap_modified_bit(pmap);
 	PG_V = pmap_valid_bit(pmap);
 	PG_RW = pmap_rw_bit(pmap);
+	PG_PKU_MASK = pmap_pku_mask_bit(pmap);
 	PG_PTE_CACHE = pmap_cache_mask(pmap, 0);
 
 	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
@@ -5072,6 +5489,8 @@ retry:
 
 	origpte = *pte;
 	pv = NULL;
+	if (va < VM_MAXUSER_ADDRESS && pmap->pm_type == PT_X86)
+		newpte |= pmap_pkru_get(pmap, va);
 
 	/*
 	 * Is the specified virtual address already mapped?
@@ -5278,6 +5697,8 @@ pmap_enter_pde(pmap_t pmap, vm_offset_t va, pd_entry_t newpde, u_int flags,
 	pt_entry_t PG_G, PG_RW, PG_V;
 	vm_page_t mt, pdpg;
 
+	KASSERT(pmap == kernel_pmap || (newpde & PG_W) == 0,
+	    ("pmap_enter_pde: cannot create wired user mapping"));
 	PG_G = pmap_global_bit(pmap);
 	PG_RW = pmap_rw_bit(pmap);
 	KASSERT((newpde & (pmap_modified_bit(pmap) | PG_RW)) != PG_RW,
@@ -5291,6 +5712,25 @@ pmap_enter_pde(pmap_t pmap, vm_offset_t va, pd_entry_t newpde, u_int flags,
 		    " in pmap %p", va, pmap);
 		return (KERN_RESOURCE_SHORTAGE);
 	}
+
+	/*
+	 * If pkru is not same for the whole pde range, return failure
+	 * and let vm_fault() cope.  Check after pde allocation, since
+	 * it could sleep.
+	 */
+	if (!pmap_pkru_same(pmap, va, va + NBPDR)) {
+		SLIST_INIT(&free);
+		if (pmap_unwire_ptp(pmap, va, pdpg, &free)) {
+			pmap_invalidate_page(pmap, va);
+			vm_page_free_pages_toq(&free, true);
+		}
+		return (KERN_FAILURE);
+	}
+	if (va < VM_MAXUSER_ADDRESS && pmap->pm_type == PT_X86) {
+		newpde &= ~X86_PG_PKU_MASK;
+		newpde |= pmap_pkru_get(pmap, va);
+	}
+
 	pde = (pd_entry_t *)PHYS_TO_DMAP(VM_PAGE_TO_PHYS(pdpg));
 	pde = &pde[pmap_pde_index(va)];
 	oldpde = *pde;
@@ -5316,11 +5756,11 @@ pmap_enter_pde(pmap_t pmap, vm_offset_t va, pd_entry_t newpde, u_int flags,
 			if ((oldpde & PG_G) == 0)
 				pmap_invalidate_pde_page(pmap, va, oldpde);
 		} else {
-			pmap_delayed_invl_started();
+			pmap_delayed_invl_start();
 			if (pmap_remove_ptes(pmap, va, va + NBPDR, pde, &free,
 			    lockp))
 		               pmap_invalidate_all(pmap);
-			pmap_delayed_invl_finished();
+			pmap_delayed_invl_finish();
 		}
 		vm_page_free_pages_toq(&free, true);
 		if (va >= VM_MAXUSER_ADDRESS) {
@@ -5453,8 +5893,7 @@ pmap_enter_quick_locked(pmap_t pmap, vm_offset_t va, vm_page_t m,
     vm_prot_t prot, vm_page_t mpte, struct rwlock **lockp)
 {
 	struct spglist free;
-	pt_entry_t *pte, PG_V;
-	vm_paddr_t pa;
+	pt_entry_t newpte, *pte, PG_V;
 
 	KASSERT(va < kmi.clean_sva || va >= kmi.clean_eva ||
 	    (m->oflags & VPO_UNMANAGED) != 0,
@@ -5544,17 +5983,15 @@ pmap_enter_quick_locked(pmap_t pmap, vm_offset_t va, vm_page_t m,
 	 */
 	pmap_resident_count_inc(pmap, 1);
 
-	pa = VM_PAGE_TO_PHYS(m) | pmap_cache_bits(pmap, m->md.pat_mode, 0);
+	newpte = VM_PAGE_TO_PHYS(m) | PG_V |
+	    pmap_cache_bits(pmap, m->md.pat_mode, 0);
+	if ((m->oflags & VPO_UNMANAGED) == 0)
+		newpte |= PG_MANAGED;
 	if ((prot & VM_PROT_EXECUTE) == 0)
-		pa |= pg_nx;
-
-	/*
-	 * Now validate mapping with RO protection
-	 */
-	if ((m->oflags & VPO_UNMANAGED) != 0)
-		pte_store(pte, pa | PG_V | PG_U);
-	else
-		pte_store(pte, pa | PG_V | PG_U | PG_MANAGED);
+		newpte |= pg_nx;
+	if (va < VM_MAXUSER_ADDRESS)
+		newpte |= PG_U | pmap_pkru_get(pmap, va);
+	pte_store(pte, newpte);
 	return (mpte);
 }
 
@@ -5679,7 +6116,7 @@ pmap_object_init_pt(pmap_t pmap, vm_offset_t addr, vm_object_t object,
  *	The wired attribute of the page table entry is not a hardware
  *	feature, so there is no need to invalidate any TLB entries.
  *	Since pmap_demote_pde() for the wired entry must never fail,
- *	pmap_delayed_invl_started()/finished() calls around the
+ *	pmap_delayed_invl_start()/finish() calls around the
  *	function are not needed.
  */
 void
@@ -5929,6 +6366,36 @@ out:
 	PMAP_UNLOCK(dst_pmap);
 }
 
+int
+pmap_vmspace_copy(pmap_t dst_pmap, pmap_t src_pmap)
+{
+	int error;
+
+	if (dst_pmap->pm_type != src_pmap->pm_type ||
+	    dst_pmap->pm_type != PT_X86 ||
+	    (cpu_stdext_feature2 & CPUID_STDEXT2_PKU) == 0)
+		return (0);
+	for (;;) {
+		if (dst_pmap < src_pmap) {
+			PMAP_LOCK(dst_pmap);
+			PMAP_LOCK(src_pmap);
+		} else {
+			PMAP_LOCK(src_pmap);
+			PMAP_LOCK(dst_pmap);
+		}
+		error = pmap_pkru_copy(dst_pmap, src_pmap);
+		/* Clean up partial copy on failure due to no memory. */
+		if (error == ENOMEM)
+			pmap_pkru_deassign_all(dst_pmap);
+		PMAP_UNLOCK(src_pmap);
+		PMAP_UNLOCK(dst_pmap);
+		if (error != ENOMEM)
+			break;
+		vm_wait(NULL);
+	}
+	return (error);
+}
+
 /*
  * Zero the specified hardware page.
  */
@@ -6148,8 +6615,8 @@ pmap_page_is_mapped(vm_page_t m)
  *
  * Although this function destroys all of the pmap's managed,
  * non-wired mappings, it can delay and batch the invalidation of TLB
- * entries without calling pmap_delayed_invl_started() and
- * pmap_delayed_invl_finished().  Because the pmap is not active on
+ * entries without calling pmap_delayed_invl_start() and
+ * pmap_delayed_invl_finish().  Because the pmap is not active on
  * any other processor, none of these TLB entries will ever be used
  * before their eventual invalidation.  Consequently, there is no need
  * for either pmap_remove_all() or pmap_remove_write() to wait for
@@ -6328,6 +6795,7 @@ pmap_remove_pages(pmap_t pmap)
 	if (lock != NULL)
 		rw_wunlock(lock);
 	pmap_invalidate_all(pmap);
+	pmap_pkru_deassign_all(pmap);
 	PMAP_UNLOCK(pmap);
 	vm_page_free_pages_toq(&free, true);
 }
@@ -6853,7 +7321,7 @@ pmap_advise(pmap_t pmap, vm_offset_t sva, vm_offset_t eva, int advice)
 	PG_V = pmap_valid_bit(pmap);
 	PG_RW = pmap_rw_bit(pmap);
 	anychanged = FALSE;
-	pmap_delayed_invl_started();
+	pmap_delayed_invl_start();
 	PMAP_LOCK(pmap);
 	for (; sva < eva; sva = va_next) {
 		pml4e = pmap_pml4e(pmap, sva);
@@ -6950,7 +7418,7 @@ maybe_invlrng:
 	if (anychanged)
 		pmap_invalidate_all(pmap);
 	PMAP_UNLOCK(pmap);
-	pmap_delayed_invl_finished();
+	pmap_delayed_invl_finish();
 }
 
 /*
@@ -7689,12 +8157,11 @@ pmap_pcid_alloc_checked(pmap_t pmap, u_int cpuid)
 }
 
 static void
-pmap_activate_sw_pti_post(pmap_t pmap)
+pmap_activate_sw_pti_post(struct thread *td, pmap_t pmap)
 {
 
-	if (pmap->pm_ucr3 != PMAP_NO_CR3)
-		PCPU_GET(tssp)->tss_rsp0 = ((vm_offset_t)PCPU_PTR(pti_stack) +
-		    PC_PTI_STACK_SZ * sizeof(uint64_t)) & ~0xful;
+	PCPU_GET(tssp)->tss_rsp0 = pmap->pm_ucr3 != PMAP_NO_CR3 ?
+	    PCPU_GET(pti_rsp0) : (uintptr_t)td->td_pcb;
 }
 
 static void inline
@@ -7741,15 +8208,16 @@ pmap_activate_sw_pcid_pti(pmap_t pmap, u_int cpuid, const bool invpcid_works1)
 }
 
 static void
-pmap_activate_sw_pcid_invpcid_pti(pmap_t pmap, u_int cpuid)
+pmap_activate_sw_pcid_invpcid_pti(struct thread *td, pmap_t pmap, u_int cpuid)
 {
 
 	pmap_activate_sw_pcid_pti(pmap, cpuid, true);
-	pmap_activate_sw_pti_post(pmap);
+	pmap_activate_sw_pti_post(td, pmap);
 }
 
 static void
-pmap_activate_sw_pcid_noinvpcid_pti(pmap_t pmap, u_int cpuid)
+pmap_activate_sw_pcid_noinvpcid_pti(struct thread *td, pmap_t pmap,
+    u_int cpuid)
 {
 	register_t rflags;
 
@@ -7773,11 +8241,12 @@ pmap_activate_sw_pcid_noinvpcid_pti(pmap_t pmap, u_int cpuid)
 	rflags = intr_disable();
 	pmap_activate_sw_pcid_pti(pmap, cpuid, false);
 	intr_restore(rflags);
-	pmap_activate_sw_pti_post(pmap);
+	pmap_activate_sw_pti_post(td, pmap);
 }
 
 static void
-pmap_activate_sw_pcid_nopti(pmap_t pmap, u_int cpuid)
+pmap_activate_sw_pcid_nopti(struct thread *td __unused, pmap_t pmap,
+    u_int cpuid)
 {
 	uint64_t cached, cr3;
 
@@ -7792,17 +8261,19 @@ pmap_activate_sw_pcid_nopti(pmap_t pmap, u_int cpuid)
 }
 
 static void
-pmap_activate_sw_pcid_noinvpcid_nopti(pmap_t pmap, u_int cpuid)
+pmap_activate_sw_pcid_noinvpcid_nopti(struct thread *td __unused, pmap_t pmap,
+    u_int cpuid)
 {
 	register_t rflags;
 
 	rflags = intr_disable();
-	pmap_activate_sw_pcid_nopti(pmap, cpuid);
+	pmap_activate_sw_pcid_nopti(td, pmap, cpuid);
 	intr_restore(rflags);
 }
 
 static void
-pmap_activate_sw_nopcid_nopti(pmap_t pmap, u_int cpuid __unused)
+pmap_activate_sw_nopcid_nopti(struct thread *td __unused, pmap_t pmap,
+    u_int cpuid __unused)
 {
 
 	load_cr3(pmap->pm_cr3);
@@ -7810,16 +8281,18 @@ pmap_activate_sw_nopcid_nopti(pmap_t pmap, u_int cpuid __unused)
 }
 
 static void
-pmap_activate_sw_nopcid_pti(pmap_t pmap, u_int cpuid __unused)
+pmap_activate_sw_nopcid_pti(struct thread *td, pmap_t pmap,
+    u_int cpuid __unused)
 {
 
-	pmap_activate_sw_nopcid_nopti(pmap, cpuid);
+	pmap_activate_sw_nopcid_nopti(td, pmap, cpuid);
 	PCPU_SET(kcr3, pmap->pm_cr3);
 	PCPU_SET(ucr3, pmap->pm_ucr3);
-	pmap_activate_sw_pti_post(pmap);
+	pmap_activate_sw_pti_post(td, pmap);
 }
 
-DEFINE_IFUNC(static, void, pmap_activate_sw_mode, (pmap_t, u_int), static)
+DEFINE_IFUNC(static, void, pmap_activate_sw_mode, (struct thread *, pmap_t,
+    u_int))
 {
 
 	if (pmap_pcid_enabled && pti && invpcid_works)
@@ -7852,7 +8325,7 @@ pmap_activate_sw(struct thread *td)
 #else
 	CPU_SET(cpuid, &pmap->pm_active);
 #endif
-	pmap_activate_sw_mode(pmap, cpuid);
+	pmap_activate_sw_mode(td, pmap, cpuid);
 #ifdef SMP
 	CPU_CLR_ATOMIC(cpuid, &oldpmap->pm_active);
 #else
@@ -8308,6 +8781,39 @@ retry:
 	return ((pt_entry_t *)PHYS_TO_DMAP(mphys) + pmap_pte_index(va));
 }
 
+static vm_paddr_t
+pmap_large_map_kextract(vm_offset_t va)
+{
+	pdp_entry_t *pdpe, pdp;
+	pd_entry_t *pde, pd;
+	pt_entry_t *pte, pt;
+
+	KASSERT(LARGEMAP_MIN_ADDRESS <= va && va < PMAP_LARGEMAP_MAX_ADDRESS(),
+	    ("not largemap range %#lx", (u_long)va));
+	pdpe = pmap_large_map_pdpe(va);
+	pdp = *pdpe;
+	KASSERT((pdp & X86_PG_V) != 0,
+	    ("invalid pdp va %#lx pdpe %#lx pdp %#lx", va,
+	    (u_long)pdpe, pdp));
+	if ((pdp & X86_PG_PS) != 0) {
+		KASSERT((amd_feature & AMDID_PAGE1GB) != 0,
+		    ("no 1G pages, va %#lx pdpe %#lx pdp %#lx", va,
+		    (u_long)pdpe, pdp));
+		return ((pdp & PG_PS_PDP_FRAME) | (va & PDPMASK));
+	}
+	pde = pmap_pdpe_to_pde(pdpe, va);
+	pd = *pde;
+	KASSERT((pd & X86_PG_V) != 0,
+	    ("invalid pd va %#lx pde %#lx pd %#lx", va, (u_long)pde, pd));
+	if ((pd & X86_PG_PS) != 0)
+		return ((pd & PG_PS_FRAME) | (va & PDRMASK));
+	pte = pmap_pde_to_pte(pde, va);
+	pt = *pte;
+	KASSERT((pt & X86_PG_V) != 0,
+	    ("invalid pte va %#lx pte %#lx pt %#lx", va, (u_long)pte, pt));
+	return ((pt & PG_FRAME) | (va & PAGE_MASK));
+}
+
 static int
 pmap_large_map_getva(vm_size_t len, vm_offset_t align, vm_offset_t phase,
     vmem_addr_t *vmem_res)
@@ -8424,8 +8930,8 @@ pmap_large_unmap(void *svaa, vm_size_t len)
 		return;
 
 	SLIST_INIT(&spgf);
-	KASSERT(LARGEMAP_MIN_ADDRESS <= sva && sva + len <=
-	    LARGEMAP_MAX_ADDRESS + NBPML4 * (u_long)lm_ents,
+	KASSERT(LARGEMAP_MIN_ADDRESS <= sva &&
+	    sva + len <= PMAP_LARGEMAP_MAX_ADDRESS(),
 	    ("not largemap range %#lx %#lx", (u_long)svaa, (u_long)svaa + len));
 	PMAP_LOCK(kernel_pmap);
 	for (va = sva; va < sva + len; va += inc) {
@@ -8516,7 +9022,7 @@ pmap_large_map_wb_fence_nop(void)
 {
 }
 
-DEFINE_IFUNC(static, void, pmap_large_map_wb_fence, (void), static)
+DEFINE_IFUNC(static, void, pmap_large_map_wb_fence, (void))
 {
 
 	if (cpu_vendor_id != CPU_VENDOR_INTEL)
@@ -8561,8 +9067,7 @@ pmap_large_map_flush_range_nop(vm_offset_t sva __unused, vm_size_t len __unused)
 {
 }
 
-DEFINE_IFUNC(static, void, pmap_large_map_flush_range, (vm_offset_t, vm_size_t),
-    static)
+DEFINE_IFUNC(static, void, pmap_large_map_flush_range, (vm_offset_t, vm_size_t))
 {
 
 	if ((cpu_stdext_feature & CPUID_STDEXT_CLWB) != 0)
@@ -8964,11 +9469,286 @@ pmap_pti_remove_kva(vm_offset_t sva, vm_offset_t eva)
 	VM_OBJECT_WUNLOCK(pti_obj);
 }
 
-#include "opt_ddb.h"
-#ifdef DDB
-#include <sys/kdb.h>
-#include <ddb/ddb.h>
+static void *
+pkru_dup_range(void *ctx __unused, void *data)
+{
+	struct pmap_pkru_range *node, *new_node;
 
+	new_node = uma_zalloc(pmap_pkru_ranges_zone, M_NOWAIT);
+	if (new_node == NULL)
+		return (NULL);
+	node = data;
+	memcpy(new_node, node, sizeof(*node));
+	return (new_node);
+}
+
+static void
+pkru_free_range(void *ctx __unused, void *node)
+{
+
+	uma_zfree(pmap_pkru_ranges_zone, node);
+}
+
+static int
+pmap_pkru_assign(pmap_t pmap, vm_offset_t sva, vm_offset_t eva, u_int keyidx,
+    int flags)
+{
+	struct pmap_pkru_range *ppr;
+	int error;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	MPASS(pmap->pm_type == PT_X86);
+	MPASS((cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0);
+	if ((flags & AMD64_PKRU_EXCL) != 0 &&
+	    !rangeset_check_empty(&pmap->pm_pkru, sva, eva))
+		return (EBUSY);
+	ppr = uma_zalloc(pmap_pkru_ranges_zone, M_NOWAIT);
+	if (ppr == NULL)
+		return (ENOMEM);
+	ppr->pkru_keyidx = keyidx;
+	ppr->pkru_flags = flags & AMD64_PKRU_PERSIST;
+	error = rangeset_insert(&pmap->pm_pkru, sva, eva, ppr);
+	if (error != 0)
+		uma_zfree(pmap_pkru_ranges_zone, ppr);
+	return (error);
+}
+
+static int
+pmap_pkru_deassign(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
+{
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	MPASS(pmap->pm_type == PT_X86);
+	MPASS((cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0);
+	return (rangeset_remove(&pmap->pm_pkru, sva, eva));
+}
+
+static void
+pmap_pkru_deassign_all(pmap_t pmap)
+{
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	if (pmap->pm_type == PT_X86 &&
+	    (cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0)
+		rangeset_remove_all(&pmap->pm_pkru);
+}
+
+static bool
+pmap_pkru_same(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
+{
+	struct pmap_pkru_range *ppr, *prev_ppr;
+	vm_offset_t va;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	if (pmap->pm_type != PT_X86 ||
+	    (cpu_stdext_feature2 & CPUID_STDEXT2_PKU) == 0 ||
+	    sva >= VM_MAXUSER_ADDRESS)
+		return (true);
+	MPASS(eva <= VM_MAXUSER_ADDRESS);
+	for (va = sva, prev_ppr = NULL; va < eva;) {
+		ppr = rangeset_lookup(&pmap->pm_pkru, va);
+		if ((ppr == NULL) ^ (prev_ppr == NULL))
+			return (false);
+		if (ppr == NULL) {
+			va += PAGE_SIZE;
+			continue;
+		}
+		if (prev_ppr->pkru_keyidx != ppr->pkru_keyidx)
+			return (false);
+		va = ppr->pkru_rs_el.re_end;
+	}
+	return (true);
+}
+
+static pt_entry_t
+pmap_pkru_get(pmap_t pmap, vm_offset_t va)
+{
+	struct pmap_pkru_range *ppr;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	if (pmap->pm_type != PT_X86 ||
+	    (cpu_stdext_feature2 & CPUID_STDEXT2_PKU) == 0 ||
+	    va >= VM_MAXUSER_ADDRESS)
+		return (0);
+	ppr = rangeset_lookup(&pmap->pm_pkru, va);
+	if (ppr != NULL)
+		return (X86_PG_PKU(ppr->pkru_keyidx));
+	return (0);
+}
+
+static bool
+pred_pkru_on_remove(void *ctx __unused, void *r)
+{
+	struct pmap_pkru_range *ppr;
+
+	ppr = r;
+	return ((ppr->pkru_flags & AMD64_PKRU_PERSIST) == 0);
+}
+
+static void
+pmap_pkru_on_remove(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
+{
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	if (pmap->pm_type == PT_X86 &&
+	    (cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0) {
+		rangeset_remove_pred(&pmap->pm_pkru, sva, eva,
+		    pred_pkru_on_remove);
+	}
+}
+
+static int
+pmap_pkru_copy(pmap_t dst_pmap, pmap_t src_pmap)
+{
+
+	PMAP_LOCK_ASSERT(dst_pmap, MA_OWNED);
+	PMAP_LOCK_ASSERT(src_pmap, MA_OWNED);
+	MPASS(dst_pmap->pm_type == PT_X86);
+	MPASS(src_pmap->pm_type == PT_X86);
+	MPASS((cpu_stdext_feature2 & CPUID_STDEXT2_PKU) != 0);
+	if (src_pmap->pm_pkru.rs_data_ctx == NULL)
+		return (0);
+	return (rangeset_copy(&dst_pmap->pm_pkru, &src_pmap->pm_pkru));
+}
+
+static void
+pmap_pkru_update_range(pmap_t pmap, vm_offset_t sva, vm_offset_t eva,
+    u_int keyidx)
+{
+	pml4_entry_t *pml4e;
+	pdp_entry_t *pdpe;
+	pd_entry_t newpde, ptpaddr, *pde;
+	pt_entry_t newpte, *ptep, pte;
+	vm_offset_t va, va_next;
+	bool changed;
+
+	PMAP_LOCK_ASSERT(pmap, MA_OWNED);
+	MPASS(pmap->pm_type == PT_X86);
+	MPASS(keyidx <= PMAP_MAX_PKRU_IDX);
+
+	for (changed = false, va = sva; va < eva; va = va_next) {
+		pml4e = pmap_pml4e(pmap, va);
+		if ((*pml4e & X86_PG_V) == 0) {
+			va_next = (va + NBPML4) & ~PML4MASK;
+			if (va_next < va)
+				va_next = eva;
+			continue;
+		}
+
+		pdpe = pmap_pml4e_to_pdpe(pml4e, va);
+		if ((*pdpe & X86_PG_V) == 0) {
+			va_next = (va + NBPDP) & ~PDPMASK;
+			if (va_next < va)
+				va_next = eva;
+			continue;
+		}
+
+		va_next = (va + NBPDR) & ~PDRMASK;
+		if (va_next < va)
+			va_next = eva;
+
+		pde = pmap_pdpe_to_pde(pdpe, va);
+		ptpaddr = *pde;
+		if (ptpaddr == 0)
+			continue;
+
+		MPASS((ptpaddr & X86_PG_V) != 0);
+		if ((ptpaddr & PG_PS) != 0) {
+			if (va + NBPDR == va_next && eva >= va_next) {
+				newpde = (ptpaddr & ~X86_PG_PKU_MASK) |
+				    X86_PG_PKU(keyidx);
+				if (newpde != ptpaddr) {
+					*pde = newpde;
+					changed = true;
+				}
+				continue;
+			} else if (!pmap_demote_pde(pmap, pde, va)) {
+				continue;
+			}
+		}
+
+		if (va_next > eva)
+			va_next = eva;
+
+		for (ptep = pmap_pde_to_pte(pde, va); va != va_next;
+		    ptep++, va += PAGE_SIZE) {
+			pte = *ptep;
+			if ((pte & X86_PG_V) == 0)
+				continue;
+			newpte = (pte & ~X86_PG_PKU_MASK) | X86_PG_PKU(keyidx);
+			if (newpte != pte) {
+				*ptep = newpte;
+				changed = true;
+			}
+		}
+	}
+	if (changed)
+		pmap_invalidate_range(pmap, sva, eva);
+}
+
+static int
+pmap_pkru_check_uargs(pmap_t pmap, vm_offset_t sva, vm_offset_t eva,
+    u_int keyidx, int flags)
+{
+
+	if (pmap->pm_type != PT_X86 || keyidx > PMAP_MAX_PKRU_IDX ||
+	    (flags & ~(AMD64_PKRU_PERSIST | AMD64_PKRU_EXCL)) != 0)
+		return (EINVAL);
+	if (eva <= sva || eva > VM_MAXUSER_ADDRESS)
+		return (EFAULT);
+	if ((cpu_stdext_feature2 & CPUID_STDEXT2_PKU) == 0)
+		return (ENOTSUP);
+	return (0);
+}
+
+int
+pmap_pkru_set(pmap_t pmap, vm_offset_t sva, vm_offset_t eva, u_int keyidx,
+    int flags)
+{
+	int error;
+
+	sva = trunc_page(sva);
+	eva = round_page(eva);
+	error = pmap_pkru_check_uargs(pmap, sva, eva, keyidx, flags);
+	if (error != 0)
+		return (error);
+	for (;;) {
+		PMAP_LOCK(pmap);
+		error = pmap_pkru_assign(pmap, sva, eva, keyidx, flags);
+		if (error == 0)
+			pmap_pkru_update_range(pmap, sva, eva, keyidx);
+		PMAP_UNLOCK(pmap);
+		if (error != ENOMEM)
+			break;
+		vm_wait(NULL);
+	}
+	return (error);
+}
+
+int
+pmap_pkru_clear(pmap_t pmap, vm_offset_t sva, vm_offset_t eva)
+{
+	int error;
+
+	sva = trunc_page(sva);
+	eva = round_page(eva);
+	error = pmap_pkru_check_uargs(pmap, sva, eva, 0, 0);
+	if (error != 0)
+		return (error);
+	for (;;) {
+		PMAP_LOCK(pmap);
+		error = pmap_pkru_deassign(pmap, sva, eva);
+		if (error == 0)
+			pmap_pkru_update_range(pmap, sva, eva, 0);
+		PMAP_UNLOCK(pmap);
+		if (error != ENOMEM)
+			break;
+		vm_wait(NULL);
+	}
+	return (error);
+}
+
+#ifdef DDB
 DB_SHOW_COMMAND(pte, pmap_print_pte)
 {
 	pmap_t pmap;

@@ -33,6 +33,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/ktr.h>
 #include <sys/sglist.h>
 #include <sys/socket.h>
 #include <sys/socketvar.h>
@@ -1588,7 +1589,7 @@ do_rx_tls_cmp(struct sge_iq *iq, const struct rss_header *rss, struct mbuf *m)
 	    sb->sb_hiwat < V_tcp_autorcvbuf_max &&
 	    sb_length > (sbspace(sb) / 8 * 7)) {
 		unsigned int hiwat = sb->sb_hiwat;
-		unsigned int newsize = min(hiwat + V_tcp_autorcvbuf_inc,
+		unsigned int newsize = min(hiwat + sc->tt.autorcvbuf_inc,
 		    V_tcp_autorcvbuf_max);
 
 		if (!sbreserve_locked(sb, newsize, so, NULL))

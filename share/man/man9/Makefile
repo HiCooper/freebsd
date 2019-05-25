@@ -75,6 +75,7 @@ MAN=	accept_filter.9 \
 	DB_COMMAND.9 \
 	DECLARE_GEOM_CLASS.9 \
 	DECLARE_MODULE.9 \
+	DEFINE_IFUNC.9 \
 	DELAY.9 \
 	devclass.9 \
 	devclass_find.9 \
@@ -90,6 +91,7 @@ MAN=	accept_filter.9 \
 	device_add_child.9 \
 	DEVICE_ATTACH.9 \
 	device_delete_child.9 \
+	device_delete_children.9 \
 	DEVICE_DETACH.9 \
 	device_enable.9 \
 	device_find_child.9 \
@@ -224,7 +226,6 @@ MAN=	accept_filter.9 \
 	owll.9 \
 	own.9 \
 	panic.9 \
-	pbuf.9 \
 	PCBGROUP.9 \
 	p_candebug.9 \
 	p_cansee.9 \
@@ -269,6 +270,8 @@ MAN=	accept_filter.9 \
 	proc_rwmem.9 \
 	pseudofs.9 \
 	psignal.9 \
+	pwm.9 \
+	pwmbus.9 \
 	random.9 \
 	random_harvest.9 \
 	ratecheck.9 \
@@ -1173,6 +1176,8 @@ MLINKS+=iflibtxrx.9 isc_rxd_available.9 \
 	iflibtxrx.9 isc_txd_flush.9
 MLINKS+=ifnet.9 if_addmulti.9 \
 	ifnet.9 if_alloc.9 \
+	ifnet.9 if_alloc_dev.9 \
+	ifnet.9 if_alloc_domain.9 \
 	ifnet.9 if_allmulti.9 \
 	ifnet.9 if_attach.9 \
 	ifnet.9 if_data.9 \
@@ -1573,9 +1578,6 @@ MLINKS+=osd.9 osd_call.9 \
 	osd.9 osd_register.9 \
 	osd.9 osd_set.9
 MLINKS+=panic.9 vpanic.9
-MLINKS+=pbuf.9 getpbuf.9 \
-	pbuf.9 relpbuf.9 \
-	pbuf.9 trypbuf.9
 MLINKS+=PCBGROUP.9 in_pcbgroup_byhash.9 \
 	PCBGROUP.9 in_pcbgroup_byinpcb.9 \
 	PCBGROUP.9 in_pcbgroup_destroy.9 \
@@ -1636,13 +1638,9 @@ MLINKS+=pci_iov_schema.9 pci_iov_schema_alloc_node.9 \
 MLINKS+=pfil.9 pfil_add_hook.9 \
 	pfil.9 pfil_head_register.9 \
 	pfil.9 pfil_head_unregister.9 \
-	pfil.9 pfil_hook_get.9 \
 	pfil.9 pfil_remove_hook.9 \
-	pfil.9 pfil_rlock.9 \
 	pfil.9 pfil_run_hooks.9 \
-	pfil.9 pfil_runlock.9 \
-	pfil.9 pfil_wlock.9 \
-	pfil.9 pfil_wunlock.9
+	pfil.9 pfil_link.9
 MLINKS+=pfind.9 zpfind.9
 MLINKS+=PHOLD.9 PRELE.9 \
 	PHOLD.9 _PHOLD.9 \
@@ -1673,6 +1671,7 @@ MLINKS+=psignal.9 gsignal.9 \
 	psignal.9 tdsignal.9
 MLINKS+=random.9 arc4rand.9 \
 	random.9 arc4random.9 \
+	random.9 is_random_seeded.9 \
 	random.9 read_random.9 \
 	random.9 read_random_uio.9 \
 	random.9 srandom.9
@@ -1782,6 +1781,8 @@ MLINKS+=sbuf.9 sbuf_bcat.9 \
 	sbuf.9 sbuf_new_auto.9 \
 	sbuf.9 sbuf_new_for_sysctl.9 \
 	sbuf.9 sbuf_printf.9 \
+	sbuf.9 sbuf_printf_drain.9 \
+	sbuf.9 sbuf_putbuf.9 \
 	sbuf.9 sbuf_putc.9 \
 	sbuf.9 sbuf_set_drain.9 \
 	sbuf.9 sbuf_set_flags.9 \
@@ -2096,8 +2097,7 @@ MLINKS+=timeout.9 callout.9 \
 	timeout.9 callout_stop.9 \
 	timeout.9 callout_when.9 \
 	timeout.9 untimeout.9
-MLINKS+=ucred.9 cred_update_thread.9 \
-	ucred.9 crcopy.9 \
+MLINKS+=ucred.9 crcopy.9 \
 	ucred.9 crcopysafe.9 \
 	ucred.9 crdup.9 \
 	ucred.9 crfree.9 \
@@ -2239,6 +2239,7 @@ MLINKS+=VOP_ATTRIB.9 VOP_GETATTR.9 \
 MLINKS+=VOP_CREATE.9 VOP_MKDIR.9 \
 	VOP_CREATE.9 VOP_MKNOD.9 \
 	VOP_CREATE.9 VOP_SYMLINK.9
+MLINKS+=VOP_FSYNC.9 VOP_FDATASYNC.9
 MLINKS+=VOP_GETPAGES.9 VOP_PUTPAGES.9
 MLINKS+=VOP_INACTIVE.9 VOP_RECLAIM.9
 MLINKS+=VOP_LOCK.9 vn_lock.9 \

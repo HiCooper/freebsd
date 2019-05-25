@@ -1086,16 +1086,15 @@ g_mirror_candelete(struct bio *bp)
 {
 	struct g_mirror_softc *sc;
 	struct g_mirror_disk *disk;
-	int *val;
+	int val;
 
 	sc = bp->bio_to->private;
 	LIST_FOREACH(disk, &sc->sc_disks, d_next) {
 		if (disk->d_flags & G_MIRROR_DISK_FLAG_CANDELETE)
 			break;
 	}
-	val = (int *)bp->bio_data;
-	*val = (disk != NULL);
-	g_io_deliver(bp, 0);
+	val = disk != NULL;
+	g_handleattr(bp, "GEOM::candelete", &val, sizeof(val));
 }
 
 static void
@@ -3068,7 +3067,8 @@ g_mirror_reinit_from_metadata(struct g_mirror_softc *sc,
 	sc->sc_balance = md->md_balance;
 	sc->sc_mediasize = md->md_mediasize;
 	sc->sc_ndisks = md->md_all;
-	sc->sc_flags = md->md_mflags;
+	sc->sc_flags &= ~G_MIRROR_DEVICE_FLAG_MASK;
+	sc->sc_flags |= (md->md_mflags & G_MIRROR_DEVICE_FLAG_MASK);
 }
 
 struct g_geom *

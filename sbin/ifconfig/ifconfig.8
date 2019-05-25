@@ -28,7 +28,7 @@
 .\"     From: @(#)ifconfig.8	8.3 (Berkeley) 1/5/94
 .\" $FreeBSD$
 .\"
-.Dd June 27, 2018
+.Dd May 18, 2019
 .Dt IFCONFIG 8
 .Os
 .Sh NAME
@@ -196,7 +196,7 @@ This
 parameter is a string of the form
 .Dq name unit ,
 for example,
-.Dq Li ed0 .
+.Dq Li em0 .
 .It Ar groupname
 List the interfaces in the given group.
 .El
@@ -2469,7 +2469,7 @@ src/dst address for IPv4 or IPv6.
 .It Cm l4
 src/dst port for TCP/UDP/SCTP.
 .El
-.It Cm use_flowid
+.It Cm -use_flowid
 Enable local hash computation for RSS hash on the interface.
 The
 .Li loadbalance
@@ -2478,7 +2478,7 @@ and
 modes will use the RSS hash from the network card if available
 to avoid computing one, this may give poor traffic distribution
 if the hash is invalid or uses less of the protocol header information.
-.Cm use_flowid
+.Cm -use_flowid
 disables use of RSS hash from the network card.
 The default value can be set via the
 .Va net.link.lagg.default_use_flowid
@@ -2491,12 +2491,28 @@ and
 .Li 1
 means
 .Dq enabled .
-.It Cm -use_flowid
-Disable local hash computation for RSS hash on the interface.
+.It Cm use_flowid
+Use the RSS hash from the network card if available.
 .It Cm flowid_shift Ar number
 Set a shift parameter for RSS local hash computation.
 Hash is calculated by using flowid bits in a packet header mbuf
 which are shifted by the number of this parameter.
+.It Cm use_numa
+Enable selection of egress ports based on the native
+.Xr NUMA 4
+domain for the packets being transmitted.
+This is currently only implemented for lacp mode.
+This works only on
+.Xr NUMA 4
+hardware, running a kernel compiled with the
+.Xr NUMA 4
+option, and when interfaces from multiple
+.Xr NUMA 4
+domains are ports of the aggregation interface.
+.It Cm -use_numa
+Disable selection of egress ports based on the native
+.Xr NUMA 4
+domain for the packets being transmitted.
 .It Cm lacp_fast_timeout
 Enable lacp fast-timeout on the interface.
 .It Cm -lacp_fast_timeout
@@ -2919,26 +2935,26 @@ Assign the IPv4 address
 with a network mask of
 .Li 255.255.255.0 ,
 to the interface
-.Li fxp0 :
-.Dl # ifconfig fxp0 inet 192.0.2.10 netmask 255.255.255.0
+.Li em0 :
+.Dl # ifconfig em0 inet 192.0.2.10 netmask 255.255.255.0
 .Pp
 Add the IPv4 address
 .Li 192.0.2.45 ,
 with the CIDR network prefix
 .Li /28 ,
 to the interface
-.Li ed0 ,
+.Li em0 ,
 using
 .Cm add
 as a synonym for the canonical form of the option
 .Cm alias :
-.Dl # ifconfig ed0 inet 192.0.2.45/28 add
+.Dl # ifconfig em0 inet 192.0.2.45/28 add
 .Pp
 Remove the IPv4 address
 .Li 192.0.2.45
 from the interface
-.Li ed0 :
-.Dl # ifconfig ed0 inet 192.0.2.45 -alias
+.Li em0 :
+.Dl # ifconfig em0 inet 192.0.2.45 -alias
 .Pp
 Enable IPv6 functionality of the interface:
 .Dl # ifconfig em0 inet6 -ifdisabled

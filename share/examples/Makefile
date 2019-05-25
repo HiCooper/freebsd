@@ -16,7 +16,6 @@ LDIRS=	BSD_daemon \
 	drivers \
 	etc \
 	find_interface \
-	ibcs2 \
 	indent \
 	ipfw \
 	jails \
@@ -98,11 +97,6 @@ SE_FIND_INTERFACE= \
 	Makefile \
 	README \
 	find_interface.c
-
-SE_DIRS+=	ibcs2
-SE_IBCS2=	\
-	README \
-	hello.uu
 
 SE_DIRS+=	indent
 SE_INDENT=	indent.pro
@@ -387,9 +381,8 @@ SER_${d:tu:C/\//_/g}DIR+=	${SHAREDIR}/examples/${d}
 
 BINDIR= ${SHAREDIR}/examples
 
-beforeinstall: copies etc-examples
+beforeinstall: copies
 META_TARGETS+=	copies
-.ORDER: etc-examples
 
 copies:
 .for i in ${LDIRS}
@@ -397,9 +390,6 @@ copies:
 		rm -f ${DESTDIR}${BINDIR}/$i; \
 	fi
 .endfor
-
-etc-examples:
-	${_+_}(cd ${SRCTOP}/etc; ${MAKE} etc-examples)
 
 SUBDIR+=	smbfs
 

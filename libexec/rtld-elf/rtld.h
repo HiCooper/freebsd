@@ -256,6 +256,8 @@ typedef struct Struct_Obj_Entry {
     bool z_interpose : 1;	/* Interpose all objects but main */
     bool z_nodeflib : 1;	/* Don't search default library path */
     bool z_global : 1;		/* Make the object global */
+    bool static_tls : 1;	/* Needs static TLS allocation */
+    bool static_tls_copied : 1;	/* Needs static TLS copying */
     bool ref_nodel : 1;		/* Refcount increased to prevent dlclose */
     bool init_scanned: 1;	/* Object is already on init list. */
     bool on_fini_list: 1;	/* Object is already on fini list. */
@@ -400,7 +402,7 @@ int convert_prot(int elfflags);
 int do_copy_relocations(Obj_Entry *);
 int reloc_non_plt(Obj_Entry *, Obj_Entry *, int flags,
     struct Struct_RtldLockState *);
-int reloc_plt(Obj_Entry *);
+int reloc_plt(Obj_Entry *, int flags, struct Struct_RtldLockState *);
 int reloc_jmpslots(Obj_Entry *, int flags, struct Struct_RtldLockState *);
 int reloc_iresolve(Obj_Entry *, struct Struct_RtldLockState *);
 int reloc_gnu_ifunc(Obj_Entry *, int flags, struct Struct_RtldLockState *);
@@ -408,5 +410,10 @@ void ifunc_init(Elf_Auxinfo[__min_size(AT_COUNT)]);
 void pre_init(void);
 void init_pltgot(Obj_Entry *);
 void allocate_initial_tls(Obj_Entry *);
+
+void *__crt_calloc(size_t num, size_t size);
+void __crt_free(void *cp);
+void *__crt_malloc(size_t nbytes);
+void *__crt_realloc(void *cp, size_t nbytes);
 
 #endif /* } */

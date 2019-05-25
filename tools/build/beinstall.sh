@@ -54,10 +54,6 @@ MERGEMASTER_FLAGS="${MERGEMASTER_FLAGS:-"-iFU"}"
 
 
 ########################################################################
-## Constants
-ETCUPDATE_CMD="etcupdate"
-MERGEMASTER_CMD="mergemaster"
-
 ## Functions
 cleanup() {
 	[ -z "${cleanup_commands}" ] && return
@@ -80,6 +76,14 @@ rmdir_be() {
 
 unmount_be() {
 	mount | grep " on ${BE_MNTPT}" | awk '{print $3}' | sort -r | xargs -t umount -f
+}
+
+copy_pkgs() {
+	# Before cleaning up, try to save progress in pkg(8) updates, to
+	# speed up future updates.  This is only called on the error path;
+	# no need to run on success.
+	echo "Rsyncing back newly saved packages..."
+	rsync -av --progress ${BE_MNTPT}/var/cache/pkg/. /var/cache/pkg/.
 }
 
 cleanup_be() {
@@ -118,23 +122,22 @@ create_be_dirs() {
 }
 
 update_mergemaster_pre() {
-	mergemaster -p -m ${srcdir} -D ${BE_MNTPT} -t ${BE_MM_ROOT} ${MERGEMASTER_FLAGS}
+	${MERGEMASTER_CMD} -p -m ${srcdir} -D ${BE_MNTPT} -t ${BE_MM_ROOT} ${MERGEMASTER_FLAGS}
 }
 
 update_mergemaster() {
-	chroot ${BE_MNTPT} \
-		mergemaster -m ${srcdir} -t ${BE_MM_ROOT} ${MERGEMASTER_FLAGS}
+	${MERGEMASTER_CMD} -m ${srcdir} -D ${BE_MNTPT} -t ${BE_MM_ROOT} ${MERGEMASTER_FLAGS}
 }
 
 update_etcupdate_pre() {
-	etcupdate -p -s ${srcdir} -D ${BE_MNTPT} ${ETCUPDATE_FLAGS} || return $?
-	etcupdate resolve -D ${BE_MNTPT} || return $?
+	${ETCUPDATE_CMD} -p -s ${srcdir} -D ${BE_MNTPT} ${ETCUPDATE_FLAGS} || return $?
+	${ETCUPDATE_CMD} resolve -D ${BE_MNTPT} || return $?
 }
 
 update_etcupdate() {
 	chroot ${BE_MNTPT} \
-		etcupdate -s ${srcdir} ${ETCUPDATE_FLAGS} || return $?
-	chroot ${BE_MNTPT} etcupdate resolve
+		${ETCUPDATE_CMD} -s ${srcdir} ${ETCUPDATE_FLAGS} || return $?
+	chroot ${BE_MNTPT} ${ETCUPDATE_CMD} resolve
 }
 
 
@@ -166,6 +169,10 @@ trap 'errx "Interrupt caught"' HUP INT TERM
 srcdir=$(pwd)
 objdir=$(make -V .OBJDIR 2>/dev/null)
 [ ! -d "${objdir}" ] && errx "Must have built FreeBSD from source tree"
+
+## Constants
+ETCUPDATE_CMD="${srcdir}/usr.sbin/etcupdate/etcupdate.sh"
+MERGEMASTER_CMD="${srcdir}/usr.sbin/mergemaster/mergemaster.sh"
 
 # May be a worktree, in which case .git is a file, not a directory.
 if [ -e .git ] ; then
@@ -223,6 +230,10 @@ chroot ${BE_MNTPT} make "$@" -C ${srcdir} installworld || \
 if [ -n "${CONFIG_UPDATER}" ]; then
 	"update_${CONFIG_UPDATER}"
 	[ $? -ne 0 ] && errx "${CONFIG_UPDATER} (post-world) failed!"
+fi
+
+if which rsync >/dev/null 2>&1; then
+	cleanup_commands="copy_pkgs ${cleanup_commands}"
 fi
 
 BE_PKG="chroot ${BE_MNTPT} env ASSUME_ALWAYS_YES=true pkg"

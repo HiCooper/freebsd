@@ -94,6 +94,9 @@ SYSCTL_VNET_PCPUSTAT(_net_inet_esp, IPSECCTL_STATS, stats,
     struct espstat, espstat,
     "ESP statistics (struct espstat, netipsec/esp_var.h");
 
+static struct timeval deswarn, blfwarn, castwarn, camelliawarn;
+static struct timeval warninterval = { .tv_sec = 1, .tv_usec = 0 };
+
 static int esp_input_cb(struct cryptop *op);
 static int esp_output_cb(struct cryptop *crp);
 
@@ -156,6 +159,26 @@ esp_init(struct secasvar *sav, struct xformsw *xsp)
 			__func__));
 		return EINVAL;
 	}
+
+	switch (sav->alg_enc) {
+	case SADB_EALG_DESCBC:
+		if (ratecheck(&deswarn, &warninterval))
+			gone_in(13, "DES cipher for IPsec");
+		break;
+	case SADB_X_EALG_BLOWFISHCBC:
+		if (ratecheck(&blfwarn, &warninterval))
+			gone_in(13, "Blowfish cipher for IPsec");
+		break;
+	case SADB_X_EALG_CAST128CBC:
+		if (ratecheck(&castwarn, &warninterval))
+			gone_in(13, "CAST cipher for IPsec");
+		break;
+	case SADB_X_EALG_CAMELLIACBC:
+		if (ratecheck(&camelliawarn, &warninterval))
+			gone_in(13, "Camellia cipher for IPsec");
+		break;
+	}
+
 	/* subtract off the salt, RFC4106, 8.1 and RFC3686, 5.1 */
 	keylen = _KEYLEN(sav->key_enc) - SAV_ISCTRORGCM(sav) * 4;
 	if (txform->minkey > keylen || keylen > txform->maxkey) {
@@ -768,7 +791,7 @@ esp_output(struct mbuf *m, struct secpolicy *sp, struct secasvar *sav,
 	 */
 	switch (sav->flags & SADB_X_EXT_PMASK) {
 	case SADB_X_EXT_PRAND:
-		(void) read_random(pad, padding - 2);
+		arc4random_buf(pad, padding - 2);
 		break;
 	case SADB_X_EXT_PZERO:
 		bzero(pad, padding - 2);
