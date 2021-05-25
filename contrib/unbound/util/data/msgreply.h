@@ -157,7 +157,7 @@ struct reply_info {
 	time_t prefetch_ttl;
 
 	/** 
-	 * Reply TTL extended with serve exipred TTL, to limit time to serve
+	 * Reply TTL extended with serve expired TTL, to limit time to serve
 	 * expired message.
 	 */
 	time_t serve_expired_ttl;
@@ -552,7 +552,7 @@ struct edns_option* edns_opt_list_find(struct edns_option* list, uint16_t code);
  * @param rep: Reply info. Could be NULL.
  * @param rcode: return code.
  * @param edns: edns data of the reply.
- * @param repinfo: comm_reply. NULL.
+ * @param repinfo: comm_reply. Reply information for a communication point.
  * @param region: region to store data.
  * @return false on failure (a callback function returned an error).
  */

@@ -60,7 +60,8 @@
 #define	USB_DEBUG_VAR udl_debug
 #include <dev/usb/usb_debug.h>
 
-static	SYSCTL_NODE(_hw_usb, OID_AUTO, udl, CTLFLAG_RW, 0, "USB UDL");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, udl, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB UDL");
 
 #ifdef USB_DEBUG
 static int udl_debug = 0;
@@ -179,6 +180,7 @@ static const STRUCT_USB_HOST_ID udl_devs[] = {
 	{USB_VPI(USB_VENDOR_DISPLAYLINK, USB_PRODUCT_DISPLAYLINK_POLARIS2, DLUNK)},
 	{USB_VPI(USB_VENDOR_DISPLAYLINK, USB_PRODUCT_DISPLAYLINK_LT1421, DLUNK)},
 	{USB_VPI(USB_VENDOR_DISPLAYLINK, USB_PRODUCT_DISPLAYLINK_ITEC, DL165)},
+	{USB_VPI(USB_VENDOR_DISPLAYLINK, USB_PRODUCT_DISPLAYLINK_DVI_19, DL165)},
 };
 
 static void
@@ -783,7 +785,6 @@ udl_select_chip(struct udl_softc *sc, struct usb_attach_arg *uaa)
 
 	if ((uaa->info.idVendor == USB_VENDOR_DISPLAYLINK) &&
 	    (uaa->info.idProduct == USB_PRODUCT_DISPLAYLINK_WSDVI)) {
-
 		/*
 		 * WS Tech DVI is DL120 or DL160. All deviced uses the
 		 * same revision (0.04) so iSerialNumber must be used
@@ -799,7 +800,6 @@ udl_select_chip(struct udl_softc *sc, struct usb_attach_arg *uaa)
 	}
 	if ((uaa->info.idVendor == USB_VENDOR_DISPLAYLINK) &&
 	    (uaa->info.idProduct == USB_PRODUCT_DISPLAYLINK_SWDVI)) {
-
 		/*
 		 * SUNWEIT DVI is DL160, DL125, DL165 or DL195. Major revision
 		 * can be used to differ between DL1x0 and DL1x5. Minor to

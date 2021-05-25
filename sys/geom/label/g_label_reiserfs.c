@@ -35,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/label/g_label.h>
 
 #define REISERFS_NEW_DISK_OFFSET 64 * 1024
@@ -115,7 +116,7 @@ exit_free:
 
 struct g_label_desc g_label_reiserfs = {
 	.ld_taste = g_label_reiserfs_taste,
-	.ld_dir = "reiserfs",
+	.ld_dirprefix = "reiserfs/",
 	.ld_enabled = 1
 };
 

@@ -123,6 +123,7 @@ static struct ofw_compat_data compat_data[] = {
 	{"fsl,imx53-fec",	FECTYPE_IMX53},
 	{"fsl,imx6q-fec",	FECTYPE_IMX6 | FECFLAG_RACC | FECFLAG_GBE },
 	{"fsl,imx6ul-fec",	FECTYPE_IMX6 | FECFLAG_RACC },
+	{"fsl,imx6sx-fec",      FECTYPE_IMX6 | FECFLAG_RACC },
 	{"fsl,imx7d-fec",	FECTYPE_IMX6 | FECFLAG_RACC | FECFLAG_GBE |
 				FECFLAG_AVB },
 	{"fsl,mvf600-fec",	FECTYPE_MVF  | FECFLAG_RACC },
@@ -974,13 +975,24 @@ ffec_get_hwaddr(struct ffec_softc *sc, uint8_t *hwaddr)
 	}
 }
 
+static u_int
+ffec_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint64_t *ghash = arg;
+	uint32_t crc;
+
+	/* 6 bits from MSB in LE CRC32 are used for hash. */
+	crc = ether_crc32_le(LLADDR(sdl), ETHER_ADDR_LEN);
+	*ghash |= 1LLU << (((uint8_t *)&crc)[3] >> 2);
+
+	return (1);
+}
+
 static void
 ffec_setup_rxfilter(struct ffec_softc *sc)
 {
 	struct ifnet *ifp;
-	struct ifmultiaddr *ifma;
 	uint8_t *eaddr;
-	uint32_t crc;
 	uint64_t ghash, ihash;
 
 	FFEC_ASSERT_LOCKED(sc);
@@ -994,16 +1006,7 @@ ffec_setup_rxfilter(struct ffec_softc *sc)
 		ghash = 0xffffffffffffffffLLU;
 	else {
 		ghash = 0;
-		if_maddr_rlock(ifp);
-		CK_STAILQ_FOREACH(ifma, &sc->ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_LINK)
-				continue;
-			/* 6 bits from MSB in LE CRC32 are used for hash. */
-			crc = ether_crc32_le(LLADDR((struct sockaddr_dl *)
-			    ifma->ifma_addr), ETHER_ADDR_LEN);
-			ghash |= 1LLU << (((uint8_t *)&crc)[3] >> 2);
-		}
-		if_maddr_runlock(ifp);
+		if_foreach_llmaddr(ifp, ffec_hash_maddr, &ghash);
 	}
 	WR4(sc, FEC_GAUR_REG, (uint32_t)(ghash >> 32));
 	WR4(sc, FEC_GALR_REG, (uint32_t)ghash);

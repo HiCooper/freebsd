@@ -51,6 +51,20 @@ static struct pagerlst phys_pager_object_list;
 /* protect access to phys_pager_object_list */
 static struct mtx phys_pager_mtx;
 
+static int default_phys_pager_getpages(vm_object_t object, vm_page_t *m,
+    int count, int *rbehind, int *rahead);
+static int default_phys_pager_populate(vm_object_t object, vm_pindex_t pidx,
+    int fault_type, vm_prot_t max_prot, vm_pindex_t *first, vm_pindex_t *last);
+static boolean_t default_phys_pager_haspage(vm_object_t object,
+    vm_pindex_t pindex, int *before, int *after);
+struct phys_pager_ops default_phys_pg_ops = {
+	.phys_pg_getpages = default_phys_pager_getpages,
+	.phys_pg_populate = default_phys_pager_populate,
+	.phys_pg_haspage = default_phys_pager_haspage,
+	.phys_pg_ctor = NULL,
+	.phys_pg_dtor = NULL,
+};
+
 static void
 phys_pager_init(void)
 {
@@ -59,12 +73,13 @@ phys_pager_init(void)
 	mtx_init(&phys_pager_mtx, "phys_pager list", NULL, MTX_DEF);
 }
 
-static vm_object_t
-phys_pager_alloc(void *handle, vm_ooffset_t size, vm_prot_t prot,
-    vm_ooffset_t foff, struct ucred *cred)
+vm_object_t
+phys_pager_allocate(void *handle, struct phys_pager_ops *ops, void *data,
+    vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t foff, struct ucred *cred)
 {
 	vm_object_t object, object1;
 	vm_pindex_t pindex;
+	bool init;
 
 	/*
 	 * Offset should be page aligned.
@@ -73,6 +88,7 @@ phys_pager_alloc(void *handle, vm_ooffset_t size, vm_prot_t prot,
 		return (NULL);
 
 	pindex = OFF_TO_IDX(foff + PAGE_MASK + size);
+	init = true;
 
 	if (handle != NULL) {
 		mtx_lock(&phys_pager_mtx);
@@ -97,11 +113,15 @@ phys_pager_alloc(void *handle, vm_ooffset_t size, vm_prot_t prot,
 				 */
 				if (pindex > object->size)
 					object->size = pindex;
+				init = false;
 			} else {
 				object = object1;
 				object1 = NULL;
 				object->handle = handle;
-				vm_object_set_flag(object, OBJ_POPULATE);
+				object->un_pager.phys.ops = ops;
+				object->un_pager.phys.data_ptr = data;
+				if (ops->phys_pg_populate != NULL)
+					vm_object_set_flag(object, OBJ_POPULATE);
 				TAILQ_INSERT_TAIL(&phys_pager_object_list,
 				    object, pager_object_list);
 			}
@@ -113,10 +133,23 @@ phys_pager_alloc(void *handle, vm_ooffset_t size, vm_prot_t prot,
 		vm_object_deallocate(object1);
 	} else {
 		object = vm_object_allocate(OBJT_PHYS, pindex);
-		vm_object_set_flag(object, OBJ_POPULATE);
+		object->un_pager.phys.ops = ops;
+		object->un_pager.phys.data_ptr = data;
+		if (ops->phys_pg_populate != NULL)
+			vm_object_set_flag(object, OBJ_POPULATE);
 	}
+	if (init && ops->phys_pg_ctor != NULL)
+		ops->phys_pg_ctor(object, prot, foff, cred);
 
 	return (object);
+}
+
+static vm_object_t
+phys_pager_alloc(void *handle, vm_ooffset_t size, vm_prot_t prot,
+    vm_ooffset_t foff, struct ucred *ucred)
+{
+	return (phys_pager_allocate(handle, &default_phys_pg_ops, NULL,
+	    size, prot, foff, ucred));
 }
 
 static void
@@ -130,27 +163,28 @@ phys_pager_dealloc(vm_object_t object)
 		mtx_unlock(&phys_pager_mtx);
 		VM_OBJECT_WLOCK(object);
 	}
-	object->handle = NULL;
 	object->type = OBJT_DEAD;
+	if (object->un_pager.phys.ops->phys_pg_dtor != NULL)
+		object->un_pager.phys.ops->phys_pg_dtor(object);
+	object->handle = NULL;
 }
 
 /*
  * Fill as many pages as vm_fault has allocated for us.
  */
 static int
-phys_pager_getpages(vm_object_t object, vm_page_t *m, int count, int *rbehind,
-    int *rahead)
+default_phys_pager_getpages(vm_object_t object, vm_page_t *m, int count,
+    int *rbehind, int *rahead)
 {
 	int i;
 
-	VM_OBJECT_ASSERT_WLOCKED(object);
 	for (i = 0; i < count; i++) {
-		if (m[i]->valid == 0) {
+		if (vm_page_none_valid(m[i])) {
 			if ((m[i]->flags & PG_ZERO) == 0)
 				pmap_zero_page(m[i]);
-			m[i]->valid = VM_PAGE_BITS_ALL;
+			vm_page_valid(m[i]);
 		}
-		KASSERT(m[i]->valid == VM_PAGE_BITS_ALL,
+		KASSERT(vm_page_all_valid(m[i]),
 		    ("phys_pager_getpages: partially valid page %p", m[i]));
 		KASSERT(m[i]->dirty == 0,
 		    ("phys_pager_getpages: dirty page %p", m[i]));
@@ -160,6 +194,14 @@ phys_pager_getpages(vm_object_t object, vm_page_t *m, int count, int *rbehind,
 	if (rahead)
 		*rahead = 0;
 	return (VM_PAGER_OK);
+}
+
+static int
+phys_pager_getpages(vm_object_t object, vm_page_t *m, int count, int *rbehind,
+    int *rahead)
+{
+	return (object->un_pager.phys.ops->phys_pg_getpages(object, m,
+	    count, rbehind, rahead));
 }
 
 /*
@@ -186,7 +228,7 @@ SYSCTL_INT(_vm, OID_AUTO, phys_pager_cluster, CTLFLAG_RWTUN,
 #define	PHYSALLOC	16
 
 static int
-phys_pager_populate(vm_object_t object, vm_pindex_t pidx,
+default_phys_pager_populate(vm_object_t object, vm_pindex_t pidx,
     int fault_type __unused, vm_prot_t max_prot __unused, vm_pindex_t *first,
     vm_pindex_t *last)
 {
@@ -206,36 +248,23 @@ phys_pager_populate(vm_object_t object, vm_pindex_t pidx,
 	*last = end;
 
 	for (i = base; i <= end; i++) {
-retry:
-		m = vm_page_lookup(object, i);
-		if (m == NULL) {
-			ahead = MIN(end - i, PHYSALLOC);
-			m = vm_page_alloc(object, i, VM_ALLOC_NORMAL |
-			    VM_ALLOC_ZERO | VM_ALLOC_WAITFAIL |
-			    VM_ALLOC_COUNT(ahead));
-			if (m == NULL)
-				goto retry;
-			if ((m->flags & PG_ZERO) == 0)
-				pmap_zero_page(m);
-			m->valid = VM_PAGE_BITS_ALL;
-		} else if (vm_page_xbusied(m)) {
-			vm_page_lock(m);
-			VM_OBJECT_WUNLOCK(object);
-			vm_page_busy_sleep(m, "physb", true);
-			VM_OBJECT_WLOCK(object);
-			goto retry;
-		} else {
-			vm_page_xbusy(m);
-			if (m->valid != VM_PAGE_BITS_ALL)
-				vm_page_zero_invalid(m, TRUE);
-		}
-
-		KASSERT(m->valid == VM_PAGE_BITS_ALL,
-		    ("phys_pager_populate: partially valid page %p", m));
+		ahead = MIN(end - i, PHYSALLOC);
+		m = vm_page_grab(object, i,
+		    VM_ALLOC_NORMAL | VM_ALLOC_COUNT(ahead));
+		if (!vm_page_all_valid(m))
+			vm_page_zero_invalid(m, TRUE);
 		KASSERT(m->dirty == 0,
 		    ("phys_pager_populate: dirty page %p", m));
 	}
 	return (VM_PAGER_OK);
+}
+
+static int
+phys_pager_populate(vm_object_t object, vm_pindex_t pidx, int fault_type,
+    vm_prot_t max_prot, vm_pindex_t *first, vm_pindex_t *last)
+{
+	return (object->un_pager.phys.ops->phys_pg_populate(object, pidx,
+	    fault_type, max_prot, first, last));
 }
 
 static void
@@ -247,7 +276,7 @@ phys_pager_putpages(vm_object_t object, vm_page_t *m, int count, boolean_t sync,
 }
 
 static boolean_t
-phys_pager_haspage(vm_object_t object, vm_pindex_t pindex, int *before,
+default_phys_pager_haspage(vm_object_t object, vm_pindex_t pindex, int *before,
     int *after)
 {
 	vm_pindex_t base, end;
@@ -259,6 +288,14 @@ phys_pager_haspage(vm_object_t object, vm_pindex_t pindex, int *before,
 	if (after != NULL)
 		*after = end - pindex;
 	return (TRUE);
+}
+
+static boolean_t
+phys_pager_haspage(vm_object_t object, vm_pindex_t pindex, int *before,
+    int *after)
+{
+	return (object->un_pager.phys.ops->phys_pg_haspage(object, pindex,
+	    before, after));
 }
 
 struct pagerops physpagerops = {

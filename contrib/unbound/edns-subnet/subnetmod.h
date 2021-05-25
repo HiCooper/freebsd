@@ -45,6 +45,7 @@
 #include "util/alloc.h"
 #include "util/net_help.h"
 #include "util/storage/slabhash.h"
+#include "util/data/dname.h"
 #include "edns-subnet/addrtree.h"
 #include "edns-subnet/edns-subnet.h"
 
@@ -83,6 +84,14 @@ struct subnet_qstate {
 	struct ecs_data	ecs_server_out;
 	int subnet_downstream;
 	int subnet_sent;
+	/** keep track of longest received scope, set after receiving CNAME for
+	 * incoming QNAME. */
+	int track_max_scope;
+	/** longest received scope mask since track_max_scope is set. This value
+	 * is used for caching and answereing to client. */
+	uint8_t max_scope;
+	/** has the subnet module been started with no_cache_store? */
+	int started_no_cache_store;
 };
 
 void subnet_data_delete(void* d, void* ATTR_UNUSED(arg));
@@ -130,5 +139,8 @@ int ecs_edns_back_parsed(struct module_qstate* qstate, int id, void* cbargs);
 /** Remove ECS record from back_out when query resulted in REFUSED response. */
 int ecs_query_response(struct module_qstate* qstate, struct dns_msg* response,
 	int id, void* cbargs);
+
+/** mark subnet msg to be deleted */
+void subnet_markdel(void* key);
 
 #endif /* SUBNETMOD_H */

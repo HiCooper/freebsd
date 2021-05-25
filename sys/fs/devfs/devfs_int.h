@@ -70,6 +70,8 @@ struct cdev_priv {
 	void			*cdp_dtr_cb_arg;
 
 	LIST_HEAD(, cdev_privdata) cdp_fdpriv;
+
+	struct mtx		cdp_threadlock;
 };
 
 #define	cdev2priv(c)	__containerof(c, struct cdev_priv, cdp_c)
@@ -92,6 +94,9 @@ extern struct mtx devfs_de_interlock;
 extern struct sx clone_drain_lock;
 extern struct mtx cdevpriv_mtx;
 extern TAILQ_HEAD(cdev_priv_list, cdev_priv) cdevp_list;
+
+#define	dev_lock_assert_locked()	mtx_assert(&devmtx, MA_OWNED)
+#define	dev_lock_assert_unlocked()	mtx_assert(&devmtx, MA_NOTOWNED)
 
 #endif /* _KERNEL */
 

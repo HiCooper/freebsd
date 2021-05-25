@@ -80,7 +80,8 @@ struct scsi_quirk_entry {
 
 static int cam_srch_hi = 0;
 static int sysctl_cam_search_luns(SYSCTL_HANDLER_ARGS);
-SYSCTL_PROC(_kern_cam, OID_AUTO, cam_srch_hi, CTLTYPE_INT | CTLFLAG_RWTUN, 0, 0,
+SYSCTL_PROC(_kern_cam, OID_AUTO, cam_srch_hi,
+    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT, 0, 0,
     sysctl_cam_search_luns, "I",
     "allow search above LUN 7 for SCSI3 and greater devices");
 
@@ -648,7 +649,7 @@ static struct xpt_proto scsi_proto = {
 CAM_XPT_PROTO(scsi_proto);
 
 static void
-probe_periph_init()
+probe_periph_init(void)
 {
 }
 
@@ -796,7 +797,6 @@ again:
 		 */
 		if (((periph->path->device->flags & CAM_DEV_UNCONFIGURED) == 0)
 		 && ((softc->flags & PROBE_INQUIRY_CKSUM) == 0)) {
-
 			MD5Init(&softc->context);
 			MD5Update(&softc->context, (unsigned char *)inq_buf,
 				  sizeof(struct scsi_inquiry_data));
@@ -1111,7 +1111,6 @@ proberequestbackoff(struct cam_periph *periph, struct cam_ed *device)
 		return (0);
 	}
 
-
 	/*
 	 * Jump sync_period up by one, but stop at 5MHz and fall back to Async.
 	 * We don't try to remember 'last' settings to see if the SIM actually
@@ -1174,7 +1173,6 @@ probedone(struct cam_periph *periph, union ccb *done_ccb)
 	case PROBE_TUR:
 	{
 		if (cam_ccb_status(done_ccb) != CAM_REQ_CMP) {
-
 			if (cam_periph_error(done_ccb, 0, SF_NO_PRINT) ==
 			    ERESTART) {
 outr:
@@ -1592,7 +1590,6 @@ probe_device_check:
 			 */
 		} else if (cam_ccb_status(done_ccb) == CAM_REQ_CMP
 			&& (serial_buf->length > 0)) {
-
 			have_serialnum = 1;
 			path->device->serial_num =
 				(u_int8_t *)malloc((serial_buf->length + 1),
@@ -1603,7 +1600,7 @@ probe_device_check:
 				start = strspn(serial_buf->serial_num, " ");
 				slen = serial_buf->length - start;
 				if (slen <= 0) {
-					/* 
+					/*
 					 * SPC5r05 says that an all-space serial
 					 * number means no product serial number
 					 * is available
@@ -1684,8 +1681,9 @@ probe_device_check:
 	case PROBE_TUR_FOR_NEGOTIATION:
 	case PROBE_DV_EXIT:
 		if (cam_ccb_status(done_ccb) != CAM_REQ_CMP) {
-			cam_periph_error(done_ccb, 0,
-			    SF_NO_PRINT | SF_NO_RECOVERY | SF_NO_RETRY);
+			if (cam_periph_error(done_ccb, 0, SF_NO_PRINT |
+			    SF_NO_RECOVERY | SF_NO_RETRY) == ERESTART)
+				goto outr;
 		}
 		if ((done_ccb->ccb_h.status & CAM_DEV_QFRZN) != 0) {
 			/* Don't wedge the queue */
@@ -1735,8 +1733,9 @@ probe_device_check:
 		struct ccb_scsiio *csio;
 
 		if (cam_ccb_status(done_ccb) != CAM_REQ_CMP) {
-			cam_periph_error(done_ccb, 0,
-			    SF_NO_PRINT | SF_NO_RECOVERY | SF_NO_RETRY);
+			if (cam_periph_error(done_ccb, 0, SF_NO_PRINT |
+			    SF_NO_RECOVERY | SF_NO_RETRY) == ERESTART)
+				goto outr;
 		}
 		if ((done_ccb->ccb_h.status & CAM_DEV_QFRZN) != 0) {
 			/* Don't wedge the queue */
@@ -2019,7 +2018,6 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 		low_target = 0;
 		initiator_id = scan_info->cpi->initiator_id;
 
-
 		/*
 		 * We can scan all targets in parallel, or do it sequentially.
 		 */
@@ -2116,7 +2114,7 @@ scsi_scan_bus(struct cam_periph *periph, union ccb *request_ccb)
 			CAM_GET_LUN(target->luns, 0, first);
 			if (first == 0 && scan_info->lunindex[target_id] == 0) {
 				scan_info->lunindex[target_id]++;
-			} 
+			}
 
 			/*
 			 * Skip any LUNs that the HBA can't deal with.
@@ -2513,6 +2511,7 @@ scsi_dev_advinfo(union ccb *start_ccb)
 	struct ccb_dev_advinfo *cdai;
 	off_t amt;
 
+	xpt_path_assert(start_ccb->ccb_h.path, MA_OWNED);
 	start_ccb->ccb_h.status = CAM_REQ_INVALID;
 	device = start_ccb->ccb_h.path->device;
 	cdai = &start_ccb->cdai;
@@ -2601,7 +2600,7 @@ scsi_dev_advinfo(union ccb *start_ccb)
 		 * We fetch extended inquiry data during probe, if
 		 * available.  We don't allow changing it.
 		 */
-		if (cdai->flags & CDAI_FLAG_STORE) 
+		if (cdai->flags & CDAI_FLAG_STORE)
 			return;
 		cdai->provsiz = device->ext_inq_len;
 		if (device->ext_inq_len == 0)
@@ -2901,7 +2900,6 @@ scsi_set_transfer_settings(struct ccb_trans_settings *cts, struct cam_path *path
 		  && device_tagenb == FALSE)
 		 || ((scsi->flags & CTS_SCSI_FLAGS_TAG_ENB) == 0
 		  && device_tagenb == TRUE)) {
-
 			if ((scsi->flags & CTS_SCSI_FLAGS_TAG_ENB) != 0) {
 				/*
 				 * Delay change to use tags until after a
@@ -2986,14 +2984,13 @@ scsi_dev_async(u_int32_t async_code, struct cam_eb *bus, struct cam_et *target,
 		status = CAM_REQ_CMP_ERR;
 
 	if (status == CAM_REQ_CMP) {
-
 		/*
 		 * Allow transfer negotiation to occur in a
 		 * tag free environment and after settle delay.
 		 */
 		if (async_code == AC_SENT_BDR
 		 || async_code == AC_BUS_RESET) {
-			cam_freeze_devq(&newpath); 
+			cam_freeze_devq(&newpath);
 			cam_release_devq(&newpath,
 				RELSIM_RELEASE_AFTER_TIMEOUT,
 				/*reduction*/0,
@@ -3045,13 +3042,13 @@ _scsi_announce_periph(struct cam_periph *periph, u_int *speed, u_int *freq, stru
 	xpt_action((union ccb*)cts);
 	if (cam_ccb_status((union ccb *)cts) != CAM_REQ_CMP)
 		return;
-	
+
 	/* Ask the SIM for its base transfer speed */
 	xpt_setup_ccb(&cpi.ccb_h, path, CAM_PRIORITY_NORMAL);
 	cpi.ccb_h.func_code = XPT_PATH_INQ;
 	xpt_action((union ccb *)&cpi);
 
-	/* Report connection speed */ 
+	/* Report connection speed */
 	*speed = cpi.base_transfer_speed;
 	*freq = 0;
 

@@ -67,8 +67,11 @@ ASENTRY(ofwcall)
 	mfmsr	%r6
 
 	/* GOT pointer in r7 */
-	bl	_GLOBAL_OFFSET_TABLE_@local-4
+	bl	1f
+1:
 	mflr	%r7
+	addis	%r7,%r7,(_GLOBAL_OFFSET_TABLE_-1b)@ha
+	addi	%r7,%r7,(_GLOBAL_OFFSET_TABLE_-1b)@l
 
 	/* read client interface handler */
 	lwz	%r4,openfirmware_entry@got(%r7)
@@ -117,6 +120,7 @@ ASENTRY(ofwcall)
 	lwz	%r0,4(%r1)
 	mtlr 	%r0
 	blr
+ASEND(ofwcall)
 
 /*
  * RTAS Entry Point. Similar to the OF one, but simpler (no separate stack)
@@ -129,8 +133,11 @@ ASENTRY(rtascall)
 	stw	%r0,4(%r1)
 
 	/* GOT pointer in r7 */
-	bl	_GLOBAL_OFFSET_TABLE_@local-4
+	bl	1f
+1:
 	mflr	%r7
+	addis	%r7,%r7,(_GLOBAL_OFFSET_TABLE_-1b)@ha
+	addi	%r7,%r7,(_GLOBAL_OFFSET_TABLE_-1b)@l
 
 	/* Record the old MSR to real-mode-accessible area */
 	mfmsr	%r0
@@ -152,8 +159,11 @@ ASENTRY(rtascall)
 	bctrl
 
 	/* GOT pointer in r7 */
-	bl	_GLOBAL_OFFSET_TABLE_@local-4
+	bl	1f
+1:
 	mflr	%r7
+	addis	%r7,%r7,(_GLOBAL_OFFSET_TABLE_-1b)@ha
+	addi	%r7,%r7,(_GLOBAL_OFFSET_TABLE_-1b)@l
 
 	/* Now set the MSR back */
 	lwz	%r6,rtas_regsave@got(%r7)
@@ -165,4 +175,4 @@ ASENTRY(rtascall)
 	lwz	%r0,4(%r1)
 	mtlr 	%r0
 	blr
-
+ASEND(rtascall)

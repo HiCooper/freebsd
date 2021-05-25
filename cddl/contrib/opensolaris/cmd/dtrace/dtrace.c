@@ -51,6 +51,7 @@
 #include <libproc.h>
 #endif
 #ifdef __FreeBSD__
+#include <locale.h>
 #include <spawn.h>
 #endif
 
@@ -681,7 +682,7 @@ anon_prog(const dtrace_cmd_t *dcp, dof_hdr_t *dof, int n)
 		dfatal("failed to create DOF image for '%s'", dcp->dc_name);
 
 	p = (uchar_t *)dof;
-	q = p + dof->dofh_loadsz;
+	q = p + dof->dofh_filesz;
 
 #ifdef __FreeBSD__
 	/*
@@ -1315,6 +1316,14 @@ main(int argc, char *argv[])
 	char *p, **v;
 	struct ps_prochandle *P;
 	pid_t pid;
+
+#ifdef __FreeBSD__
+	/* For %'d and the like. */
+	(void) setlocale(LC_NUMERIC, "");
+
+	/* For %T. */
+	(void) setlocale(LC_TIME, "");
+#endif
 
 	g_pname = basename(argv[0]);
 

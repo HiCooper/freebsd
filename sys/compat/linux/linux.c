@@ -31,6 +31,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/conf.h>
 #include <sys/ctype.h>
 #include <sys/jail.h>
 #include <sys/lock.h>
@@ -50,6 +51,9 @@ __FBSDID("$FreeBSD$");
 #include <compat/linux/linux.h>
 #include <compat/linux/linux_common.h>
 #include <compat/linux/linux_util.h>
+
+struct futex_list futex_list;
+struct mtx futex_mtx;			/* protects the futex list */
 
 CTASSERT(LINUX_IFNAMSIZ == IFNAMSIZ);
 
@@ -124,6 +128,12 @@ static int linux_to_bsd_sigtbl[LINUX_SIGTBLSZ] = {
 	 */
 	SIGRTMIN,	/* LINUX_SIGPWR */
 	SIGSYS		/* LINUX_SIGSYS */
+};
+
+static struct cdev *dev_shm_cdev;
+static struct cdevsw dev_shm_cdevsw = {
+     .d_version = D_VERSION,
+     .d_name    = "dev_shm",
 };
 
 /*
@@ -475,7 +485,7 @@ linux_to_bsd_sockaddr(const struct l_sockaddr *osa, struct sockaddr **sap,
 				sin6->sin6_scope_id = 0;
 			} else {
 				linux_msg(curthread,
-				    "obsolete pre-RFC2553 sockaddr_in6 rejected\n");
+				    "obsolete pre-RFC2553 sockaddr_in6 rejected");
 				error = EINVAL;
 				goto out;
 			}
@@ -520,4 +530,100 @@ linux_to_bsd_sockaddr(const struct l_sockaddr *osa, struct sockaddr **sap,
 out:
 	free(kosa, M_SONAME);
 	return (error);
+}
+
+void
+linux_dev_shm_create(void)
+{
+	int error;
+
+	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &dev_shm_cdev,
+	    &dev_shm_cdevsw, NULL, UID_ROOT, GID_WHEEL, 0, "shm/.mountpoint");
+	if (error != 0) {
+		printf("%s: failed to create device node, error %d\n",
+		    __func__, error);
+	}
+}
+
+void
+linux_dev_shm_destroy(void)
+{
+
+	destroy_dev(dev_shm_cdev);
+}
+
+int
+bsd_to_linux_bits_(int value, struct bsd_to_linux_bitmap *bitmap,
+    size_t mapcnt, int no_value)
+{
+	int bsd_mask, bsd_value, linux_mask, linux_value;
+	int linux_ret;
+	size_t i;
+	bool applied;
+
+	applied = false;
+	linux_ret = 0;
+	for (i = 0; i < mapcnt; ++i) {
+		bsd_mask = bitmap[i].bsd_mask;
+		bsd_value = bitmap[i].bsd_value;
+		if (bsd_mask == 0)
+			bsd_mask = bsd_value;
+
+		linux_mask = bitmap[i].linux_mask;
+		linux_value = bitmap[i].linux_value;
+		if (linux_mask == 0)
+			linux_mask = linux_value;
+
+		/*
+		 * If a mask larger than just the value is set, we explicitly
+		 * want to make sure that only this bit we mapped within that
+		 * mask is set.
+		 */
+		if ((value & bsd_mask) == bsd_value) {
+			linux_ret = (linux_ret & ~linux_mask) | linux_value;
+			applied = true;
+		}
+	}
+
+	if (!applied)
+		return (no_value);
+	return (linux_ret);
+}
+
+int
+linux_to_bsd_bits_(int value, struct bsd_to_linux_bitmap *bitmap,
+    size_t mapcnt, int no_value)
+{
+	int bsd_mask, bsd_value, linux_mask, linux_value;
+	int bsd_ret;
+	size_t i;
+	bool applied;
+
+	applied = false;
+	bsd_ret = 0;
+	for (i = 0; i < mapcnt; ++i) {
+		bsd_mask = bitmap[i].bsd_mask;
+		bsd_value = bitmap[i].bsd_value;
+		if (bsd_mask == 0)
+			bsd_mask = bsd_value;
+
+		linux_mask = bitmap[i].linux_mask;
+		linux_value = bitmap[i].linux_value;
+		if (linux_mask == 0)
+			linux_mask = linux_value;
+
+		/*
+		 * If a mask larger than just the value is set, we explicitly
+		 * want to make sure that only this bit we mapped within that
+		 * mask is set.
+		 */
+		if ((value & linux_mask) == linux_value) {
+			bsd_ret = (bsd_ret & ~bsd_mask) | bsd_value;
+			applied = true;
+		}
+	}
+
+	if (!applied)
+		return (no_value);
+	return (bsd_ret);
 }

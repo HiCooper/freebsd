@@ -80,9 +80,12 @@ syscall_thread_drain(struct sysent *se)
 }
 
 int
-_syscall_thread_enter(struct thread *td, struct sysent *se)
+syscall_thread_enter(struct thread *td, struct sysent *se)
 {
 	u_int32_t cnt, oldcnt;
+
+	KASSERT((se->sy_thrcnt & SY_THR_STATIC) == 0,
+	    ("%s: not a static syscall", __func__));
 
 	do {
 		oldcnt = se->sy_thrcnt;
@@ -94,9 +97,12 @@ _syscall_thread_enter(struct thread *td, struct sysent *se)
 }
 
 void
-_syscall_thread_exit(struct thread *td, struct sysent *se)
+syscall_thread_exit(struct thread *td, struct sysent *se)
 {
 	u_int32_t cnt, oldcnt;
+
+	KASSERT((se->sy_thrcnt & SY_THR_STATIC) == 0,
+	    ("%s: not a static syscall", __func__));
 
 	do {
 		oldcnt = se->sy_thrcnt;
@@ -120,11 +126,14 @@ kern_syscall_register(struct sysent *sysents, int *offset,
 		if (i == SYS_MAXSYSCALL)
 			return (ENFILE);
 		*offset = i;
-	} else if (*offset < 0 || *offset >= SYS_MAXSYSCALL)
+	} else if (*offset < 0 || *offset >= SYS_MAXSYSCALL) {
 		return (EINVAL);
-	else if (sysents[*offset].sy_call != (sy_call_t *)lkmnosys &&
-	    sysents[*offset].sy_call != (sy_call_t *)lkmressys)
+	} else if (sysents[*offset].sy_call != (sy_call_t *)lkmnosys &&
+	    sysents[*offset].sy_call != (sy_call_t *)lkmressys) {
+		KASSERT(sysents[*offset].sy_call != NULL,
+		    ("undefined syscall %d", *offset));
 		return (EEXIST);
+	}
 
 	KASSERT(sysents[*offset].sy_thrcnt == SY_THR_ABSENT,
 	    ("dynamic syscall is not protected"));

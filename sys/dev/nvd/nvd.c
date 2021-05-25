@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2012-2016 Intel Corporation
  * All rights reserved.
- * Copyright (C) 2018 Alexander Motin <mav@FreeBSD.org>
+ * Copyright (C) 2018-2020 Alexander Motin <mav@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -45,6 +45,9 @@ __FBSDID("$FreeBSD$");
 #include <geom/geom_disk.h>
 
 #include <dev/nvme/nvme.h>
+#include <dev/nvme/nvme_private.h>
+
+#include <dev/pci/pcivar.h>
 
 #define NVD_STR		"nvd"
 
@@ -54,6 +57,7 @@ struct nvd_controller;
 static disk_ioctl_t nvd_ioctl;
 static disk_strategy_t nvd_strategy;
 static dumper_t nvd_dump;
+static disk_getattr_t nvd_getattr;
 
 static void nvd_done(void *arg, const struct nvme_completion *cpl);
 static void nvd_gone(struct nvd_disk *ndisk);
@@ -91,7 +95,7 @@ struct nvd_disk {
 };
 
 struct nvd_controller {
-
+	struct nvme_controller		*ctrlr;
 	TAILQ_ENTRY(nvd_controller)	tailq;
 	TAILQ_HEAD(, nvd_disk)		disk_head;
 };
@@ -100,7 +104,8 @@ static struct mtx			nvd_lock;
 static TAILQ_HEAD(, nvd_controller)	ctrlr_head;
 static TAILQ_HEAD(disk_list, nvd_disk)	disk_head;
 
-static SYSCTL_NODE(_hw, OID_AUTO, nvd, CTLFLAG_RD, 0, "nvd driver parameters");
+static SYSCTL_NODE(_hw, OID_AUTO, nvd, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "nvd driver parameters");
 /*
  * The NVMe specification does not define a maximum or optimal delete size, so
  *  technically max delete size is min(full size of the namespace, 2^32 - 1
@@ -277,17 +282,12 @@ nvd_gonecb(struct disk *dp)
 }
 
 static int
-nvd_ioctl(struct disk *ndisk, u_long cmd, void *data, int fflag,
+nvd_ioctl(struct disk *dp, u_long cmd, void *data, int fflag,
     struct thread *td)
 {
-	int ret = 0;
+	struct nvd_disk		*ndisk = dp->d_drv1;
 
-	switch (cmd) {
-	default:
-		ret = EIO;
-	}
-
-	return (ret);
+	return (nvme_ns_ioctl_process(ndisk->ns, cmd, data, fflag, td));
 }
 
 static int
@@ -297,6 +297,51 @@ nvd_dump(void *arg, void *virt, vm_offset_t phys, off_t offset, size_t len)
 	struct nvd_disk *ndisk = dp->d_drv1;
 
 	return (nvme_ns_dump(ndisk->ns, virt, offset, len));
+}
+
+static int
+nvd_getattr(struct bio *bp)
+{
+	struct nvd_disk *ndisk = (struct nvd_disk *)bp->bio_disk->d_drv1;
+	const struct nvme_namespace_data *nsdata;
+	u_int i;
+
+	if (!strcmp("GEOM::lunid", bp->bio_attribute)) {
+		nsdata = nvme_ns_get_data(ndisk->ns);
+
+		/* Try to return NGUID as lunid. */
+		for (i = 0; i < sizeof(nsdata->nguid); i++) {
+			if (nsdata->nguid[i] != 0)
+				break;
+		}
+		if (i < sizeof(nsdata->nguid)) {
+			if (bp->bio_length < sizeof(nsdata->nguid) * 2 + 1)
+				return (EFAULT);
+			for (i = 0; i < sizeof(nsdata->nguid); i++) {
+				sprintf(&bp->bio_data[i * 2], "%02x",
+				    nsdata->nguid[i]);
+			}
+			bp->bio_completed = bp->bio_length;
+			return (0);
+		}
+
+		/* Try to return EUI64 as lunid. */
+		for (i = 0; i < sizeof(nsdata->eui64); i++) {
+			if (nsdata->eui64[i] != 0)
+				break;
+		}
+		if (i < sizeof(nsdata->eui64)) {
+			if (bp->bio_length < sizeof(nsdata->eui64) * 2 + 1)
+				return (EFAULT);
+			for (i = 0; i < sizeof(nsdata->eui64); i++) {
+				sprintf(&bp->bio_data[i * 2], "%02x",
+				    nsdata->eui64[i]);
+			}
+			bp->bio_completed = bp->bio_length;
+			return (0);
+		}
+	}
+	return (-1);
 }
 
 static void
@@ -359,6 +404,7 @@ nvd_new_controller(struct nvme_controller *ctrlr)
 	nvd_ctrlr = malloc(sizeof(struct nvd_controller), M_NVD,
 	    M_ZERO | M_WAITOK);
 
+	nvd_ctrlr->ctrlr = ctrlr;
 	TAILQ_INIT(&nvd_ctrlr->disk_head);
 	mtx_lock(&nvd_lock);
 	TAILQ_INSERT_TAIL(&ctrlr_head, nvd_ctrlr, tailq);
@@ -374,6 +420,7 @@ nvd_new_disk(struct nvme_namespace *ns, void *ctrlr_arg)
 	struct nvd_disk		*ndisk, *tnd;
 	struct disk		*disk;
 	struct nvd_controller	*ctrlr = ctrlr_arg;
+	device_t		 dev = ctrlr->ctrlr->dev;
 	int unit;
 
 	ndisk = malloc(sizeof(struct nvd_disk), M_NVD, M_ZERO | M_WAITOK);
@@ -408,6 +455,7 @@ nvd_new_disk(struct nvme_namespace *ns, void *ctrlr_arg)
 	disk->d_strategy = nvd_strategy;
 	disk->d_ioctl = nvd_ioctl;
 	disk->d_dump = nvd_dump;
+	disk->d_getattr = nvd_getattr;
 	disk->d_gone = nvd_gonecb;
 	disk->d_name = NVD_STR;
 	disk->d_unit = ndisk->unit;
@@ -436,7 +484,13 @@ nvd_new_disk(struct nvme_namespace *ns, void *ctrlr_arg)
 	    NVME_MODEL_NUMBER_LENGTH);
 	strlcpy(disk->d_descr, descr, sizeof(descr));
 
+	disk->d_hba_vendor = pci_get_vendor(dev);
+	disk->d_hba_device = pci_get_device(dev);
+	disk->d_hba_subvendor = pci_get_subvendor(dev);
+	disk->d_hba_subdevice = pci_get_subdevice(dev);
 	disk->d_rotation_rate = DISK_RR_NON_ROTATING;
+	strlcpy(disk->d_attachment, device_get_nameunit(dev),
+	    sizeof(disk->d_attachment));
 
 	disk_create(disk, DISK_VERSION);
 
@@ -464,4 +518,3 @@ nvd_controller_fail(void *ctrlr_arg)
 	mtx_unlock(&nvd_lock);
 	free(ctrlr, M_NVD);
 }
-

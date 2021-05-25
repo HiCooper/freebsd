@@ -47,8 +47,8 @@
 #define	_C_LABEL(x)	x
 
 #define	ENTRY(sym)						\
-	.text; .globl sym; .type sym,@function; .align 4; sym:
-#define	END(sym) .size sym, . - sym
+	.text; .globl sym; .type sym,@function; .align 4; sym: .cfi_startproc;
+#define	END(sym) .cfi_endproc; .size sym, . - sym
 
 #define	EENTRY(sym)						\
 	.globl	sym; sym:
@@ -59,7 +59,7 @@
 	.set alias,sym
 
 #define	SET_FAULT_HANDLER(handler, tmp)					\
-	ld	tmp, PC_CURTHREAD(gp);					\
+	ld	tmp, PC_CURTHREAD(tp);					\
 	ld	tmp, TD_PCB(tmp);		/* Load the pcb */	\
 	sd	handler, PCB_ONFAULT(tmp)	/* Set the handler */
 

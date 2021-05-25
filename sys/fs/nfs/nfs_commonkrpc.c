@@ -167,7 +167,7 @@ static int nfsv2_procid[NFS_V3NPROCS] = {
  */
 int
 newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
-    struct ucred *cred, NFSPROC_T *p, int callback_retry_mult)
+    struct ucred *cred, NFSPROC_T *p, int callback_retry_mult, bool dotls)
 {
 	int rcvreserve, sndreserve;
 	int pktscale, pktscalesav;
@@ -233,10 +233,8 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 	saddr = NFSSOCKADDR(nrp->nr_nam, struct sockaddr *);
 	error = socreate(saddr->sa_family, &so, nrp->nr_sotype, 
 	    nrp->nr_soproto, td->td_ucred, td);
-	if (error) {
-		td->td_ucred = origcred;
+	if (error != 0)
 		goto out;
-	}
 	do {
 	    if (error != 0 && pktscale > 2) {
 		if (nmp != NULL && nrp->nr_sotype == SOCK_STREAM &&
@@ -272,10 +270,8 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 		    " rsize, wsize\n");
 	} while (error != 0 && pktscale > 2);
 	soclose(so);
-	if (error) {
-		td->td_ucred = origcred;
+	if (error != 0)
 		goto out;
-	}
 
 	client = clnt_reconnect_create(nconf, saddr, nrp->nr_prog,
 	    nrp->nr_vers, sndreserve, rcvreserve);
@@ -285,6 +281,8 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 			CLNT_CONTROL(client, CLSET_INTERRUPTIBLE, &one);
 		if ((nmp->nm_flag & NFSMNT_RESVPORT))
 			CLNT_CONTROL(client, CLSET_PRIVPORT, &one);
+		if (NFSHASTLS(nmp))
+			CLNT_CONTROL(client, CLSET_TLS, &one);
 		if (NFSHASSOFT(nmp)) {
 			if (nmp->nm_sotype == SOCK_DGRAM)
 				/*
@@ -378,6 +376,8 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 		} else {
 			retries = NFSV4_CALLBACKRETRY * callback_retry_mult;
 		}
+		if (dotls)
+			CLNT_CONTROL(client, CLSET_TLS, &one);
 	}
 	CLNT_CONTROL(client, CLSET_RETRIES, &retries);
 
@@ -423,11 +423,10 @@ newnfs_connect(struct nfsmount *nmp, struct nfssockreq *nrp,
 			mtx_unlock(&nrp->nr_mtx);
 	}
 
-
+out:
 	/* Restore current thread's credentials. */
 	td->td_ucred = origcred;
 
-out:
 	NFSEXITCODE(error);
 	return (error);
 }
@@ -490,7 +489,6 @@ nfs_getauth(struct nfssockreq *nrp, int secflavour, char *clnt_principal,
 	case AUTH_SYS:
 	default:
 		return (authunix_create(cred));
-
 	}
 }
 
@@ -591,7 +589,7 @@ newnfs_request(struct nfsrv_descript *nd, struct nfsmount *nmp,
 	 * and let clnt_reconnect_create handle reconnects.
 	 */
 	if (nrp->nr_client == NULL)
-		newnfs_connect(nmp, nrp, cred, td, 0);
+		newnfs_connect(nmp, nrp, cred, td, 0, false);
 
 	/*
 	 * For a client side mount, nmp is != NULL and clp == NULL. For
@@ -735,7 +733,7 @@ newnfs_request(struct nfsrv_descript *nd, struct nfsmount *nmp,
 		if (dtrace_nfscl_nfs234_start_probe != NULL) {
 			uint32_t probe_id;
 			int probe_procnum;
-	
+
 			if (nd->nd_flag & ND_NFSV4) {
 				probe_id =
 				    nfscl_nfs4_start_probes[nd->nd_procnum];
@@ -898,7 +896,7 @@ tryagain:
 	 */
 	newnfs_realign(&nd->nd_mrep, M_WAITOK);
 	nd->nd_md = nd->nd_mrep;
-	nd->nd_dpos = NFSMTOD(nd->nd_md, caddr_t);
+	nd->nd_dpos = mtod(nd->nd_md, caddr_t);
 	nd->nd_repstat = 0;
 	if (nd->nd_procnum != NFSPROC_NULL &&
 	    nd->nd_procnum != NFSV4PROC_CBNULL) {
@@ -918,7 +916,8 @@ tryagain:
 		 * Get rid of the tag, return count and SEQUENCE result for
 		 * NFSv4.
 		 */
-		if ((nd->nd_flag & ND_NFSV4) != 0) {
+		if ((nd->nd_flag & ND_NFSV4) != 0 && nd->nd_repstat !=
+		    NFSERR_MINORVERMISMATCH) {
 			NFSM_DISSECT(tl, u_int32_t *, NFSX_UNSIGNED);
 			i = fxdr_unsigned(int, *tl);
 			error = nfsm_advance(nd, NFSM_RNDUP(i), -1);
@@ -1192,8 +1191,8 @@ tryagain:
 		newnfs_restore_sigmask(td, &oldset);
 	return (0);
 nfsmout:
-	mbuf_freem(nd->nd_mrep);
-	mbuf_freem(nd->nd_mreq);
+	m_freem(nd->nd_mrep);
+	m_freem(nd->nd_mreq);
 	if (usegssname == 0)
 		AUTH_DESTROY(auth);
 	if (rep != NULL)
@@ -1257,13 +1256,13 @@ static int
 nfs_sig_pending(sigset_t set)
 {
 	int i;
-	
+
 	for (i = 0 ; i < nitems(newnfs_sig_set); i++)
 		if (SIGISMEMBER(set, newnfs_sig_set[i]))
 			return (1);
 	return (0);
 }
- 
+
 /*
  * The set/restore sigmask functions are used to (temporarily) overwrite
  * the thread td_sigmask during an RPC call (for example). These are also
@@ -1275,7 +1274,7 @@ newnfs_set_sigmask(struct thread *td, sigset_t *oldset)
 	sigset_t newset;
 	int i;
 	struct proc *p;
-	
+
 	SIGFILLSET(newset);
 	if (td == NULL)
 		td = curthread; /* XXX */
@@ -1337,7 +1336,7 @@ newnfs_sigintr(struct nfsmount *nmp, struct thread *td)
 {
 	struct proc *p;
 	sigset_t tmpset;
-	
+
 	/* Terminate all requests while attempting a forced unmount. */
 	if (NFSCL_FORCEDISM(nmp->nm_mountp))
 		return (EIO);
@@ -1420,7 +1419,7 @@ nfs_up(struct nfsmount *nmp, struct thread *td, const char *msg,
 		    VQ_NOTRESP, 1);
 	} else
 		mtx_unlock(&nmp->nm_mtx);
-	
+
 	mtx_lock(&nmp->nm_mtx);
 	if ((flags & NFSSTA_LOCKTIMEO) && (nmp->nm_state & NFSSTA_LOCKTIMEO)) {
 		nmp->nm_state &= ~NFSSTA_LOCKTIMEO;
@@ -1430,4 +1429,3 @@ nfs_up(struct nfsmount *nmp, struct thread *td, const char *msg,
 	} else
 		mtx_unlock(&nmp->nm_mtx);
 }
-

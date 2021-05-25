@@ -116,13 +116,13 @@
  * nr_cmd (in)	if non-zero indicates a special command:
  *	NETMAP_BDG_ATTACH	 and nr_name = vale*:ifname
  *		attaches the NIC to the switch; nr_ringid specifies
- *		which rings to use. Used by vale-ctl -a ...
+ *		which rings to use. Used by valectl -a ...
  *	    nr_arg1 = NETMAP_BDG_HOST also attaches the host port
- *		as in vale-ctl -h ...
+ *		as in valectl -h ...
  *
  *	NETMAP_BDG_DETACH	and nr_name = vale*:ifname
  *		disconnects a previously attached NIC.
- *		Used by vale-ctl -d ...
+ *		Used by valectl -d ...
  *
  *	NETMAP_BDG_LIST
  *		list the configuration of VALE switches.
@@ -133,17 +133,16 @@
  *
  *	NETMAP_BDG_NEWIF
  *		create a persistent VALE port with name nr_name.
- *		Used by vale-ctl -n ...
+ *		Used by valectl -n ...
  *
  *	NETMAP_BDG_DELIF
- *		delete a persistent VALE port. Used by vale-ctl -d ...
+ *		delete a persistent VALE port. Used by valectl -d ...
  *
  * nr_arg1, nr_arg2, nr_arg3  (in/out)		command specific
  *
  *
  *
  */
-
 
 /*
  * struct nmreq overlays a struct ifreq (just the name)
@@ -215,7 +214,6 @@ struct nmreq {
 /* and also two setsockopt for sysctl emulation */
 #define NETMAP_SETSOCKOPT _IO('i', 140)
 #define NETMAP_GETSOCKOPT _IO('i', 141)
-
 
 /* These linknames are for the Netmap Core Driver */
 #define NETMAP_NT_DEVICE_NAME			L"\\Device\\NETMAP"

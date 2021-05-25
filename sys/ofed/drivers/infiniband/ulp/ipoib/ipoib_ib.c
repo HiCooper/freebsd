@@ -112,17 +112,19 @@ ipoib_dma_mb(struct ipoib_dev_priv *priv, struct mbuf *mb, unsigned int length)
 
 struct mbuf *
 ipoib_alloc_map_mb(struct ipoib_dev_priv *priv, struct ipoib_rx_buf *rx_req,
-    int size)
+    int align, int size)
 {
 	struct mbuf *mb, *m;
 	int i, j;
 
 	rx_req->mb = NULL;
-	mb = m_getm2(NULL, size, M_NOWAIT, MT_DATA, M_PKTHDR);
+	mb = m_getm2(NULL, align + size, M_NOWAIT, MT_DATA, M_PKTHDR);
 	if (mb == NULL)
 		return (NULL);
 	for (i = 0, m = mb; m != NULL; m = m->m_next, i++) {
-		m->m_len = M_SIZE(m);
+		m->m_len = M_SIZE(m) - align;
+		m->m_data += align;
+		align = 0;
 		mb->m_pkthdr.len += m->m_len;
 		rx_req->mapping[i] = ib_dma_map_single(priv->ca,
 		    mtod(m, void *), m->m_len, DMA_FROM_DEVICE);
@@ -174,7 +176,7 @@ ipoib_alloc_rx_mb(struct ipoib_dev_priv *priv, int id)
 {
 
 	return ipoib_alloc_map_mb(priv, &priv->rx_ring[id],
-	    priv->max_ib_mtu + IB_GRH_BYTES);
+	    0, priv->max_ib_mtu + IB_GRH_BYTES);
 }
 
 static int ipoib_ib_post_receives(struct ipoib_dev_priv *priv)
@@ -366,7 +368,7 @@ static void ipoib_ib_handle_tx_wc(struct ipoib_dev_priv *priv, struct ib_wc *wc)
 }
 
 int
-ipoib_poll_tx(struct ipoib_dev_priv *priv)
+ipoib_poll_tx(struct ipoib_dev_priv *priv, bool do_start)
 {
 	int n, i;
 
@@ -378,6 +380,9 @@ ipoib_poll_tx(struct ipoib_dev_priv *priv)
 		else
 			ipoib_ib_handle_tx_wc(priv, wc);
 	}
+
+	if (do_start && n != 0)
+		ipoib_start_locked(priv->dev, priv);
 
 	return n == MAX_SEND_CQE;
 }
@@ -425,7 +430,7 @@ static void drain_tx_cq(struct ipoib_dev_priv *priv)
 	struct ifnet *dev = priv->dev;
 
 	spin_lock(&priv->lock);
-	while (ipoib_poll_tx(priv))
+	while (ipoib_poll_tx(priv, true))
 		; /* nothing */
 
 	if (dev->if_drv_flags & IFF_DRV_OACTIVE)
@@ -482,7 +487,7 @@ ipoib_send(struct ipoib_dev_priv *priv, struct mbuf *mb,
 	void *phead;
 
 	if (unlikely(priv->tx_outstanding > MAX_SEND_CQE))
-		while (ipoib_poll_tx(priv))
+		while (ipoib_poll_tx(priv, false))
 			; /* nothing */
 
 	m_adj(mb, sizeof (struct ipoib_pseudoheader));
@@ -762,7 +767,7 @@ void ipoib_drain_cq(struct ipoib_dev_priv *priv)
 	spin_unlock(&priv->drain_lock);
 
 	spin_lock(&priv->lock);
-	while (ipoib_poll_tx(priv))
+	while (ipoib_poll_tx(priv, true))
 		; /* nothing */
 
 	spin_unlock(&priv->lock);

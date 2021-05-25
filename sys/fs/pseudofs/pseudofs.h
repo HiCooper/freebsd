@@ -78,6 +78,7 @@ typedef enum {
 #define PFS_RAW		(PFS_RAWRD|PFS_RAWWR)
 #define PFS_PROCDEP	0x0010	/* process-dependent */
 #define PFS_NOWAIT	0x0020 /* allow malloc to fail */
+#define PFS_AUTODRAIN	0x0040	/* sbuf_print can sleep to drain */
 
 /*
  * Data structures
@@ -237,6 +238,7 @@ struct pfs_node {
 
 	struct pfs_node		*pn_parent;		/* (o) */
 	struct pfs_node		*pn_nodes;		/* (o) */
+	struct pfs_node		*pn_last_node;		/* (o) */
 	struct pfs_node		*pn_next;		/* (p) */
 };
 

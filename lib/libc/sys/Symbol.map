@@ -402,11 +402,17 @@ FBSD_1.5 {
 };
 
 FBSD_1.6 {
+	__sysctlbyname;
+	close_range;
+	copy_file_range;
 	fhlink;
 	fhlinkat;
 	fhreadlink;
 	getfhat;
 	funlinkat;
+	memfd_create;
+	shm_create_largepage;
+	shm_rename;
 };
 
 FBSDprivate_1.0 {
@@ -515,8 +521,6 @@ FBSDprivate_1.0 {
 	__sys_clock_settime;
 	_close;
 	__sys_close;
-	_closefrom;
-	__sys_closefrom;
 	_connect;
 	__sys_connect;
 	_cpuset;
@@ -563,6 +567,7 @@ FBSDprivate_1.0 {
 	__sys_extattr_set_link;
 	_extattrctl;
 	__sys_extattrctl;
+	__sys_sigfastblock;
 	_fchdir;
 	__sys_fchdir;
 	_fchflags;
@@ -915,6 +920,7 @@ FBSDprivate_1.0 {
 	__sys_setuid;
 	_shm_open;
 	__sys_shm_open;
+	__sys_shm_open2;
 	_shm_unlink;
 	__sys_shm_unlink;
 	_shmat;
@@ -1029,4 +1035,5 @@ FBSDprivate_1.0 {
 	__sys_cpuset_getdomain;
 	_cpuset_setdomain;
 	__sys_cpuset_setdomain;
+	rpctls_syscall;
 };

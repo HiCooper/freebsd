@@ -128,6 +128,7 @@
 		msmgpio: pinctrl@800000 {
 			compatible = "qcom,mdm9615-pinctrl";
 			gpio-controller;
+			gpio-ranges = <&msmgpio 0 0 88>;
 			#gpio-cells = <2>;
 			interrupts = <GIC_SPI 16 IRQ_TYPE_LEVEL_HIGH>;
 			interrupt-controller;
@@ -326,6 +327,7 @@
 					interrupt-controller;
 					#interrupt-cells = <2>;
 					gpio-controller;
+					gpio-ranges = <&pmicgpio 0 0 6>;
 					#gpio-cells = <2>;
 				};
 			};

@@ -1775,7 +1775,8 @@ test_parent(void)
 	archive_entry_clear(ae);
 	r = archive_read_next_header2(a, ae);
 	if (r == ARCHIVE_FAILED) {
-#if defined(O_PATH) || defined(O_SEARCH) || defined(O_EXEC)
+#if defined(O_PATH) || defined(O_SEARCH) || \
+ (defined(__FreeBSD__) && defined(O_EXEC))
 		assertEqualIntA(a, ARCHIVE_OK, r);
 #endif
 		/* Close the disk object. */
@@ -1832,6 +1833,8 @@ test_parent(void)
 	}
 
 	assertChdir("..");
+	assertChmod("lock", 0755);
+	assertChmod("lock/lock2", 0755);
 
 	/* Destroy the disk object. */
 	assertEqualInt(ARCHIVE_OK, archive_read_free(a));

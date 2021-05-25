@@ -12,6 +12,7 @@ SRCS=	delay.c \
 	efi_driver_utils.c \
 	efichar.c \
 	efienv.c \
+	efihttp.c \
 	efinet.c \
 	efipart.c \
 	efizfs.c \
@@ -21,9 +22,13 @@ SRCS=	delay.c \
 	libefi.c \
 	wchar.c
 
+.PATH:  ${SYSDIR}/teken
+SRCS+=  teken.c
+
 .if ${MACHINE_CPUARCH} == "amd64" || ${MACHINE_CPUARCH} == "i386"
 SRCS+=	time.c
-.elif ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "arm"
+.elif ${MACHINE_CPUARCH} == "aarch64" || ${MACHINE_CPUARCH} == "arm" || \
+    ${MACHINE_CPUARCH} == "riscv"
 SRCS+=	time_event.c
 .endif
 
@@ -44,8 +49,12 @@ CFLAGS+= -fPIC -mno-red-zone
 .endif
 CFLAGS+= -I${EFIINC}
 CFLAGS+= -I${EFIINCMD}
+CFLAGS.efi_console.c+= -I${SRCTOP}/sys/teken
+CFLAGS.teken.c+= -I${SRCTOP}/sys/teken
 .if ${MK_LOADER_ZFS} != "no"
 CFLAGS+=	-I${ZFSSRC}
+CFLAGS+=	-I${SYSDIR}/cddl/boot/zfs
+CFLAGS+=	-I${SYSDIR}/cddl/contrib/opensolaris/uts/common
 CFLAGS+=	-DEFI_ZFS_BOOT
 .endif
 

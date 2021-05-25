@@ -34,6 +34,7 @@
 #include <sys/systm.h>
 #include <sys/conf.h>
 #include <sys/cpuvar.h>
+#include <sys/endian.h>
 #include <sys/fcntl.h>
 #include <sys/filio.h>
 #include <sys/kdb.h>
@@ -239,7 +240,8 @@ static hrtime_t			profile_interval_min = NANOSEC / 5000;	/* 5000 hz */
 static int			profile_aframes = PROF_ARTIFICIAL_FRAMES;
 
 SYSCTL_DECL(_kern_dtrace);
-SYSCTL_NODE(_kern_dtrace, OID_AUTO, profile, CTLFLAG_RD, 0, "DTrace profile parameters");
+SYSCTL_NODE(_kern_dtrace, OID_AUTO, profile, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "DTrace profile parameters");
 SYSCTL_INT(_kern_dtrace_profile, OID_AUTO, aframes, CTLFLAG_RW, &profile_aframes,
     0, "Skipped frames for profile provider");
 

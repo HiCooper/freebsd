@@ -65,8 +65,11 @@ __FBSDID("$FreeBSD$");
 #endif
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_dumpset.h>
 
 #include <machine/bootinfo.h>
 #include <machine/clock.h>
@@ -113,7 +116,6 @@ mips_init(void)
 
 #ifdef FDT
 	if (fdt_get_mem_regions(mr, &mr_cnt, &val) == 0) {
-
 		physmem = btoc(val);
 
 		KASSERT((phys_avail[0] >= mr[0].mr_start) && \

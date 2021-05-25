@@ -38,13 +38,14 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_inet6.h"
 #include "opt_kgssapi.h"
+#include "opt_kern_tls.h"
 
 #include <fs/nfs/nfsport.h>
 
 #include <rpc/rpc.h>
 #include <rpc/rpcsec_gss.h>
+#include <rpc/rpcsec_tls.h>
 
-#include <nfs/nfs_fha.h>
 #include <fs/nfsserver/nfs_fha_new.h>
 
 #include <security/mac/mac_framework.h>
@@ -82,7 +83,6 @@ int newnfs_nfsv3_procid[NFS_V3NPROCS] = {
 	NFSPROC_NOOP,
 };
 
-
 SYSCTL_DECL(_vfs_nfsd);
 
 SVCPOOL		*nfsrvd_pool;
@@ -109,7 +109,7 @@ extern struct proc *nfsd_master_proc;
 extern time_t nfsdev_time;
 extern int nfsrv_writerpc[NFS_NPROCS];
 extern volatile int nfsrv_devidcnt;
-extern struct nfsv4_opflag nfsv4_opflag[NFSV41_NOPS];
+extern struct nfsv4_opflag nfsv4_opflag[NFSV42_NOPS];
 
 /*
  * NFS server system calls
@@ -121,6 +121,9 @@ nfssvc_program(struct svc_req *rqst, SVCXPRT *xprt)
 	struct nfsrv_descript nd;
 	struct nfsrvcache *rp = NULL;
 	int cacherep, credflavor;
+#ifdef KERN_TLS
+	u_int maxlen;
+#endif
 
 	memset(&nd, 0, sizeof(nd));
 	if (rqst->rq_vers == NFS_VER2) {
@@ -235,6 +238,14 @@ nfssvc_program(struct svc_req *rqst, SVCXPRT *xprt)
 			goto out;
 		}
 
+		if ((xprt->xp_tls & RPCTLS_FLAGS_HANDSHAKE) != 0) {
+			nd.nd_flag |= ND_TLS;
+			if ((xprt->xp_tls & RPCTLS_FLAGS_VERIFIED) != 0)
+				nd.nd_flag |= ND_TLSCERT;
+			if ((xprt->xp_tls & RPCTLS_FLAGS_CERTUSER) != 0)
+				nd.nd_flag |= ND_TLSCERTUSER;
+		}
+		nd.nd_maxextsiz = 16384;
 #ifdef MAC
 		mac_cred_associate_nfsd(nd.nd_cred);
 #endif
@@ -269,6 +280,11 @@ nfssvc_program(struct svc_req *rqst, SVCXPRT *xprt)
 			}
 		}
 
+#ifdef KERN_TLS
+		if ((xprt->xp_tls & RPCTLS_FLAGS_HANDSHAKE) != 0 &&
+		    rpctls_getinfo(&maxlen, false, false))
+			nd.nd_maxextsiz = maxlen;
+#endif
 		cacherep = nfs_proc(&nd, rqst->rq_xid, xprt, &rp);
 		NFSLOCKV4ROOTMUTEX();
 		nfsv4_relref(&nfsd_suspend_lock);
@@ -393,8 +409,7 @@ nfs_proc(struct nfsrv_descript *nd, u_int32_t xid, SVCXPRT *xprt,
 			} else
 				m = NULL;
 			if ((nd->nd_flag & ND_HASSEQUENCE) != 0)
-				nfsrv_cache_session(nd->nd_sessionid,
-				    nd->nd_slotid, nd->nd_repstat, &m);
+				nfsrv_cache_session(nd, &m);
 			if (nd->nd_repstat == NFSERR_REPLYFROMCACHE)
 				nd->nd_repstat = 0;
 			cacherep = RC_REPLY;
@@ -520,12 +535,12 @@ nfsrvd_nfsd(struct thread *td, struct nfsd_nfsd_args *args)
 				ret4 = rpc_gss_set_svc_name_call(principal,
 				    "kerberosv5", GSS_C_INDEFINITE, NFS_PROG,
 				    NFS_VER4);
-	
+
 				if (!ret2 || !ret3 || !ret4)
 					printf(
 					    "nfsd: can't register svc name\n");
 			}
-	
+
 			nfsrvd_pool->sp_minthreads = args->minthreads;
 			nfsrvd_pool->sp_maxthreads = args->maxthreads;
 				
@@ -539,7 +554,7 @@ nfsrvd_nfsd(struct thread *td, struct nfsd_nfsd_args *args)
 			}
 
 			svc_run(nfsrvd_pool);
-	
+
 			/* Reset Getattr to not do a vn_start_write(). */
 			nfsrv_writerpc[NFSPROC_GETATTR] = 0;
 			nfsv4_opflag[NFSV4OP_GETATTR].modifyfs = 0;
@@ -590,8 +605,7 @@ nfsrvd_init(int terminating)
 		    SYSCTL_STATIC_CHILDREN(_vfs_nfsd));
 		nfsrvd_pool->sp_rcache = NULL;
 		nfsrvd_pool->sp_assign = fhanew_assign;
-		nfsrvd_pool->sp_done = fha_nd_complete;
+		nfsrvd_pool->sp_done = fhanew_nd_complete;
 		NFSD_LOCK();
 	}
 }
-

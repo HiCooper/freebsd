@@ -43,8 +43,14 @@ enum {
 	MODE_INVALID,
 	MODE_TRACE,
 	MODE_TRAPCAP,
+	MODE_PROTMAX,
+	MODE_STACKGAP,
 #ifdef PROC_KPTI_CTL
 	MODE_KPTI,
+#endif
+#ifdef PROC_LA_CTL
+	MODE_LA57,
+	MODE_LA48,
 #endif
 };
 
@@ -67,13 +73,18 @@ str2pid(const char *str)
 #else
 #define	KPTI_USAGE
 #endif
+#ifdef PROC_LA_CTL
+#define	LA_USAGE "|la48|la57"
+#else
+#define	LA_USAGE
+#endif
 
 static void __dead2
 usage(void)
 {
 
-	fprintf(stderr, "Usage: proccontrol -m (aslr|trace|trapcap"
-	    KPTI_USAGE") [-q] "
+	fprintf(stderr, "Usage: proccontrol -m (aslr|protmax|trace|trapcap|"
+	    "stackgap"KPTI_USAGE LA_USAGE") [-q] "
 	    "[-s (enable|disable)] [-p pid | command]\n");
 	exit(1);
 }
@@ -94,13 +105,23 @@ main(int argc, char *argv[])
 		case 'm':
 			if (strcmp(optarg, "aslr") == 0)
 				mode = MODE_ASLR;
+			else if (strcmp(optarg, "protmax") == 0)
+				mode = MODE_PROTMAX;
 			else if (strcmp(optarg, "trace") == 0)
 				mode = MODE_TRACE;
 			else if (strcmp(optarg, "trapcap") == 0)
 				mode = MODE_TRAPCAP;
+			else if (strcmp(optarg, "stackgap") == 0)
+				mode = MODE_STACKGAP;
 #ifdef PROC_KPTI_CTL
 			else if (strcmp(optarg, "kpti") == 0)
 				mode = MODE_KPTI;
+#endif
+#ifdef PROC_LA_CTL
+			else if (strcmp(optarg, "la57") == 0)
+				mode = MODE_LA57;
+			else if (strcmp(optarg, "la48") == 0)
+				mode = MODE_LA48;
 #endif
 			else
 				usage();
@@ -147,9 +168,21 @@ main(int argc, char *argv[])
 		case MODE_TRAPCAP:
 			error = procctl(P_PID, pid, PROC_TRAPCAP_STATUS, &arg);
 			break;
+		case MODE_PROTMAX:
+			error = procctl(P_PID, pid, PROC_PROTMAX_STATUS, &arg);
+			break;
+		case MODE_STACKGAP:
+			error = procctl(P_PID, pid, PROC_STACKGAP_STATUS, &arg);
+			break;
 #ifdef PROC_KPTI_CTL
 		case MODE_KPTI:
 			error = procctl(P_PID, pid, PROC_KPTI_STATUS, &arg);
+			break;
+#endif
+#ifdef PROC_LA_CTL
+		case MODE_LA57:
+		case MODE_LA48:
+			error = procctl(P_PID, pid, PROC_LA_STATUS, &arg);
 			break;
 #endif
 		default:
@@ -194,6 +227,43 @@ main(int argc, char *argv[])
 				break;
 			}
 			break;
+		case MODE_PROTMAX:
+			switch (arg & ~PROC_PROTMAX_ACTIVE) {
+			case PROC_PROTMAX_FORCE_ENABLE:
+				printf("force enabled");
+				break;
+			case PROC_PROTMAX_FORCE_DISABLE:
+				printf("force disabled");
+				break;
+			case PROC_PROTMAX_NOFORCE:
+				printf("not forced");
+				break;
+			}
+			if ((arg & PROC_PROTMAX_ACTIVE) != 0)
+				printf(", active\n");
+			else
+				printf(", not active\n");
+			break;
+		case MODE_STACKGAP:
+			switch (arg & (PROC_STACKGAP_ENABLE |
+			    PROC_STACKGAP_DISABLE)) {
+			case PROC_STACKGAP_ENABLE:
+				printf("enabled\n");
+				break;
+			case PROC_STACKGAP_DISABLE:
+				printf("disabled\n");
+				break;
+			}
+			switch (arg & (PROC_STACKGAP_ENABLE_EXEC |
+			    PROC_STACKGAP_DISABLE_EXEC)) {
+			case PROC_STACKGAP_ENABLE_EXEC:
+				printf("enabled after exec\n");
+				break;
+			case PROC_STACKGAP_DISABLE_EXEC:
+				printf("disabled after exec\n");
+				break;
+			}
+			break;
 #ifdef PROC_KPTI_CTL
 		case MODE_KPTI:
 			switch (arg & ~PROC_KPTI_STATUS_ACTIVE) {
@@ -208,6 +278,27 @@ main(int argc, char *argv[])
 				printf(", active\n");
 			else
 				printf(", not active\n");
+			break;
+#endif
+#ifdef PROC_LA_CTL
+		case MODE_LA57:
+		case MODE_LA48:
+			switch (arg & ~(PROC_LA_STATUS_LA48 |
+			    PROC_LA_STATUS_LA57)) {
+			case PROC_LA_CTL_LA48_ON_EXEC:
+				printf("la48 on exec");
+				break;
+			case PROC_LA_CTL_LA57_ON_EXEC:
+				printf("la57 on exec");
+				break;
+			case PROC_LA_CTL_DEFAULT_ON_EXEC:
+				printf("default on exec");
+				break;
+			}
+			if ((arg & PROC_LA_STATUS_LA48) != 0)
+				printf(", la48 active\n");
+			else if ((arg & PROC_LA_STATUS_LA57) != 0)
+				printf(", la57 active\n");
 			break;
 #endif
 		}
@@ -228,11 +319,34 @@ main(int argc, char *argv[])
 			    PROC_TRAPCAP_CTL_DISABLE;
 			error = procctl(P_PID, pid, PROC_TRAPCAP_CTL, &arg);
 			break;
+		case MODE_PROTMAX:
+			arg = enable ? PROC_PROTMAX_FORCE_ENABLE :
+			    PROC_PROTMAX_FORCE_DISABLE;
+			error = procctl(P_PID, pid, PROC_PROTMAX_CTL, &arg);
+			break;
+		case MODE_STACKGAP:
+			arg = enable ? PROC_STACKGAP_ENABLE_EXEC :
+			    (PROC_STACKGAP_DISABLE |
+			    PROC_STACKGAP_DISABLE_EXEC);
+			error = procctl(P_PID, pid, PROC_STACKGAP_CTL, &arg);
+			break;
 #ifdef PROC_KPTI_CTL
 		case MODE_KPTI:
 			arg = enable ? PROC_KPTI_CTL_ENABLE_ON_EXEC :
 			    PROC_KPTI_CTL_DISABLE_ON_EXEC;
 			error = procctl(P_PID, pid, PROC_KPTI_CTL, &arg);
+			break;
+#endif
+#ifdef PROC_LA_CTL
+		case MODE_LA57:
+			arg = enable ? PROC_LA_CTL_LA57_ON_EXEC :
+			    PROC_LA_CTL_DEFAULT_ON_EXEC;
+			error = procctl(P_PID, pid, PROC_LA_CTL, &arg);
+			break;
+		case MODE_LA48:
+			arg = enable ? PROC_LA_CTL_LA48_ON_EXEC :
+			    PROC_LA_CTL_DEFAULT_ON_EXEC;
+			error = procctl(P_PID, pid, PROC_LA_CTL, &arg);
 			break;
 #endif
 		default:

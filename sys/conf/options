@@ -55,17 +55,19 @@ DDB_CAPTURE_DEFAULTBUFSIZE	opt_ddb.h
 DDB_CAPTURE_MAXBUFSIZE	opt_ddb.h
 DDB_CTF		opt_ddb.h
 DDB_NUMSYM	opt_ddb.h
+EARLY_PRINTF	opt_global.h
 FULL_BUF_TRACKING	opt_global.h
 GDB
 KDB		opt_global.h
 KDB_TRACE	opt_kdb.h
 KDB_UNATTENDED	opt_kdb.h
 KLD_DEBUG	opt_kld.h
+NUM_CORE_FILES	opt_global.h
+QUEUE_MACRO_DEBUG_TRACE	opt_global.h
+QUEUE_MACRO_DEBUG_TRASH	opt_global.h
 SYSCTL_DEBUG	opt_sysctl.h
-EARLY_PRINTF	opt_global.h
 TEXTDUMP_PREFERRED	opt_ddb.h
 TEXTDUMP_VERBOSE	opt_ddb.h
-NUM_CORE_FILES	opt_global.h
 TSLOG	opt_global.h
 TSLOGSIZE	opt_global.h
 
@@ -106,18 +108,15 @@ GZIO		opt_gzio.h
 IMAGACT_BINMISC		opt_dontuse.h
 IPI_PREEMPTION	opt_sched.h
 GEOM_BDE	opt_geom.h
-GEOM_BSD	opt_geom.h
 GEOM_CACHE	opt_geom.h
 GEOM_CONCAT	opt_geom.h
 GEOM_ELI	opt_geom.h
-GEOM_FOX	opt_geom.h
 GEOM_GATE	opt_geom.h
 GEOM_JOURNAL	opt_geom.h
 GEOM_LABEL	opt_geom.h
 GEOM_LABEL_GPT	opt_geom.h
 GEOM_LINUX_LVM	opt_geom.h
 GEOM_MAP	opt_geom.h
-GEOM_MBR	opt_geom.h
 GEOM_MIRROR	opt_geom.h
 GEOM_MOUNTVER	opt_geom.h
 GEOM_MULTIPATH	opt_geom.h
@@ -126,7 +125,6 @@ GEOM_PART_APM	opt_geom.h
 GEOM_PART_BSD	opt_geom.h
 GEOM_PART_BSD64	opt_geom.h
 GEOM_PART_EBR	opt_geom.h
-GEOM_PART_EBR_COMPAT	opt_geom.h
 GEOM_PART_GPT	opt_geom.h
 GEOM_PART_LDM	opt_geom.h
 GEOM_PART_MBR	opt_geom.h
@@ -135,12 +133,10 @@ GEOM_RAID	opt_geom.h
 GEOM_RAID3	opt_geom.h
 GEOM_SHSEC	opt_geom.h
 GEOM_STRIPE	opt_geom.h
-GEOM_SUNLABEL	opt_geom.h
 GEOM_UZIP	opt_geom.h
 GEOM_UZIP_DEBUG	opt_geom.h
 GEOM_VINUM	opt_geom.h
 GEOM_VIRSTOR	opt_geom.h
-GEOM_VOL	opt_geom.h
 GEOM_ZERO	opt_geom.h
 IFLIB		opt_iflib.h
 KDTRACE_HOOKS	opt_global.h
@@ -184,7 +180,6 @@ NEW_PCIB	opt_global.h
 NO_ADAPTIVE_MUTEXES	opt_adaptive_mutexes.h
 NO_ADAPTIVE_RWLOCKS
 NO_ADAPTIVE_SX
-NO_EVENTTIMERS		opt_timer.h
 NO_OBSOLETE_CODE	opt_global.h
 NO_SYSCTL_DESCR	opt_global.h
 NSWBUF_MIN	opt_param.h
@@ -235,6 +230,7 @@ ZSTDIO		opt_zstdio.h
 # Sanitizers
 COVERAGE	opt_global.h
 KCOV
+KCSAN		opt_global.h
 KUBSAN		opt_global.h
 
 # POSIX kernel options
@@ -256,7 +252,6 @@ FDESCFS		opt_dontuse.h
 FFS		opt_dontuse.h
 FUSEFS		opt_dontuse.h
 MSDOSFS		opt_dontuse.h
-NANDFS		opt_dontuse.h
 NULLFS		opt_dontuse.h
 PROCFS		opt_dontuse.h
 PSEUDOFS	opt_dontuse.h
@@ -325,8 +320,12 @@ NFS_ROOT	opt_nfsroot.h
 # SMB/CIFS requester
 NETSMB		opt_netsmb.h
 
+# Enable debugnet(4) networking support.
+DEBUGNET 	opt_global.h
 # Enable netdump(4) client support.
 NETDUMP 	opt_global.h
+# Enable netgdb(4) support.
+NETGDB 		opt_global.h
 
 # Options used only in subr_param.c.
 HZ		opt_param.h
@@ -351,6 +350,7 @@ CAM_DEBUG_LUN		opt_cam.h
 CAM_DEBUG_FLAGS		opt_cam.h
 CAM_BOOT_DELAY		opt_cam.h
 CAM_IOSCHED_DYNAMIC	opt_cam.h
+CAM_IO_STATS		opt_cam.h
 CAM_TEST_FAILURE	opt_cam.h
 SCSI_DELAY		opt_scsi.h
 SCSI_NO_SENSE_STRINGS	opt_scsi.h
@@ -424,6 +424,7 @@ RATELIMIT		opt_ratelimit.h
 RATELIMIT_DEBUG		opt_ratelimit.h
 INET			opt_inet.h
 INET6			opt_inet6.h
+STATS			opt_global.h
 IPDIVERT
 IPFILTER		opt_ipfilter.h
 IPFILTER_DEFAULT_BLOCK	opt_ipfilter.h
@@ -441,6 +442,7 @@ IPSEC			opt_ipsec.h
 IPSEC_DEBUG		opt_ipsec.h
 IPSEC_SUPPORT		opt_ipsec.h
 IPSTEALTH
+KERN_TLS
 KRPC
 LIBALIAS
 LIBMCHAIN
@@ -450,7 +452,7 @@ MROUTING		opt_mrouting.h
 NFSLOCKD
 PCBGROUP		opt_pcbgroup.h
 PF_DEFAULT_TO_DROP	opt_pf.h
-RADIX_MPATH		opt_mpath.h
+ROUTE_MPATH		opt_route.h
 ROUTETABLES		opt_route.h
 RSS			opt_rss.h
 SLIP_IFF_OPTS		opt_slip.h
@@ -465,12 +467,14 @@ TCP_RFC7413_MAX_KEYS	opt_inet.h
 TCP_RFC7413_MAX_PSKS	opt_inet.h
 TCP_SIGNATURE		opt_ipsec.h
 VLAN_ARRAY		opt_vlan.h
+XDR
 XBONEHACK
 
 #
 # SCTP
 #
 SCTP			opt_sctp.h
+SCTP_SUPPORT		opt_sctp.h
 SCTP_DEBUG		opt_sctp.h # Enable debug printfs
 SCTP_LOCK_LOGGING	opt_sctp.h # Log to KTR lock activity
 SCTP_MBUF_LOGGING	opt_sctp.h # Log to KTR general mbuf aloc/free
@@ -567,7 +571,6 @@ TI_JUMBO_HDRSPLIT	opt_ti.h
 # with 'make CC="cc -DDEBUG"'.
 CLUSTERDEBUG		opt_debug_cluster.h
 DEBUG_1284		opt_ppb_1284.h
-VP0_DEBUG		opt_vpo.h
 LPT_DEBUG		opt_lpt.h
 PLIP_DEBUG		opt_plip.h
 LOCKF_DEBUG		opt_debug_lockf.h
@@ -598,7 +601,7 @@ INVARIANTS		opt_global.h
 KASSERT_PANIC_OPTIONAL	opt_global.h
 MAXCPU			opt_global.h
 MAXMEMDOM		opt_global.h
-MAXPHYS			opt_global.h
+MAXPHYS			opt_maxphys.h
 MCLSHIFT		opt_global.h
 MUTEX_NOINLINE		opt_global.h
 LOCK_PROFILING		opt_global.h
@@ -643,27 +646,6 @@ NFS_DEBUG		opt_nfs.h
 
 # TMPFS options
 TMPFS_PAGES_MINRESERVED		opt_tmpfs.h
-
-# For the Bt848/Bt848A/Bt849/Bt878/Bt879 driver
-OVERRIDE_CARD			opt_bktr.h
-OVERRIDE_TUNER			opt_bktr.h
-OVERRIDE_DBX			opt_bktr.h
-OVERRIDE_MSP			opt_bktr.h
-BROOKTREE_SYSTEM_DEFAULT	opt_bktr.h
-BROOKTREE_ALLOC_PAGES		opt_bktr.h
-BKTR_OVERRIDE_CARD		opt_bktr.h
-BKTR_OVERRIDE_TUNER		opt_bktr.h
-BKTR_OVERRIDE_DBX		opt_bktr.h
-BKTR_OVERRIDE_MSP		opt_bktr.h
-BKTR_SYSTEM_DEFAULT		opt_bktr.h
-BKTR_ALLOC_PAGES		opt_bktr.h
-BKTR_USE_PLL			opt_bktr.h	
-BKTR_GPIO_ACCESS		opt_bktr.h
-BKTR_NO_MSP_RESET		opt_bktr.h
-BKTR_430_FX_MODE		opt_bktr.h
-BKTR_SIS_VIA_MODE		opt_bktr.h
-BKTR_USE_FREEBSD_SMBUS		opt_bktr.h
-BKTR_NEW_MSP34XX_DRIVER		opt_bktr.h
 
 # Options for uart(4)
 UART_PPS_ON_CTS		opt_uart.h
@@ -715,12 +697,16 @@ WITNESS_SKIPSPIN	opt_witness.h
 WITNESS_COUNT		opt_witness.h
 OPENSOLARIS_WITNESS	opt_global.h
 
+EPOCH_TRACE		opt_global.h
+
 # options for ACPI support
 ACPI_DEBUG		opt_acpi.h
 ACPI_MAX_TASKS		opt_acpi.h
 ACPI_MAX_THREADS	opt_acpi.h
-ACPI_DMAR		opt_acpi.h
 DEV_ACPI		opt_acpi.h
+
+# options for IOMMU support
+IOMMU			opt_iommu.h
 
 # ISA support
 DEV_ISA			opt_isa.h
@@ -734,7 +720,6 @@ DEV_PCI			opt_pci.h
 DEV_PF			opt_pf.h
 DEV_PFLOG		opt_pf.h
 DEV_PFSYNC		opt_pf.h
-DEV_RANDOM		opt_global.h
 DEV_SPLASH		opt_splash.h
 DEV_VLAN		opt_vlan.h
 
@@ -749,11 +734,6 @@ BCE_NVRAM_WRITE_SUPPORT	opt_bce.h
 
 SOCKBUF_DEBUG		opt_global.h
 
-
-# options for ubsec driver
-UBSEC_DEBUG		opt_ubsec.h
-UBSEC_RNDTEST		opt_ubsec.h
-UBSEC_NO_RNG		opt_ubsec.h
 
 # options for hifn driver
 HIFN_DEBUG		opt_hifn.h
@@ -794,8 +774,8 @@ SC_PIXEL_MODE		opt_syscons.h
 SC_RENDER_DEBUG		opt_syscons.h
 SC_TWOBUTTON_MOUSE	opt_syscons.h
 VT_ALT_TO_ESC_HACK	opt_syscons.h
-VT_FB_DEFAULT_WIDTH	opt_syscons.h
-VT_FB_DEFAULT_HEIGHT	opt_syscons.h
+VT_FB_MAX_WIDTH		opt_syscons.h
+VT_FB_MAX_HEIGHT	opt_syscons.h
 VT_MAXWINDOWS		opt_syscons.h
 VT_TWOBUTTON_MOUSE	opt_syscons.h
 DEV_SC			opt_syscons.h
@@ -862,6 +842,12 @@ AH_INTERRUPT_DEBUGGING	opt_ah.h
 # AR5416 and later interrupt mitigation
 # XXX do not use this for AR9130
 AH_AR5416_INTERRUPT_MITIGATION	opt_ah.h
+
+# options for the Altera mSGDMA driver (altera_msgdma)
+ALTERA_MSGDMA_DESC_STD		opt_altera_msgdma.h
+ALTERA_MSGDMA_DESC_EXT		opt_altera_msgdma.h
+ALTERA_MSGDMA_DESC_PF_STD	opt_altera_msgdma.h
+ALTERA_MSGDMA_DESC_PF_EXT	opt_altera_msgdma.h
 
 # options for the Broadcom BCM43xx driver (bwi)
 BWI_DEBUG		opt_bwi.h
@@ -978,6 +964,8 @@ RACCT_DEFAULT_TO_DISABLED	opt_global.h
 RCTL		opt_global.h
 
 # Random number generator(s)
+# Alternative RNG algorithm.
+RANDOM_FENESTRASX	opt_global.h
 # With this, no entropy processor is loaded, but the entropy
 # harvesting infrastructure is present. This means an entropy
 # processor may be loaded as a module.

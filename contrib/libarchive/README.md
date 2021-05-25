@@ -70,7 +70,7 @@ know about any errors or omissions you find.
 
 ## Supported Formats
 
-Currently, the library automatically detects and reads the following fomats:
+Currently, the library automatically detects and reads the following formats:
   * Old V7 tar archives
   * POSIX ustar
   * GNU tar format (including GNU long filenames, long link names, and sparse files)
@@ -81,6 +81,7 @@ Currently, the library automatically detects and reads the following fomats:
   * Binary cpio (big-endian or little-endian)
   * ISO9660 CD-ROM images (with optional Rockridge or Joliet extensions)
   * ZIP archives (with uncompressed or "deflate" compressed entries, including support for encrypted Zip archives)
+  * ZIPX archives (with support for bzip2, ppmd8, lzma and xz compressed entries)
   * GNU and BSD 'ar' archives
   * 'mtree' format
   * 7-Zip archives

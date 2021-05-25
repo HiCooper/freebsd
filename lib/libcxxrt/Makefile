@@ -20,9 +20,9 @@ SRCS+=		libelftc_dem_gnu3.c\
 		typeinfo.cc\
 		guard.cc
 
-WARNS=		0
+WARNS?=		0
 CFLAGS+=	-isystem ${SRCDIR} -nostdinc++
-CXXSTD?=	c++11
+CXXSTD?=	c++14
 VERSION_MAP=	${.CURDIR}/Version.map
 
 .include <bsd.lib.mk>

@@ -41,6 +41,7 @@
 #include <sys/proc.h>
 #include <sys/queue.h>
 #include <sys/resourcevar.h>
+#include <sys/rwlock.h>
 #include <sys/stat.h>
 #include <sys/sx.h>
 #include <sys/uio.h>
@@ -51,6 +52,8 @@
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_object.h>
+#include <vm/vm_page.h>
+#include <vm/vm_pager.h>
 
 #include "linker_if.h"
 
@@ -202,7 +205,7 @@ ksyms_add(linker_file_t lf, void *arg)
 	strsz = LINKER_STRTAB_GET(lf, &strtab);
 	symsz = numsyms * sizeof(Elf_Sym);
 
-#ifdef __powerpc__
+#ifdef RELOCATABLE_KERNEL
 	fixup = true;
 #else
 	fixup = lf->id > 1;
@@ -404,6 +407,7 @@ ksyms_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
 {
 	struct tsizes ts;
 	struct ksyms_softc *sc;
+	vm_object_t object;
 	vm_size_t elfsz;
 	int error, try;
 
@@ -441,8 +445,9 @@ ksyms_open(struct cdev *dev, int flags, int fmt __unused, struct thread *td)
 		ksyms_size_calc(&ts);
 		elfsz = sizeof(struct ksyms_hdr) + ts.ts_symsz + ts.ts_strsz;
 
-		sc->sc_obj = vm_object_allocate(OBJT_DEFAULT,
-		    OFF_TO_IDX(round_page(elfsz)));
+		object = vm_pager_allocate(OBJT_PHYS, NULL, round_page(elfsz),
+		    VM_PROT_ALL, 0, td->td_ucred);
+		sc->sc_obj = object;
 		sc->sc_objsz = elfsz;
 
 		error = ksyms_snapshot(sc, &ts);
@@ -479,7 +484,7 @@ ksyms_mmap_single(struct cdev *dev, vm_ooffset_t *offset, vm_size_t size,
 	if (error != 0)
 		return (error);
 
-	if (*offset < 0 || *offset >= round_page(sc->sc_objsz) ||
+	if (*offset >= round_page(sc->sc_objsz) ||
 	    size > round_page(sc->sc_objsz) - *offset ||
 	    (nprot & ~PROT_READ) != 0)
 		return (EINVAL);

@@ -55,7 +55,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/taskqueue.h>
- 
+
 #include <net/if.h>
 #include <net/if_var.h>
 #include <net/if_dl.h>
@@ -118,7 +118,6 @@ static void	bwi_set_channel(struct ieee80211com *);
 static void	bwi_scan_end(struct ieee80211com *);
 static int	bwi_newstate(struct ieee80211vap *, enum ieee80211_state, int);
 static void	bwi_updateslot(struct ieee80211com *);
-static int	bwi_media_change(struct ifnet *);
 
 static void	bwi_calibrate(void *);
 
@@ -607,8 +606,8 @@ bwi_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit,
 	ieee80211_ratectl_init(vap);
 
 	/* complete setup */
-	ieee80211_vap_attach(vap, bwi_media_change, ieee80211_media_status,
-	    mac);
+	ieee80211_vap_attach(vap, ieee80211_media_change,
+	    ieee80211_media_status, mac);
 	ic->ic_opmode = opmode;
 	return vap;
 }
@@ -1506,6 +1505,7 @@ bwi_stop_locked(struct bwi_softc *sc, int statechg)
 void
 bwi_intr(void *xsc)
 {
+	struct epoch_tracker et;
 	struct bwi_softc *sc = xsc;
 	struct bwi_mac *mac;
 	uint32_t intr_status;
@@ -1625,7 +1625,9 @@ bwi_intr(void *xsc)
 		device_printf(sc->sc_dev, "intr noise\n");
 
 	if (txrx_intr_status[0] & BWI_TXRX_INTR_RX) {
+		NET_EPOCH_ENTER(et);
 		rx_data = sc->sc_rxeof(sc);
+		NET_EPOCH_EXIT(et);
 		if (sc->sc_flags & BWI_F_STOP) {
 			BWI_UNLOCK(sc);
 			return;
@@ -1804,14 +1806,6 @@ back:
 	BWI_UNLOCK(sc);
 
 	return error;
-}
-
-static int
-bwi_media_change(struct ifnet *ifp)
-{
-	int error = ieee80211_media_change(ifp);
-	/* NB: only the fixed rate can change and that doesn't need a reset */
-	return (error == ENETRESET ? 0 : error);
 }
 
 static int

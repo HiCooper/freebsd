@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/eventhandler.h>
 #include <vm/uma.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/sched.h>
@@ -53,7 +54,7 @@ FEATURE(geom_raid3, "GEOM RAID-3 functionality");
 static MALLOC_DEFINE(M_RAID3, "raid3_data", "GEOM_RAID3 Data");
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, raid3, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, raid3, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_RAID3 stuff");
 u_int g_raid3_debug = 0;
 SYSCTL_UINT(_kern_geom_raid3, OID_AUTO, debug, CTLFLAG_RWTUN, &g_raid3_debug, 0,
@@ -84,7 +85,8 @@ static u_int g_raid3_n4k = 1200;
 SYSCTL_UINT(_kern_geom_raid3, OID_AUTO, n4k, CTLFLAG_RDTUN, &g_raid3_n4k, 0,
     "Maximum number of 4kB allocations");
 
-static SYSCTL_NODE(_kern_geom_raid3, OID_AUTO, stat, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom_raid3, OID_AUTO, stat,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_RAID3 statistics");
 static u_int g_raid3_parity_mismatch = 0;
 SYSCTL_UINT(_kern_geom_raid3_stat, OID_AUTO, parity_mismatch, CTLFLAG_RD,
@@ -115,7 +117,6 @@ struct g_class g_raid3_class = {
 	.fini = g_raid3_fini
 };
 
-
 static void g_raid3_destroy_provider(struct g_raid3_softc *sc);
 static int g_raid3_update_disk(struct g_raid3_disk *disk, u_int state);
 static void g_raid3_update_device(struct g_raid3_softc *sc, boolean_t force);
@@ -124,7 +125,6 @@ static void g_raid3_dumpconf(struct sbuf *sb, const char *indent,
 static void g_raid3_sync_stop(struct g_raid3_softc *sc, int type);
 static int g_raid3_register_request(struct bio *pbp);
 static void g_raid3_sync_release(struct g_raid3_softc *sc);
-
 
 static const char *
 g_raid3_disk_state2str(int state)
@@ -1445,6 +1445,7 @@ g_raid3_start(struct bio *bp)
 	case BIO_WRITE:
 	case BIO_DELETE:
 		break;
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
 		g_raid3_flush(sc, bp);
 		return;
@@ -1722,7 +1723,7 @@ g_raid3_sync_request(struct bio *bp)
 		g_reset_bio(bp);
 		bp->bio_cmd = BIO_READ;
 		bp->bio_offset = sync->ds_offset * (sc->sc_ndisks - 1);
-		bp->bio_length = MIN(MAXPHYS, sc->sc_mediasize - bp->bio_offset);
+		bp->bio_length = MIN(maxphys, sc->sc_mediasize - bp->bio_offset);
 		sync->ds_offset += bp->bio_length / (sc->sc_ndisks - 1);
 		bp->bio_done = g_raid3_sync_done;
 		bp->bio_data = data;
@@ -1751,7 +1752,7 @@ g_raid3_sync_request(struct bio *bp)
 			if (boffset < moffset)
 				moffset = boffset;
 		}
-		if (sync->ds_offset_done + (MAXPHYS * 100) < moffset) {
+		if (sync->ds_offset_done + maxphys * 100 < moffset) {
 			/* Update offset_done on every 100 blocks. */
 			sync->ds_offset_done = moffset;
 			g_raid3_update_metadata(disk);
@@ -2240,10 +2241,10 @@ g_raid3_sync_start(struct g_raid3_softc *sc)
 		disk->d_sync.ds_bios[n] = bp;
 		bp->bio_parent = NULL;
 		bp->bio_cmd = BIO_READ;
-		bp->bio_data = malloc(MAXPHYS, M_RAID3, M_WAITOK);
+		bp->bio_data = malloc(maxphys, M_RAID3, M_WAITOK);
 		bp->bio_cflags = 0;
 		bp->bio_offset = disk->d_sync.ds_offset * (sc->sc_ndisks - 1);
-		bp->bio_length = MIN(MAXPHYS, sc->sc_mediasize - bp->bio_offset);
+		bp->bio_length = MIN(maxphys, sc->sc_mediasize - bp->bio_offset);
 		disk->d_sync.ds_offset += bp->bio_length / (sc->sc_ndisks - 1);
 		bp->bio_done = g_raid3_sync_done;
 		bp->bio_from = disk->d_sync.ds_consumer;
@@ -2908,7 +2909,7 @@ g_raid3_read_metadata(struct g_consumer *cp, struct g_raid3_metadata *md)
 		    cp->provider->name);
 		return (error);
 	}
-	if (md->md_sectorsize > MAXPHYS) {
+	if (md->md_sectorsize > maxphys) {
 		G_RAID3_DEBUG(0, "The blocksize is too big.");
 		return (EINVAL);
 	}
@@ -3314,9 +3315,11 @@ g_raid3_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	/* This orphan function should be never called. */
 	gp->orphan = g_raid3_taste_orphan;
 	cp = g_new_consumer(gp);
-	g_attach(cp, pp);
-	error = g_raid3_read_metadata(cp, &md);
-	g_detach(cp);
+	error = g_attach(cp, pp);
+	if (error == 0) {
+		error = g_raid3_read_metadata(cp, &md);
+		g_detach(cp);
+	}
 	g_destroy_consumer(cp);
 	g_destroy_geom(gp);
 	if (error != 0)
@@ -3424,22 +3427,22 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sx_xlock(&sc->sc_lock);
 		sbuf_printf(sb, "%s<Type>", indent);
 		if (disk->d_no == sc->sc_ndisks - 1)
-			sbuf_printf(sb, "PARITY");
+			sbuf_cat(sb, "PARITY");
 		else
-			sbuf_printf(sb, "DATA");
-		sbuf_printf(sb, "</Type>\n");
+			sbuf_cat(sb, "DATA");
+		sbuf_cat(sb, "</Type>\n");
 		sbuf_printf(sb, "%s<Number>%u</Number>\n", indent,
 		    (u_int)disk->d_no);
 		if (disk->d_state == G_RAID3_DISK_STATE_SYNCHRONIZING) {
 			sbuf_printf(sb, "%s<Synchronized>", indent);
 			if (disk->d_sync.ds_offset == 0)
-				sbuf_printf(sb, "0%%");
+				sbuf_cat(sb, "0%");
 			else {
 				sbuf_printf(sb, "%u%%",
 				    (u_int)((disk->d_sync.ds_offset * 100) /
 				    (sc->sc_mediasize / (sc->sc_ndisks - 1))));
 			}
-			sbuf_printf(sb, "</Synchronized>\n");
+			sbuf_cat(sb, "</Synchronized>\n");
 			if (disk->d_sync.ds_offset > 0) {
 				sbuf_printf(sb, "%s<BytesSynced>%jd"
 				    "</BytesSynced>\n", indent,
@@ -3451,17 +3454,17 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<GenID>%u</GenID>\n", indent, disk->d_genid);
 		sbuf_printf(sb, "%s<Flags>", indent);
 		if (disk->d_flags == 0)
-			sbuf_printf(sb, "NONE");
+			sbuf_cat(sb, "NONE");
 		else {
 			int first = 1;
 
 #define	ADD_FLAG(flag, name)	do {					\
 	if ((disk->d_flags & (flag)) != 0) {				\
 		if (!first)						\
-			sbuf_printf(sb, ", ");				\
+			sbuf_cat(sb, ", ");				\
 		else							\
 			first = 0;					\
-		sbuf_printf(sb, name);					\
+		sbuf_cat(sb, name);					\
 	}								\
 } while (0)
 			ADD_FLAG(G_RAID3_DISK_FLAG_DIRTY, "DIRTY");
@@ -3472,7 +3475,7 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			ADD_FLAG(G_RAID3_DISK_FLAG_BROKEN, "BROKEN");
 #undef	ADD_FLAG
 		}
-		sbuf_printf(sb, "</Flags>\n");
+		sbuf_cat(sb, "</Flags>\n");
 		sbuf_printf(sb, "%s<State>%s</State>\n", indent,
 		    g_raid3_disk_state2str(disk->d_state));
 		sx_xunlock(&sc->sc_lock);
@@ -3505,17 +3508,17 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<GenID>%u</GenID>\n", indent, sc->sc_genid);
 		sbuf_printf(sb, "%s<Flags>", indent);
 		if (sc->sc_flags == 0)
-			sbuf_printf(sb, "NONE");
+			sbuf_cat(sb, "NONE");
 		else {
 			int first = 1;
 
 #define	ADD_FLAG(flag, name)	do {					\
 	if ((sc->sc_flags & (flag)) != 0) {				\
 		if (!first)						\
-			sbuf_printf(sb, ", ");				\
+			sbuf_cat(sb, ", ");				\
 		else							\
 			first = 0;					\
-		sbuf_printf(sb, name);					\
+		sbuf_cat(sb, name);					\
 	}								\
 } while (0)
 			ADD_FLAG(G_RAID3_DEVICE_FLAG_NOFAILSYNC, "NOFAILSYNC");
@@ -3525,7 +3528,7 @@ g_raid3_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			ADD_FLAG(G_RAID3_DEVICE_FLAG_VERIFY, "VERIFY");
 #undef	ADD_FLAG
 		}
-		sbuf_printf(sb, "</Flags>\n");
+		sbuf_cat(sb, "</Flags>\n");
 		sbuf_printf(sb, "%s<Components>%u</Components>\n", indent,
 		    sc->sc_ndisks);
 		sbuf_printf(sb, "%s<State>%s</State>\n", indent,

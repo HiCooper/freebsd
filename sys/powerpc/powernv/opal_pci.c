@@ -117,6 +117,8 @@ static bus_dma_tag_t opalpci_get_dma_tag(device_t dev, device_t child);
 #define	OPAL_EEH_ACTION_CLEAR_FREEZE_DMA	2
 #define	OPAL_EEH_ACTION_CLEAR_FREEZE_ALL	3
 
+#define	OPAL_EEH_STOPPED_NOT_FROZEN		0
+
 /*
  * Constants
  */
@@ -383,7 +385,7 @@ opalpci_attach(device_t dev)
 		    (uintmax_t)sc->phb_id);
 
 	for (i = 0; i < entries; i++)
-		sc->tce[i] = (i * tce_size) | OPAL_PCI_TCE_R | OPAL_PCI_TCE_W;
+		sc->tce[i] = htobe64((i * tce_size) | OPAL_PCI_TCE_R | OPAL_PCI_TCE_W);
 
 	/* Map TCE for every PE. It seems necessary for Power8 */
 	for (i = 0; i < npe; i++) {
@@ -407,10 +409,12 @@ opalpci_attach(device_t dev)
 
 	/*
 	 * Invalidate all previous TCE entries.
-	 *
-	 * TODO: add support for other PHBs than PHB3
 	 */
-	pci_phb3_tce_invalidate_entire(sc);
+	if (ofw_bus_is_compatible(dev, "power8-pciex"))
+		pci_phb3_tce_invalidate_entire(sc);
+	else
+		opal_call(OPAL_PCI_TCE_KILL, sc->phb_id, OPAL_PCI_TCE_KILL_ALL,
+		    OPAL_PCI_DEFAULT_PE, 0, 0, 0);
 
 	/*
 	 * Get MSI properties
@@ -423,7 +427,7 @@ opalpci_attach(device_t dev)
 		sc->msi_base = msi_ranges[0];
 
 		sc->msi_vmem = vmem_create("OPAL MSI", msi_ranges[0],
-		    msi_ranges[1], 1, 16, M_BESTFIT | M_WAITOK);
+		    msi_ranges[1], 1, 0, M_BESTFIT | M_WAITOK);
 
 		sc->base_msi_irq = powerpc_register_pic(dev,
 		    OF_xref_from_node(node),
@@ -501,10 +505,11 @@ opalpci_read_config(device_t dev, u_int bus, u_int slot, u_int func, u_int reg,
 {
 	struct opalpci_softc *sc;
 	uint64_t config_addr;
-	uint8_t byte;
+	uint8_t byte, eeh_state;
 	uint16_t half;
 	uint32_t word;
 	int error;
+	uint16_t err_type;
 
 	sc = device_get_softc(dev);
 
@@ -519,28 +524,39 @@ opalpci_read_config(device_t dev, u_int bus, u_int slot, u_int func, u_int reg,
 	case 2:
 		error = opal_call(OPAL_PCI_CONFIG_READ_HALF_WORD, sc->phb_id,
 		    config_addr, reg, vtophys(&half));
-		word = half;
+		word = be16toh(half);
 		break;
 	case 4:
 		error = opal_call(OPAL_PCI_CONFIG_READ_WORD, sc->phb_id,
 		    config_addr, reg, vtophys(&word));
+		word = be32toh(word);
 		break;
 	default:
 		error = OPAL_SUCCESS;
 		word = 0xffffffff;
+		width = 4;
 	}
 
 	/*
 	 * Poking config state for non-existant devices can make
 	 * the host bridge hang up. Clear any errors.
-	 *
-	 * XXX: Make this conditional on the existence of a freeze
 	 */
-	opal_call(OPAL_PCI_EEH_FREEZE_CLEAR, sc->phb_id, OPAL_PCI_DEFAULT_PE,
-	    OPAL_EEH_ACTION_CLEAR_FREEZE_ALL);
-	
-	if (error != OPAL_SUCCESS)
-		word = 0xffffffff;
+
+	if (error != OPAL_SUCCESS ||
+	    (word == ((1UL << (8 * width)) - 1))) {
+		if (error != OPAL_HARDWARE) {
+			opal_call(OPAL_PCI_EEH_FREEZE_STATUS, sc->phb_id,
+			    OPAL_PCI_DEFAULT_PE, vtophys(&eeh_state),
+			    vtophys(&err_type), NULL);
+			err_type = be16toh(err_type); /* XXX unused */
+			if (eeh_state != OPAL_EEH_STOPPED_NOT_FROZEN)
+				opal_call(OPAL_PCI_EEH_FREEZE_CLEAR,
+				    sc->phb_id, OPAL_PCI_DEFAULT_PE,
+				    OPAL_EEH_ACTION_CLEAR_FREEZE_ALL);
+		}
+		if (error != OPAL_SUCCESS)
+			word = 0xffffffff;
+	}
 
 	return (word);
 }
@@ -577,8 +593,11 @@ opalpci_write_config(device_t dev, u_int bus, u_int slot, u_int func,
 		 * Poking config state for non-existant devices can make
 		 * the host bridge hang up. Clear any errors.
 		 */
-		opal_call(OPAL_PCI_EEH_FREEZE_CLEAR, sc->phb_id,
-		    OPAL_PCI_DEFAULT_PE, OPAL_EEH_ACTION_CLEAR_FREEZE_ALL);
+		if (error != OPAL_HARDWARE) {
+			opal_call(OPAL_PCI_EEH_FREEZE_CLEAR,
+			    sc->phb_id, OPAL_PCI_DEFAULT_PE,
+			    OPAL_EEH_ACTION_CLEAR_FREEZE_ALL);
+		}
 	}
 }
 

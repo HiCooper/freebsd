@@ -38,6 +38,7 @@ __FBSDID("$FreeBSD$");
 #include <errno.h>
 #include <dirent.h>
 #include <fcntl.h>
+#include <paths.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -59,7 +60,7 @@ __FBSDID("$FreeBSD$");
 
 int	verbosity_level = 0;
 
-#define	DEFAULT_DATADIR	"/usr/local/share/cpucontrol"
+#define	DEFAULT_DATADIR	_PATH_LOCALBASE "/share/cpucontrol"
 
 #define	FLAG_I	0x01
 #define	FLAG_M	0x02
@@ -307,7 +308,7 @@ do_msr(const char *cmdarg, const char *dev)
 	}
 	error = ioctl(fd, command, &args);
 	if (error < 0) {
-		WARN(0, "ioctl(%s, CPUCTL_%s (%lu))", dev, command_name, command);
+		WARN(0, "ioctl(%s, CPUCTL_%s (%#x))", dev, command_name, msr);
 		close(fd);
 		return (1);
 	}

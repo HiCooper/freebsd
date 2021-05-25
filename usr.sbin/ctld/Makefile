@@ -15,12 +15,11 @@ CFLAGS+=	-I${SRCTOP}/sys/dev/iscsi
 #CFLAGS+=	-DICL_KERNEL_PROXY
 MAN=		ctld.8 ctl.conf.5
 
-LIBADD=		bsdxml l md sbuf util ucl m nv
+LIBADD=		bsdxml md sbuf util ucl m nv
 
 YFLAGS+=	-v
 CLEANFILES=	y.tab.c y.tab.h y.output
 
-WARNS?=		6
 NO_WMISSING_VARIABLE_DECLARATIONS=
 
 .if ${MK_ISCSI} != "no"

@@ -298,6 +298,8 @@ find_search_domain_name_len(struct option_data *option, size_t *offset)
 
 			pointed_len = find_search_domain_name_len(option,
 			    &pointer);
+			if (pointed_len < 0)
+				return (-1);
 			domain_name_len += pointed_len;
 
 			*offset = i + 2;
@@ -896,6 +898,5 @@ do_packet(struct interface_info *interface, struct dhcp_packet *packet,
 
 	/* Free the data associated with the options. */
 	for (i = 0; i < 256; i++)
-		if (tp.options[i].len && tp.options[i].data)
-			free(tp.options[i].data);
+		free(tp.options[i].data);
 }

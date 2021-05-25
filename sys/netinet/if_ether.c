@@ -63,6 +63,7 @@ __FBSDID("$FreeBSD$");
 #include <net/netisr.h>
 #include <net/ethernet.h>
 #include <net/route.h>
+#include <net/route/nhop.h>
 #include <net/vnet.h>
 
 #include <netinet/in.h>
@@ -91,8 +92,12 @@ enum arp_llinfo_state {
 };
 
 SYSCTL_DECL(_net_link_ether);
-static SYSCTL_NODE(_net_link_ether, PF_INET, inet, CTLFLAG_RW, 0, "");
-static SYSCTL_NODE(_net_link_ether, PF_ARP, arp, CTLFLAG_RW, 0, "");
+static SYSCTL_NODE(_net_link_ether, PF_INET, inet,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "");
+static SYSCTL_NODE(_net_link_ether, PF_ARP, arp,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "");
 
 /* timer values */
 VNET_DEFINE_STATIC(int, arpt_keep) = (20*60);	/* once resolved, good for 20
@@ -174,7 +179,6 @@ SYSCTL_INT(_net_link_ether_arp, OID_AUTO, log_level, CTLFLAG_VNET | CTLFLAG_RW,
 		log((pri), "arp: " __VA_ARGS__);			\
 } while (0)
 
-
 static void	arpintr(struct mbuf *);
 static void	arptimer(void *);
 #ifdef INET
@@ -211,7 +215,7 @@ arptimer(void *arg)
 	LLE_WLOCK(lle);
 	if (callout_pending(&lle->lle_timer)) {
 		/*
-		 * Here we are a bit odd here in the treatment of 
+		 * Here we are a bit odd here in the treatment of
 		 * active/pending. If the pending bit is set, it got
 		 * rescheduled before I ran. The active
 		 * bit we ignore, since if it was stopped
@@ -258,12 +262,16 @@ arptimer(void *arg)
 
 		if (r_skip_req == 0 && lle->la_preempt > 0) {
 			/* Entry was used, issue refresh request */
+			struct epoch_tracker et;
 			struct in_addr dst;
+
 			dst = lle->r_l3addr.addr4;
 			lle->la_preempt--;
 			callout_schedule(&lle->lle_timer, hz * V_arpt_rexmit);
 			LLE_WUNLOCK(lle);
+			NET_EPOCH_ENTER(et);
 			arprequest(ifp, NULL, &dst, NULL);
+			NET_EPOCH_EXIT(et);
 			CURVNET_RESTORE();
 			return;
 		}
@@ -342,7 +350,6 @@ arp_fillheader(struct ifnet *ifp, struct arphdr *ah, int bcast, u_char *buf,
 	return (error);
 }
 
-
 /*
  * Broadcast an ARP request. Caller specifies:
  *	- arp header source ip address
@@ -362,15 +369,15 @@ arprequest_internal(struct ifnet *ifp, const struct in_addr *sip,
 	struct route ro;
 	int error;
 
+	NET_EPOCH_ASSERT();
+
 	if (sip == NULL) {
 		/*
 		 * The caller did not supply a source address, try to find
 		 * a compatible one among those assigned to this interface.
 		 */
-		struct epoch_tracker et;
 		struct ifaddr *ifa;
 
-		NET_EPOCH_ENTER(et);
 		CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
 			if (ifa->ifa_addr->sa_family != AF_INET)
 				continue;
@@ -388,7 +395,6 @@ arprequest_internal(struct ifnet *ifp, const struct in_addr *sip,
 			    IA_MASKSIN(ifa)->sin_addr.s_addr))
 				break;  /* found it. */
 		}
-		NET_EPOCH_EXIT(et);
 		if (sip == NULL) {
 			printf("%s: cannot find matching address\n", __func__);
 			return (EADDRNOTAVAIL);
@@ -475,18 +481,15 @@ arpresolve_full(struct ifnet *ifp, int is_gw, int flags, struct mbuf *m,
 	char *lladdr;
 	int ll_len;
 
+	NET_EPOCH_ASSERT();
+
 	if (pflags != NULL)
 		*pflags = 0;
 	if (plle != NULL)
 		*plle = NULL;
 
-	if ((flags & LLE_CREATE) == 0) {
-		struct epoch_tracker et;
-
-		NET_EPOCH_ENTER(et);
+	if ((flags & LLE_CREATE) == 0)
 		la = lla_lookup(LLTABLE(ifp), LLE_EXCLUSIVE, dst);
-		NET_EPOCH_EXIT(et);
-	}
 	if (la == NULL && (ifp->if_flags & (IFF_NOARP | IFF_STATICARP)) == 0) {
 		la = lltable_alloc_entry(LLTABLE(ifp), 0, dst);
 		if (la == NULL) {
@@ -623,8 +626,9 @@ arpresolve(struct ifnet *ifp, int is_gw, struct mbuf *m,
 	const struct sockaddr *dst, u_char *desten, uint32_t *pflags,
 	struct llentry **plle)
 {
-	struct epoch_tracker et;
 	struct llentry *la = NULL;
+
+	NET_EPOCH_ASSERT();
 
 	if (pflags != NULL)
 		*pflags = 0;
@@ -645,7 +649,6 @@ arpresolve(struct ifnet *ifp, int is_gw, struct mbuf *m,
 		}
 	}
 
-	NET_EPOCH_ENTER(et);
 	la = lla_lookup(LLTABLE(ifp), plle ? LLE_EXCLUSIVE : LLE_UNLOCKED, dst);
 	if (la != NULL && (la->r_flags & RLLE_VALID) != 0) {
 		/* Entry found, let's copy lle info */
@@ -659,12 +662,10 @@ arpresolve(struct ifnet *ifp, int is_gw, struct mbuf *m,
 			*plle = la;
 			LLE_WUNLOCK(la);
 		}
-		NET_EPOCH_EXIT(et);
 		return (0);
 	}
 	if (plle && la)
 		LLE_WUNLOCK(la);
-	NET_EPOCH_EXIT(et);
 
 	return (arpresolve_full(ifp, is_gw, la == NULL ? LLE_CREATE : 0, m, dst,
 	    desten, pflags, plle));
@@ -711,7 +712,7 @@ arpintr(struct mbuf *m)
 		layer = "ethernet";
 		break;
 	case ARPHRD_INFINIBAND:
-		hlen = 20;	/* RFC 4391, INFINIBAND_ALEN */ 
+		hlen = 20;	/* RFC 4391, INFINIBAND_ALEN */
 		layer = "infiniband";
 		break;
 	case ARPHRD_IEEE1394:
@@ -802,14 +803,15 @@ in_arpinput(struct mbuf *m)
 	int carped;
 	struct sockaddr_in sin;
 	struct sockaddr *dst;
-	struct nhop4_basic nh4;
+	struct nhop_object *nh;
 	uint8_t linkhdr[LLE_MAX_LINKHDR];
 	struct route ro;
 	size_t linkhdrsize;
 	int lladdr_off;
 	int error;
 	char addrbuf[INET_ADDRSTRLEN];
-	struct epoch_tracker et;
+
+	NET_EPOCH_ASSERT();
 
 	sin.sin_len = sizeof(struct sockaddr_in);
 	sin.sin_family = AF_INET;
@@ -902,17 +904,14 @@ in_arpinput(struct mbuf *m)
 	 * No match, use the first inet address on the receive interface
 	 * as a dummy address for the rest of the function.
 	 */
-	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link)
 		if (ifa->ifa_addr->sa_family == AF_INET &&
 		    (ifa->ifa_carp == NULL ||
 		    (*carp_iamatch_p)(ifa, &enaddr))) {
 			ia = ifatoia(ifa);
 			ifa_ref(ifa);
-			NET_EPOCH_EXIT(et);
 			goto match;
 		}
-	NET_EPOCH_EXIT(et);
 
 	/*
 	 * If bridging, fall back to using any inet address.
@@ -969,9 +968,7 @@ match:
 	sin.sin_family = AF_INET;
 	sin.sin_addr = isaddr;
 	dst = (struct sockaddr *)&sin;
-	NET_EPOCH_ENTER(et);
 	la = lla_lookup(LLTABLE(ifp), LLE_EXCLUSIVE, dst);
-	NET_EPOCH_EXIT(et);
 	if (la != NULL)
 		arp_check_update_lle(ah, isaddr, ifp, bridged, la);
 	else if (itaddr.s_addr == myaddr.s_addr) {
@@ -987,7 +984,6 @@ match:
 		/* Allocate new entry */
 		la = lltable_alloc_entry(LLTABLE(ifp), 0, dst);
 		if (la == NULL) {
-
 			/*
 			 * lle creation may fail if source address belongs
 			 * to non-directly connected subnet. However, we
@@ -1046,27 +1042,29 @@ reply:
 		(void)memcpy(ar_tha(ah), ar_sha(ah), ah->ar_hln);
 		(void)memcpy(ar_sha(ah), enaddr, ah->ar_hln);
 	} else {
-		struct llentry *lle = NULL;
+		/*
+		 * Destination address is not ours. Check if
+		 * proxyarp entry exists or proxyarp is turned on globally.
+		 */
+		struct llentry *lle;
 
 		sin.sin_addr = itaddr;
-		NET_EPOCH_ENTER(et);
 		lle = lla_lookup(LLTABLE(ifp), 0, (struct sockaddr *)&sin);
-		NET_EPOCH_EXIT(et);
 
 		if ((lle != NULL) && (lle->la_flags & LLE_PUB)) {
 			(void)memcpy(ar_tha(ah), ar_sha(ah), ah->ar_hln);
 			(void)memcpy(ar_sha(ah), lle->ll_addr, ah->ar_hln);
 			LLE_RUNLOCK(lle);
 		} else {
-
 			if (lle != NULL)
 				LLE_RUNLOCK(lle);
 
 			if (!V_arp_proxyall)
 				goto drop;
 
-			/* XXX MRT use table 0 for arp reply  */
-			if (fib4_lookup_nh_basic(0, itaddr, 0, 0, &nh4) != 0)
+			NET_EPOCH_ASSERT();
+			nh = fib4_lookup(ifp->if_fib, itaddr, 0, 0, 0);
+			if (nh == NULL)
 				goto drop;
 
 			/*
@@ -1074,7 +1072,7 @@ reply:
 			 * as this one came out of, or we'll get into a fight
 			 * over who claims what Ether address.
 			 */
-			if (nh4.nh_ifp == ifp)
+			if (nh->nh_ifp == ifp)
 				goto drop;
 
 			(void)memcpy(ar_tha(ah), ar_sha(ah), ah->ar_hln);
@@ -1087,10 +1085,10 @@ reply:
 			 * wrong network.
 			 */
 
-			/* XXX MRT use table 0 for arp checks */
-			if (fib4_lookup_nh_basic(0, isaddr, 0, 0, &nh4) != 0)
+			nh = fib4_lookup(ifp->if_fib, isaddr, 0, 0, 0);
+			if (nh == NULL)
 				goto drop;
-			if (nh4.nh_ifp != ifp) {
+			if (nh->nh_ifp != ifp) {
 				ARP_LOG(LOG_INFO, "proxy: ignoring request"
 				    " from %s via %s\n",
 				    inet_ntoa_r(isaddr, addrbuf),
@@ -1430,6 +1428,7 @@ garp_timer_start(struct ifaddr *ifa)
 void
 arp_ifinit(struct ifnet *ifp, struct ifaddr *ifa)
 {
+	struct epoch_tracker et;
 	const struct sockaddr_in *dst_in;
 	const struct sockaddr *dst;
 
@@ -1441,7 +1440,9 @@ arp_ifinit(struct ifnet *ifp, struct ifaddr *ifa)
 
 	if (ntohl(dst_in->sin_addr.s_addr) == INADDR_ANY)
 		return;
+	NET_EPOCH_ENTER(et);
 	arp_announce_ifaddr(ifp, dst_in->sin_addr, IF_LLADDR(ifp));
+	NET_EPOCH_EXIT(et);
 	if (garp_rexmit_count > 0) {
 		garp_timer_start(ifa);
 	}

@@ -28,7 +28,7 @@
 .\"	@(#)uname.1	8.3 (Berkeley) 4/8/94
 .\" $FreeBSD$
 .\"
-.Dd May 31, 2017
+.Dd November 13, 2020
 .Dt UNAME 1
 .Os
 .Sh NAME
@@ -36,7 +36,7 @@
 .Nd display information about the system
 .Sh SYNOPSIS
 .Nm
-.Op Fl aiKmnoprsUv
+.Op Fl abiKmnoprsUv
 .Sh DESCRIPTION
 The
 .Nm
@@ -53,6 +53,8 @@ Behave as though the options
 and
 .Fl v
 were specified.
+.It Fl b
+Write the kernel's linker-generated build-id to standard output.
 .It Fl i
 Write the kernel ident to standard output.
 .It Fl K
@@ -105,6 +107,9 @@ and
 flags are intended to be used for fine grain differentiation of incremental
 .Fx
 development and user visible changes.
+Note that when both of these two options are specified, regardless of their
+order, the kernel version would be printed first, followed by the user
+environment version.
 .Sh ENVIRONMENT
 An environment variable composed of the string
 .Ev UNAME_
@@ -114,6 +119,9 @@ utility (except for
 .Fl a )
 will allow the corresponding data to be set to the contents
 of the environment variable.
+See
+.Xr uname 3
+for more information.
 .Sh EXIT STATUS
 .Ex -std
 .Sh EXAMPLES
@@ -144,7 +152,11 @@ specification.
 .Sh HISTORY
 The
 .Nm
-command appeared in PWB UNIX.
+command appeared in PWB UNIX 1.0, however
+.Bx 4.4
+was the first Berkeley release with the
+.Nm
+command.
 .Pp
 The
 .Fl K
@@ -152,3 +164,7 @@ and
 .Fl U
 extension flags appeared in
 .Fx 10.0 .
+The
+.Fl b
+extension flag appeared in
+.Fx 13.0 .

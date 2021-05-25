@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -266,7 +266,7 @@ void
 CmDoOutputFiles (
     void);
 
-void
+int
 CmCleanupAndExit (
     void);
 
@@ -372,6 +372,15 @@ MtMethodAnalysisWalkEnd (
     ACPI_PARSE_OBJECT       *Op,
     UINT32                  Level,
     void                    *Context);
+
+UINT32
+MtProcessTypeOp (
+    ACPI_PARSE_OBJECT       *TypeOp);
+
+UINT8
+MtProcessParameterTypeList (
+    ACPI_PARSE_OBJECT       *ParamTypeOp,
+    UINT32                  *TypeList);
 
 
 /*
@@ -479,7 +488,7 @@ AslCheckExpectedExceptions (
     void);
 
 ACPI_STATUS
-AslExpectException (
+AslLogExpectedException (
     char                    *MessageIdString);
 
 ACPI_STATUS
@@ -492,8 +501,14 @@ AslDisableException (
 
 BOOLEAN
 AslIsExceptionIgnored (
+    char                    *Filename,
+    UINT32                  LineNumber,
     UINT8                   Level,
     UINT16                  MessageId);
+
+void
+AslLogExpectedExceptionByLine (
+    char                    *MessageIdString);
 
 void
 AslCoreSubsystemError (
@@ -1052,6 +1067,7 @@ void
 FlCloseFile (
     UINT32                  FileId);
 
+ACPI_PRINTF_LIKE (2)
 void
 FlPrintFile (
     UINT32                  FileId,
@@ -1195,6 +1211,7 @@ OtXrefWalkPart1 (
 /*
  * aslutils - common compiler utilities
  */
+ACPI_PRINTF_LIKE(2)
 void
 DbgPrint (
     UINT32                  Type,
@@ -1231,9 +1248,13 @@ UtDumpBasicOp (
     ACPI_PARSE_OBJECT       *Op,
     UINT32                  Level);
 
-void *
-UtGetParentMethod (
+ACPI_NAMESPACE_NODE *
+UtGetParentMethodNode (
     ACPI_NAMESPACE_NODE     *Node);
+
+ACPI_PARSE_OBJECT *
+UtGetParentMethodOp (
+    ACPI_PARSE_OBJECT       *Op);
 
 BOOLEAN
 UtNodeIsDescendantOf (
@@ -1288,6 +1309,10 @@ UtInternalizeName (
     char                    *ExternalName,
     char                    **ConvertedName);
 
+BOOLEAN
+UtNameContainsAllPrefix (
+    ACPI_PARSE_OBJECT       *Op);
+
 void
 UtAttachNamepathToOwner (
     ACPI_PARSE_OBJECT       *Op,
@@ -1302,6 +1327,15 @@ UtCheckIntegerRange (
 UINT64
 UtDoConstant (
     char                    *String);
+
+char *
+AcpiUtStrdup (
+    char                    *String);
+
+char *
+AcpiUtStrcat (
+    char                    *String1,
+    char                    *String2);
 
 
 /*
@@ -1604,6 +1638,7 @@ DtCreateTemplates (
 /*
  * ASL/ASL+ converter debug
  */
+ACPI_PRINTF_LIKE (1)
 void
 CvDbgPrint (
     char                    *Fmt,

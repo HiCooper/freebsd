@@ -8,10 +8,12 @@ SUBDIR=	${_atf} \
 	${_blacklistd-helper} \
 	${_comsat} \
 	${_dma} \
+	flua \
 	getty \
 	${_mail.local} \
 	${_makewhatis.local} \
 	${_mknetid} \
+	${_phttpget} \
 	${_pppoed} \
 	rc \
 	revnetgroup \
@@ -47,6 +49,10 @@ SUBDIR+=	bootpd
 SUBDIR+=	fingerd
 .endif
 
+.if ${MK_FREEBSD_UPDATE} != "no" || ${MK_PORTSNAP} != "no"
+_phttpget=	phttpget
+.endif
+
 .if ${MK_FTP} != "no"
 SUBDIR+=	ftpd
 .endif
@@ -74,6 +80,7 @@ _tftp-proxy=	tftp-proxy
 
 .if !defined(NO_PIC) && !defined(NO_RTLD)
 _rtld-elf=	rtld-elf
+SUBDIR.${MK_LIB32}+=	rtld-elf32
 .endif
 
 .if ${MK_RBOOTD} != "no"

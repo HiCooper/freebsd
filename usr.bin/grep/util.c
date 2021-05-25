@@ -154,7 +154,7 @@ grep_tree(char **argv)
 	    __DECONST(char * const *, wd) : argv, fts_flags, NULL);
 	if (fts == NULL)
 		err(2, "fts_open");
-	while ((p = fts_read(fts)) != NULL) {
+	while (errno = 0, (p = fts_read(fts)) != NULL) {
 		switch (p->fts_info) {
 		case FTS_DNR:
 			/* FALLTHROUGH */
@@ -187,6 +187,8 @@ grep_tree(char **argv)
 			break;
 		}
 	}
+	if (errno != 0)
+		err(2, "fts_read");
 
 	fts_close(fts);
 	return (matched);
@@ -210,7 +212,7 @@ procmatch_match(struct mprintc *mc, struct parsec *pc)
 		while (pc->matchidx >= MAX_MATCHES) {
 			/* Reset matchidx and try again */
 			pc->matchidx = 0;
-			if (procline(pc))
+			if (procline(pc) == !vflag)
 				printline(pc, ':');
 			else
 				break;
@@ -355,7 +357,7 @@ procfile(const char *fn)
 			return (0);
 		}
 
-		line_matched = procline(&pc);
+		line_matched = procline(&pc) == !vflag;
 		if (line_matched)
 			++lines;
 
@@ -469,17 +471,32 @@ procline(struct parsec *pc)
 
 	matchidx = pc->matchidx;
 
-	/* Special case: empty pattern with -w flag, check first character */
-	if (matchall && wflag) {
+	/*
+	 * With matchall (empty pattern), we can try to take some shortcuts.
+	 * Emtpy patterns trivially match every line except in the -w and -x
+	 * cases.  For -w (whole-word) cases, we only match if the first
+	 * character isn't a word-character.  For -x (whole-line) cases, we only
+	 * match if the line is empty.
+	 */
+	if (matchall) {
 		if (pc->ln.len == 0)
 			return (true);
-		wend = L' ';
-		if (sscanf(&pc->ln.dat[0], "%lc", &wend) != 1 || iswword(wend))
-			return (false);
-		else
+		if (wflag) {
+			wend = L' ';
+			if (sscanf(&pc->ln.dat[0], "%lc", &wend) == 1 &&
+			    !iswword(wend))
+				return (true);
+		} else if (!xflag)
 			return (true);
-	} else if (matchall)
-		return (true);
+
+		/*
+		 * If we don't have any other patterns, we really don't match.
+		 * If we do have other patterns, we must fall through and check
+		 * them.
+		 */
+		if (patterns == 0)
+			return (false);
+	}
 
 	matched = false;
 	st = pc->lnstart;
@@ -609,8 +626,6 @@ procline(struct parsec *pc)
 
 	/* Reflect the new matchidx in the context */
 	pc->matchidx = matchidx;
-	if (vflag)
-		matched = !matched;
 	return matched;
 }
 

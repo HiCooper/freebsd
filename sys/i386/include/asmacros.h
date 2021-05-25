@@ -157,6 +157,7 @@
 	movw	%es,(%esp)
 	pushl	$0
 	movw	%fs,(%esp)
+	movl	%esp,%ebp
 	.endm
 
 	.macro	PUSH_FRAME
@@ -164,7 +165,7 @@
 	pushl	$0		/* dummy trap type */
 	PUSH_FRAME2
 	.endm
-	
+
 /*
  * Access per-CPU data.
  */

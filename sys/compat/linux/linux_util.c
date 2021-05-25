@@ -36,7 +36,9 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
 #include <sys/bus.h>
+#include <sys/conf.h>
 #include <sys/fcntl.h>
+#include <sys/jail.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/kernel.h>
@@ -46,11 +48,14 @@ __FBSDID("$FreeBSD$");
 #include <sys/proc.h>
 #include <sys/sdt.h>
 #include <sys/syscallsubr.h>
+#include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <sys/vnode.h>
 
 #include <machine/stdarg.h>
 
+#include <compat/linux/linux_dtrace.h>
+#include <compat/linux/linux_mib.h>
 #include <compat/linux/linux_util.h>
 
 MALLOC_DEFINE(M_LINUX, "linux", "Linux mode structures");
@@ -58,7 +63,28 @@ MALLOC_DEFINE(M_EPOLL, "lepoll", "Linux events structures");
 MALLOC_DEFINE(M_FUTEX, "futex", "Linux futexes");
 MALLOC_DEFINE(M_FUTEX_WP, "futex wp", "Linux futex waiting proc");
 
-const char      linux_emul_path[] = "/compat/linux";
+FEATURE(linuxulator_v4l, "V4L ioctl wrapper support in the linuxulator");
+FEATURE(linuxulator_v4l2, "V4L2 ioctl wrapper support in the linuxulator");
+
+/**
+ * Special DTrace provider for the linuxulator.
+ *
+ * In this file we define the provider for the entire linuxulator. All
+ * modules (= files of the linuxulator) use it.
+ *
+ * We define a different name depending on the emulated bitsize, see
+ * ../../<ARCH>/linux{,32}/linux.h, e.g.:
+ *      native bitsize          = linuxulator
+ *      amd64, 32bit emulation  = linuxulator32
+ */
+LIN_SDT_PROVIDER_DEFINE(linuxulator);
+LIN_SDT_PROVIDER_DEFINE(linuxulator32);
+
+char linux_emul_path[MAXPATHLEN] = "/compat/linux";
+
+SYSCTL_STRING(_compat_linux, OID_AUTO, emul_path, CTLFLAG_RWTUN,
+    linux_emul_path, sizeof(linux_emul_path),
+    "Linux runtime environment path");
 
 /*
  * Search an alternate path before passing pathname arguments on to
@@ -85,8 +111,12 @@ linux_msg(const struct thread *td, const char *fmt, ...)
 	va_list ap;
 	struct proc *p;
 
+	if (linux_debug == 0)
+		return;
+
 	p = td->td_proc;
-	printf("linux: pid %d (%s): ", (int)p->p_pid, p->p_comm);
+	printf("linux: jid %d pid %d (%s): ", p->p_ucred->cr_prison->pr_id,
+	    (int)p->p_pid, p->p_comm);
 	va_start(ap, fmt);
 	vprintf(fmt, ap);
 	va_end(ap);
@@ -184,6 +214,24 @@ linux_driver_get_major_minor(const char *node, int *major, int *minor)
 	}
 
 	return (1);
+}
+
+int
+linux_vn_get_major_minor(const struct vnode *vp, int *major, int *minor)
+{
+	int error;
+
+	if (vp->v_type != VCHR)
+		return (ENOTBLK);
+	dev_lock();
+	if (vp->v_rdev == NULL) {
+		dev_unlock();
+		return (ENXIO);
+	}
+	error = linux_driver_get_major_minor(devtoname(vp->v_rdev),
+	    major, minor);
+	dev_unlock();
+	return (error);
 }
 
 char *

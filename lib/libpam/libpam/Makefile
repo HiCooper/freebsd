@@ -35,7 +35,6 @@
 #
 # $FreeBSD$
 
-PACKAGE=lib${LIB}
 OPENPAM=	${SRCTOP}/contrib/openpam
 .PATH: ${OPENPAM}/include ${OPENPAM}/lib/libpam ${OPENPAM}/doc/man
 
@@ -43,6 +42,8 @@ OPENPAM=	${SRCTOP}/contrib/openpam
 .if !defined(LIB)
 SHLIB=	pam
 .endif
+
+PACKAGE=	runtime
 
 MK_PROFILE=no
 
@@ -155,7 +156,6 @@ MAN?=	openpam.3 \
 
 MLINKS?=	pam.conf.5 pam.d.5
 
-CSTD?= c99
 CFLAGS+= -I${OPENPAM}/include
 CFLAGS+= -DLIB_MAJ=${SHLIB_MAJOR}
 CFLAGS+= -DHAVE_DLFUNC=1

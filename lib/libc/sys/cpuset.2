@@ -96,7 +96,7 @@ is interpreted and is of type
 The
 .Fa which
 argument may have the following values:
-.Bl -column CPU_WHICH_CPUSET -offset indent
+.Bl -column CPU_WHICH_INTRHANDLER -offset indent
 .It Dv CPU_WHICH_TID Ta "id is lwpid_t (thread id)"
 .It Dv CPU_WHICH_PID Ta "id is pid_t (process id)"
 .It Dv CPU_WHICH_JAIL Ta "id is jid (jail id)"
@@ -221,8 +221,8 @@ for allocation.
 .Sh SEE ALSO
 .Xr cpuset 1 ,
 .Xr cpuset_getaffinity 2 ,
-.Xr cpuset_setaffinity 2 ,
 .Xr cpuset_getdomain 2 ,
+.Xr cpuset_setaffinity 2 ,
 .Xr cpuset_setdomain 2 ,
 .Xr pthread_affinity_np 3 ,
 .Xr pthread_attr_affinity_np 3 ,

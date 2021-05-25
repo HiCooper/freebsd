@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/taskqueue.h>
 #include <sys/disk.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include "geom/raid/g_raid.h"
 #include "g_raid_md_if.h"
 
@@ -259,7 +260,6 @@ static struct g_raid_md_class g_raid_md_intel_class = {
 	.mdc_enable = 1,
 	.mdc_priority = 100
 };
-
 
 static struct intel_raid_map *
 intel_get_map(struct intel_raid_vol *mvol, int i)
@@ -1453,7 +1453,7 @@ g_raid_md_get_label(struct g_consumer *cp, char *serial, int serlen)
 {
 	char serial_buffer[DISK_IDENT_SIZE];
 	int len, error;
-	
+
 	len = sizeof(serial_buffer);
 	error = g_io_getattr("GEOM::ident", cp, &len, serial_buffer);
 	if (error != 0)
@@ -1711,7 +1711,6 @@ g_raid_md_ctl_intel(struct g_raid_md_object *md,
 	nargs = gctl_get_paraml(req, "nargs", sizeof(*nargs));
 	error = 0;
 	if (strcmp(verb, "label") == 0) {
-
 		if (*nargs < 4) {
 			gctl_error(req, "Invalid number of arguments.");
 			return (-1);
@@ -1920,7 +1919,6 @@ g_raid_md_ctl_intel(struct g_raid_md_object *md,
 		return (0);
 	}
 	if (strcmp(verb, "add") == 0) {
-
 		if (*nargs != 3) {
 			gctl_error(req, "Invalid number of arguments.");
 			return (-1);
@@ -2107,7 +2105,6 @@ g_raid_md_ctl_intel(struct g_raid_md_object *md,
 		return (0);
 	}
 	if (strcmp(verb, "delete") == 0) {
-
 		nodename = gctl_get_asciiparam(req, "arg0");
 		if (nodename != NULL && strcasecmp(sc->sc_name, nodename) != 0)
 			nodename = NULL;
@@ -2207,7 +2204,7 @@ g_raid_md_ctl_intel(struct g_raid_md_object *md,
 				error = -2;
 				break;
 			}
-			if (strncmp(diskname, "/dev/", 5) == 0)
+			if (strncmp(diskname, _PATH_DEV, 5) == 0)
 				diskname += 5;
 
 			TAILQ_FOREACH(disk, &sc->sc_disks, d_next) {

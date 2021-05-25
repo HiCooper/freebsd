@@ -143,11 +143,8 @@ enum {
 	MLX5_WQE_CTRL_SOLICITED		= 1 << 1,
 };
 
-enum {
-	MLX5_SEND_WQE_DS	= 16,
-	MLX5_SEND_WQE_BB	= 64,
-};
-
+#define	MLX5_SEND_WQE_DS	16
+#define	MLX5_SEND_WQE_BB	64
 #define MLX5_SEND_WQEBB_NUM_DS	(MLX5_SEND_WQE_BB / MLX5_SEND_WQE_DS)
 
 enum {
@@ -589,7 +586,8 @@ int mlx5_core_xrcd_alloc(struct mlx5_core_dev *dev, u32 *xrcdn);
 int mlx5_core_xrcd_dealloc(struct mlx5_core_dev *dev, u32 xrcdn);
 int mlx5_core_create_dct(struct mlx5_core_dev *dev,
 			 struct mlx5_core_dct *dct,
-			 u32 *in);
+			 u32 *in, int inlen,
+			 u32 *out, int outlen);
 int mlx5_core_destroy_dct(struct mlx5_core_dev *dev,
 			  struct mlx5_core_dct *dct);
 int mlx5_core_create_rq_tracked(struct mlx5_core_dev *dev, u32 *in, int inlen,

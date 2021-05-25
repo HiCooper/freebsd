@@ -10,7 +10,7 @@
 #   some features (ACL, GJOURNAL) that GENERIC includes.
 # o acpi as a module has been reported flakey and not well tested, so
 #   is included in the kernel.
-# o random is included due to uncertaty...
+# o (non-loaded) random is included due to uncertainty...
 # o Many networking things are included
 #
 # For now, please run changes to these list past imp@freebsd.org
@@ -45,7 +45,7 @@ options 	PREEMPTION		# Enable kernel thread preemption
 options 	INET			# InterNETworking
 options 	INET6			# IPv6 communications protocols
 options 	TCP_OFFLOAD		# TCP offload
-options 	SCTP			# Stream Control Transmission Protocol
+options 	SCTP_SUPPORT		# Allow kldload of SCTP
 options 	FFS			# Berkeley Fast Filesystem
 options 	SOFTUPDATES		# Enable FFS soft updates support
 options 	UFS_ACL			# Support for access control lists
@@ -104,7 +104,6 @@ device		cpufreq
 
 # Bus support.
 device		acpi
-options 	ACPI_DMAR
 device		pci
 
 # atkbdc0 controls both the keyboard and the PS/2 mouse
@@ -127,12 +126,12 @@ options 	SC_PIXEL_MODE		# add support for the raster text mode
 device		vt
 device		vt_vga
 device		vt_efifb
+device		vt_vbefb
 
 device		agp			# support several AGP chipsets
 
 # Pseudo devices.
 device		loop			# Network loopback
-device		random			# Entropy device
 device		padlock_rng		# VIA Padlock RNG
 device		rdrand_rng		# Intel Bull Mountain RNG
 device		ether			# Ethernet support

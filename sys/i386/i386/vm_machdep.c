@@ -60,7 +60,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/mutex.h>
-#include <sys/pioctl.h>
 #include <sys/proc.h>
 #include <sys/sysent.h>
 #include <sys/sf_buf.h>
@@ -86,14 +85,6 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_map.h>
 #include <vm/vm_param.h>
 
-#ifndef NSFBUFS
-#define	NSFBUFS		(512 + maxusers * 16)
-#endif
-
-_Static_assert(OFFSETOF_CURTHREAD == offsetof(struct pcpu, pc_curthread),
-    "OFFSETOF_CURTHREAD does not correspond with offset of pc_curthread.");
-_Static_assert(OFFSETOF_CURPCB == offsetof(struct pcpu, pc_curpcb),
-    "OFFSETOF_CURPCB does not correspond with offset of pc_curpcb.");
 _Static_assert(__OFFSETOF_MONITORBUF == offsetof(struct pcpu, pc_monitorbuf),
     "__OFFSETOF_MONITORBUF does not correspond with offset of pc_monitorbuf.");
 
@@ -216,15 +207,11 @@ cpu_fork(struct thread *td1, struct proc *p2, struct thread *td2, int flags)
 	td2->td_frame->tf_edx = 1;
 
 	/*
-	 * If the parent process has the trap bit set (i.e. a debugger had
-	 * single stepped the process to the system call), we need to clear
-	 * the trap flag from the new frame unless the debugger had set PF_FORK
-	 * on the parent.  Otherwise, the child will receive a (likely
-	 * unexpected) SIGTRAP when it executes the first instruction after
-	 * returning  to userland.
+	 * If the parent process has the trap bit set (i.e. a debugger
+	 * had single stepped the process to the system call), we need
+	 * to clear the trap flag from the new frame.
 	 */
-	if ((p1->p_pfsflags & PF_FORK) == 0)
-		td2->td_frame->tf_eflags &= ~PSL_T;
+	td2->td_frame->tf_eflags &= ~PSL_T;
 
 	/*
 	 * Set registers for trampoline to user mode.  Leave space for the
@@ -420,7 +407,7 @@ cpu_set_syscall_retval(struct thread *td, int error)
 		break;
 
 	default:
-		td->td_frame->tf_eax = SV_ABI_ERRNO(td->td_proc, error);
+		td->td_frame->tf_eax = error;
 		td->td_frame->tf_eflags |= PSL_C;
 		break;
 	}
@@ -591,6 +578,12 @@ sf_buf_map(struct sf_buf *sf, int flags)
 }
 
 #ifdef SMP
+static void
+sf_buf_shootdown_curcpu_cb(pmap_t pmap __unused,
+    vm_offset_t addr1 __unused, vm_offset_t addr2 __unused)
+{
+}
+
 void
 sf_buf_shootdown(struct sf_buf *sf, int flags)
 {
@@ -606,10 +599,11 @@ sf_buf_shootdown(struct sf_buf *sf, int flags)
 	if ((flags & SFB_CPUPRIVATE) == 0) {
 		other_cpus = all_cpus;
 		CPU_CLR(cpuid, &other_cpus);
-		CPU_NAND(&other_cpus, &sf->cpumask);
+		CPU_ANDNOT(&other_cpus, &sf->cpumask);
 		if (!CPU_EMPTY(&other_cpus)) {
 			CPU_OR(&sf->cpumask, &other_cpus);
-			smp_masked_invlpg(other_cpus, sf->kva, kernel_pmap);
+			smp_masked_invlpg(other_cpus, sf->kva, kernel_pmap,
+			    sf_buf_shootdown_curcpu_cb);
 		}
 	}
 	sched_unpin();

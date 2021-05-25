@@ -36,7 +36,8 @@
 
 #include <x86/x86_var.h>
 
-extern uint64_t	*vm_page_dump;
+extern char	ctx_switch_xsave[];
+extern char	ctx_switch_xsave32[];
 extern int	hw_lower_amd64_sharedpage;
 extern int	hw_ibrs_disable;
 extern int	hw_ssb_disable;
@@ -45,6 +46,8 @@ extern int	syscall_ret_l1d_flush_mode;
 
 extern vm_paddr_t intel_graphics_stolen_base;
 extern vm_paddr_t intel_graphics_stolen_size;
+
+extern int la57;
 
 /*
  * The file "conf/ldscript.amd64" defines the symbol "kernphys".  Its
@@ -58,6 +61,9 @@ struct	sysentvec;
 void	amd64_conf_fast_syscall(void);
 void	amd64_db_resume_dbreg(void);
 void	amd64_lower_shared_page(struct sysentvec *);
+void	amd64_bsp_pcpu_init1(struct pcpu *pc);
+void	amd64_bsp_pcpu_init2(uint64_t rsp0);
+void	amd64_bsp_ist_init(struct pcpu *pc);
 void	amd64_syscall(struct thread *td, int traced);
 void	amd64_syscall_ret_flush_l1d(int error);
 void	amd64_syscall_ret_flush_l1d_recalc(void);
@@ -80,6 +86,7 @@ void	fpstate_drop(struct thread *td);
 void	pagezero(void *addr);
 void	setidt(int idx, alias_for_inthand_t *func, int typ, int dpl, int ist);
 void	sse2_pagezero(void *addr);
+void	set_top_of_stack_td(struct thread *td);
 struct savefpu *get_pcb_user_save_td(struct thread *td);
 struct savefpu *get_pcb_user_save_pcb(struct pcb *pcb);
 void	pci_early_quirks(void);

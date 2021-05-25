@@ -1073,14 +1073,6 @@ pcib_hotplug_present(struct pcib_softc *sc)
 	if (!pcib_hotplug_inserted(sc))
 		return (0);
 
-	/*
-	 * Require the Electromechanical Interlock to be engaged if
-	 * present.
-	 */
-	if (sc->pcie_slot_cap & PCIEM_SLOT_CAP_EIP &&
-	    (sc->pcie_slot_sta & PCIEM_SLOT_STA_EIS) == 0)
-		return (0);
-
 	/* Require the Data Link Layer to be active. */
 	if (!(sc->pcie_link_sta & PCIEM_LINK_STA_DL_ACTIVE))
 		return (0);
@@ -1170,9 +1162,12 @@ pcib_pcie_intr_hotplug(void *arg)
 {
 	struct pcib_softc *sc;
 	device_t dev;
+	uint16_t old_slot_sta;
 
 	sc = arg;
 	dev = sc->dev;
+	PCIB_HP_LOCK(sc);
+	old_slot_sta = sc->pcie_slot_sta;
 	sc->pcie_slot_sta = pcie_read_config(dev, PCIER_SLOT_STA, 2);
 
 	/* Clear the events just reported. */
@@ -1188,7 +1183,8 @@ pcib_pcie_intr_hotplug(void *arg)
 			    "Attention Button Pressed: Detach Cancelled\n");
 			sc->flags &= ~PCIB_DETACH_PENDING;
 			callout_stop(&sc->pcie_ab_timer);
-		} else {
+		} else if (old_slot_sta & PCIEM_SLOT_STA_PDS) {
+			/* Only initiate detach sequence if device present. */
 			device_printf(dev,
 		    "Attention Button Pressed: Detaching in 5 seconds\n");
 			sc->flags |= PCIB_DETACH_PENDING;
@@ -1218,6 +1214,7 @@ pcib_pcie_intr_hotplug(void *arg)
 	}
 
 	pcib_pcie_hotplug_update(sc, 0, 0, true);
+	PCIB_HP_UNLOCK(sc);
 }
 
 static void
@@ -1227,7 +1224,7 @@ pcib_pcie_hotplug_task(void *context, int pending)
 	device_t dev;
 
 	sc = context;
-	mtx_lock(&Giant);
+	PCIB_HP_LOCK(sc);
 	dev = sc->dev;
 	if (pcib_hotplug_present(sc) != 0) {
 		if (sc->child == NULL) {
@@ -1240,7 +1237,7 @@ pcib_pcie_hotplug_task(void *context, int pending)
 				sc->child = NULL;
 		}
 	}
-	mtx_unlock(&Giant);
+	PCIB_HP_UNLOCK(sc);
 }
 
 static void
@@ -1249,7 +1246,7 @@ pcib_pcie_ab_timeout(void *arg)
 	struct pcib_softc *sc;
 
 	sc = arg;
-	mtx_assert(&Giant, MA_OWNED);
+	PCIB_HP_LOCK_ASSERT(sc);
 	if (sc->flags & PCIB_DETACH_PENDING) {
 		sc->flags |= PCIB_DETACHING;
 		sc->flags &= ~PCIB_DETACH_PENDING;
@@ -1266,14 +1263,11 @@ pcib_pcie_cc_timeout(void *arg)
 
 	sc = arg;
 	dev = sc->dev;
-	mtx_assert(&Giant, MA_OWNED);
+	PCIB_HP_LOCK_ASSERT(sc);
 	sta = pcie_read_config(dev, PCIER_SLOT_STA, 2);
 	if (!(sta & PCIEM_SLOT_STA_CC)) {
-		device_printf(dev,
-		    "HotPlug Command Timed Out - forcing detach\n");
-		sc->flags &= ~(PCIB_HOTPLUG_CMD_PENDING | PCIB_DETACH_PENDING);
-		sc->flags |= PCIB_DETACHING;
-		pcib_pcie_hotplug_update(sc, 0, 0, true);
+		device_printf(dev, "HotPlug Command Timed Out\n");
+		sc->flags &= ~PCIB_HOTPLUG_CMD_PENDING;
 	} else {
 		device_printf(dev,
 	    "Missed HotPlug interrupt waiting for Command Completion\n");
@@ -1290,7 +1284,7 @@ pcib_pcie_dll_timeout(void *arg)
 
 	sc = arg;
 	dev = sc->dev;
-	mtx_assert(&Giant, MA_OWNED);
+	PCIB_HP_LOCK_ASSERT(sc);
 	sta = pcie_read_config(dev, PCIER_LINK_STA, 2);
 	if (!(sta & PCIEM_LINK_STA_DL_ACTIVE)) {
 		device_printf(dev,
@@ -1336,7 +1330,7 @@ pcib_alloc_pcie_irq(struct pcib_softc *sc)
 		rid = 0;
 
 	sc->pcie_irq = bus_alloc_resource_any(dev, SYS_RES_IRQ, &rid,
-	    RF_ACTIVE);
+	    RF_ACTIVE | RF_SHAREABLE);
 	if (sc->pcie_irq == NULL) {
 		device_printf(dev,
 		    "Failed to allocate interrupt for PCI-e events\n");
@@ -1345,7 +1339,7 @@ pcib_alloc_pcie_irq(struct pcib_softc *sc)
 		return (ENXIO);
 	}
 
-	error = bus_setup_intr(dev, sc->pcie_irq, INTR_TYPE_MISC,
+	error = bus_setup_intr(dev, sc->pcie_irq, INTR_TYPE_MISC|INTR_MPSAFE,
 	    NULL, pcib_pcie_intr_hotplug, sc, &sc->pcie_ihand);
 	if (error) {
 		device_printf(dev, "Failed to setup PCI-e interrupt handler\n");
@@ -1384,6 +1378,7 @@ pcib_setup_hotplug(struct pcib_softc *sc)
 	callout_init(&sc->pcie_cc_timer, 0);
 	callout_init(&sc->pcie_dll_timer, 0);
 	TASK_INIT(&sc->pcie_hp_task, 0, pcib_pcie_hotplug_task, sc);
+	sc->pcie_hp_lock = &Giant;
 
 	/* Allocate IRQ. */
 	if (pcib_alloc_pcie_irq(sc) != 0)
@@ -1450,7 +1445,7 @@ pcib_detach_hotplug(struct pcib_softc *sc)
 	}
 
 	pcib_pcie_hotplug_update(sc, val, mask, false);
-	
+
 	error = pcib_release_pcie_irq(sc);
 	if (error)
 		return (error);
@@ -1789,6 +1784,12 @@ pcib_resume(device_t dev)
 {
 
 	pcib_cfg_restore(device_get_softc(dev));
+
+	/*
+	 * Restore the Command register only after restoring the windows.
+	 * The bridge should not be claiming random windows.
+	 */
+	pci_write_config(dev, PCIR_COMMAND, pci_get_cmdreg(dev), 2);
 	return (bus_generic_resume(dev));
 }
 
@@ -2531,7 +2532,6 @@ pcib_xlate_ari(device_t pcib, int bus, int *slot, int *func)
 		*func = PCIE_ARI_FUNC(ari_func);
 	}
 }
-
 
 static void
 pcib_enable_ari(struct pcib_softc *sc, uint32_t pcie_pos)

@@ -8,4 +8,5 @@ GOOGLETEST_SRCROOT= ${GTEST_DIR}/googletest
 
 CXXFLAGS+=	${GTESTS_FLAGS}
 
-WARNS?=		6
+# Silence warnings about usage of deprecated std::auto_ptr
+CXXWARNFLAGS+=	-Wno-deprecated-declarations

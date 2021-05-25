@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <vm/uma.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/stripe/g_stripe.h>
 
 FEATURE(geom_stripe, "GEOM striping support");
@@ -70,7 +71,7 @@ struct g_class g_stripe_class = {
 };
 
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, stripe, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, stripe, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "GEOM_STRIPE stuff");
 static u_int g_stripe_debug = 0;
 SYSCTL_UINT(_kern_geom_stripe, OID_AUTO, debug, CTLFLAG_RWTUN, &g_stripe_debug, 0,
@@ -87,11 +88,14 @@ g_sysctl_stripe_fast(SYSCTL_HANDLER_ARGS)
 		g_stripe_fast = fast;
 	return (error);
 }
-SYSCTL_PROC(_kern_geom_stripe, OID_AUTO, fast, CTLTYPE_INT | CTLFLAG_RWTUN,
-    NULL, 0, g_sysctl_stripe_fast, "I", "Fast, but memory-consuming, mode");
-static u_int g_stripe_maxmem = MAXPHYS * 100;
-SYSCTL_UINT(_kern_geom_stripe, OID_AUTO, maxmem, CTLFLAG_RDTUN, &g_stripe_maxmem,
-    0, "Maximum memory that can be allocated in \"fast\" mode (in bytes)");
+SYSCTL_PROC(_kern_geom_stripe, OID_AUTO, fast,
+    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT, NULL, 0,
+    g_sysctl_stripe_fast, "I",
+    "Fast, but memory-consuming, mode");
+static u_long g_stripe_maxmem;
+SYSCTL_ULONG(_kern_geom_stripe, OID_AUTO, maxmem,
+    CTLFLAG_RDTUN | CTLFLAG_NOFETCH, &g_stripe_maxmem, 0,
+    "Maximum memory that can be allocated in \"fast\" mode (in bytes)");
 static u_int g_stripe_fast_failed = 0;
 SYSCTL_UINT(_kern_geom_stripe, OID_AUTO, fast_failed, CTLFLAG_RD,
     &g_stripe_fast_failed, 0, "How many times \"fast\" mode failed");
@@ -126,10 +130,12 @@ static void
 g_stripe_init(struct g_class *mp __unused)
 {
 
-	g_stripe_zone = uma_zcreate("g_stripe_zone", MAXPHYS, NULL, NULL,
+	g_stripe_maxmem = maxphys * 100;
+	TUNABLE_ULONG_FETCH("kern.geom.stripe.maxmem,", &g_stripe_maxmem);
+	g_stripe_zone = uma_zcreate("g_stripe_zone", maxphys, NULL, NULL,
 	    NULL, NULL, 0, 0);
-	g_stripe_maxmem -= g_stripe_maxmem % MAXPHYS;
-	uma_zone_set_max(g_stripe_zone, g_stripe_maxmem / MAXPHYS);
+	g_stripe_maxmem -= g_stripe_maxmem % maxphys;
+	uma_zone_set_max(g_stripe_zone, g_stripe_maxmem / maxphys);
 }
 
 static void
@@ -297,6 +303,8 @@ g_stripe_done(struct bio *bp)
 		mtx_unlock(&sc->sc_lock);
 		if (pbp->bio_driver1 != NULL)
 			uma_zfree(g_stripe_zone, pbp->bio_driver1);
+		if (bp->bio_cmd == BIO_SPEEDUP)
+			pbp->bio_completed = pbp->bio_length;
 		g_io_deliver(pbp, pbp->bio_error);
 	} else
 		mtx_unlock(&sc->sc_lock);
@@ -534,7 +542,7 @@ failure:
 }
 
 static void
-g_stripe_flush(struct g_stripe_softc *sc, struct bio *bp)
+g_stripe_pushdown(struct g_stripe_softc *sc, struct bio *bp)
 {
 	struct bio_queue_head queue;
 	struct g_consumer *cp;
@@ -593,8 +601,9 @@ g_stripe_start(struct bio *bp)
 	case BIO_WRITE:
 	case BIO_DELETE:
 		break;
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
-		g_stripe_flush(sc, bp);
+		g_stripe_pushdown(sc, bp);
 		return;
 	case BIO_GETATTR:
 		/* To which provider it should be delivered? */
@@ -627,7 +636,7 @@ g_stripe_start(struct bio *bp)
 	 * Do use "fast" mode when:
 	 * 1. "Fast" mode is ON.
 	 * and
-	 * 2. Request size is less than or equal to MAXPHYS,
+	 * 2. Request size is less than or equal to maxphys,
 	 *    which should always be true.
 	 * and
 	 * 3. Request size is bigger than stripesize * ndisks. If it isn't,
@@ -638,7 +647,7 @@ g_stripe_start(struct bio *bp)
 	 * and
 	 * 5. It is not a BIO_DELETE.
 	 */
-	if (g_stripe_fast && bp->bio_length <= MAXPHYS &&
+	if (g_stripe_fast && bp->bio_length <= maxphys &&
 	    bp->bio_length >= stripesize * sc->sc_ndisks &&
 	    (bp->bio_flags & BIO_UNMAPPED) == 0 &&
 	    bp->bio_cmd != BIO_DELETE) {
@@ -957,9 +966,11 @@ g_stripe_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	gp->access = g_stripe_access;
 	gp->orphan = g_stripe_orphan;
 	cp = g_new_consumer(gp);
-	g_attach(cp, pp);
-	error = g_stripe_read_metadata(cp, &md);
-	g_detach(cp);
+	error = g_attach(cp, pp);
+	if (error == 0) {
+		error = g_stripe_read_metadata(cp, &md);
+		g_detach(cp);
+	}
 	g_destroy_consumer(cp);
 	g_destroy_geom(gp);
 	if (error != 0)
@@ -1085,19 +1096,9 @@ g_stripe_ctl_create(struct gctl_req *req, struct g_class *mp)
 	/* Check all providers are valid */
 	for (no = 1; no < *nargs; no++) {
 		snprintf(param, sizeof(param), "arg%u", no);
-		name = gctl_get_asciiparam(req, param);
-		if (name == NULL) {
-			gctl_error(req, "No 'arg%u' argument.", no);
+		pp = gctl_get_provider(req, param);
+		if (pp == NULL)
 			return;
-		}
-		if (strncmp(name, "/dev/", strlen("/dev/")) == 0)
-			name += strlen("/dev/");
-		pp = g_provider_by_name(name);
-		if (pp == NULL) {
-			G_STRIPE_DEBUG(1, "Disk %s is invalid.", name);
-			gctl_error(req, "Disk %s is invalid.", name);
-			return;
-		}
 	}
 
 	gp = g_stripe_create(mp, &md, G_STRIPE_TYPE_MANUAL);
@@ -1111,15 +1112,13 @@ g_stripe_ctl_create(struct gctl_req *req, struct g_class *mp)
 	sbuf_printf(sb, "Can't attach disk(s) to %s:", gp->name);
 	for (attached = 0, no = 1; no < *nargs; no++) {
 		snprintf(param, sizeof(param), "arg%u", no);
-		name = gctl_get_asciiparam(req, param);
-		if (name == NULL) {
-			gctl_error(req, "No 'arg%u' argument.", no);
+		pp  = gctl_get_provider(req, param);
+		if (pp == NULL) {
+			name = gctl_get_asciiparam(req, param);
+			MPASS(name != NULL);
+			sbuf_printf(sb, " %s", name);
 			continue;
 		}
-		if (strncmp(name, "/dev/", strlen("/dev/")) == 0)
-			name += strlen("/dev/");
-		pp = g_provider_by_name(name);
-		KASSERT(pp != NULL, ("Provider %s disappear?!", name));
 		if (g_stripe_add_disk(sc, pp, no - 1) != 0) {
 			G_STRIPE_DEBUG(1, "Disk %u (%s) not attached to %s.",
 			    no, pp->name, gp->name);
@@ -1249,24 +1248,24 @@ g_stripe_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<Type>", indent);
 		switch (sc->sc_type) {
 		case G_STRIPE_TYPE_AUTOMATIC:
-			sbuf_printf(sb, "AUTOMATIC");
+			sbuf_cat(sb, "AUTOMATIC");
 			break;
 		case G_STRIPE_TYPE_MANUAL:
-			sbuf_printf(sb, "MANUAL");
+			sbuf_cat(sb, "MANUAL");
 			break;
 		default:
-			sbuf_printf(sb, "UNKNOWN");
+			sbuf_cat(sb, "UNKNOWN");
 			break;
 		}
-		sbuf_printf(sb, "</Type>\n");
+		sbuf_cat(sb, "</Type>\n");
 		sbuf_printf(sb, "%s<Status>Total=%u, Online=%u</Status>\n",
 		    indent, sc->sc_ndisks, g_stripe_nvalid(sc));
 		sbuf_printf(sb, "%s<State>", indent);
 		if (sc->sc_provider != NULL && sc->sc_provider->error == 0)
-			sbuf_printf(sb, "UP");
+			sbuf_cat(sb, "UP");
 		else
-			sbuf_printf(sb, "DOWN");
-		sbuf_printf(sb, "</State>\n");
+			sbuf_cat(sb, "DOWN");
+		sbuf_cat(sb, "</State>\n");
 	}
 }
 

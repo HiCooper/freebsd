@@ -11,16 +11,12 @@ void	cpu_halt(void);
 void	swi_vm(void *);
 
 #ifdef _KERNEL
-#if __ARM_ARCH >= 6
 #include <machine/cpu-v6.h>
-#else
-#include <machine/cpu-v4.h>
-#endif /* __ARM_ARCH >= 6 */
 
 static __inline uint64_t
 get_cyclecount(void)
 {
-#if __ARM_ARCH >= 6
+#if __ARM_ARCH > 6 || (__ARM_ARCH == 6 && defined(CPU_ARM1176))
 #if (__ARM_ARCH > 6) && defined(DEV_PMU)
 	if (pmu_attched) {
 		u_int cpu;

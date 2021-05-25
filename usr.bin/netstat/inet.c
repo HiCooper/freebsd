@@ -85,6 +85,8 @@ __FBSDID("$FreeBSD$");
 #include "netstat.h"
 #include "nl_defs.h"
 
+#define max(a, b) (((a) > (b)) ? (a) : (b))
+
 #ifdef INET
 static void inetprint(const char *, struct in_addr *, int, const char *, int,
     const int);
@@ -204,6 +206,7 @@ protopr(u_long off, const char *name, int af1, int proto)
 	struct xinpcb *inp;
 	struct xinpgen *xig, *oxig;
 	struct xsocket *so;
+	int fnamelen, cnamelen;
 
 	istcp = 0;
 	switch (proto) {
@@ -235,6 +238,28 @@ protopr(u_long off, const char *name, int af1, int proto)
 
 	if (!pcblist_sysctl(proto, name, &buf))
 		return;
+
+	if (cflag || Cflag) {
+		fnamelen = strlen("Stack");
+		cnamelen = strlen("CC");
+		oxig = xig = (struct xinpgen *)buf;
+		for (xig = (struct xinpgen*)((char *)xig + xig->xig_len);
+		    xig->xig_len > sizeof(struct xinpgen);
+		    xig = (struct xinpgen *)((char *)xig + xig->xig_len)) {
+			if (istcp) {
+				tp = (struct xtcpcb *)xig;
+				inp = &tp->xt_inp;
+			} else {
+				continue;
+			}
+			if (so->xso_protocol != proto)
+				continue;
+			if (inp->inp_gencnt > oxig->xig_gen)
+				continue;
+			fnamelen = max(fnamelen, (int)strlen(tp->xt_stack));
+			cnamelen = max(cnamelen, (int)strlen(tp->xt_cc));
+		}
+	}
 
 	oxig = xig = (struct xinpgen *)buf;
 	for (xig = (struct xinpgen *)((char *)xig + xig->xig_len);
@@ -341,6 +366,19 @@ protopr(u_long off, const char *name, int af1, int proto)
 				xo_emit("  {T:/%8.8s} {T:/%5.5s}",
 				    "flowid", "ftype");
 			}
+			if (cflag) {
+				xo_emit(" {T:/%-*.*s}",
+					fnamelen, fnamelen, "Stack");
+			}
+			if (Cflag)
+				xo_emit(" {T:/%-*.*s} {T:/%10.10s}"
+					" {T:/%10.10s} {T:/%5.5s}"
+					" {T:/%3.3s}", cnamelen,
+					cnamelen, "CC",
+					"cwin",
+					"ssthresh",
+					"MSS",
+					"ECN");
 			if (Pflag)
 				xo_emit(" {T:/%s}", "Log ID");
 			xo_emit("\n");
@@ -514,9 +552,30 @@ protopr(u_long off, const char *name, int af1, int proto)
 			    inp->inp_flowid,
 			    inp->inp_flowtype);
 		}
-		if (istcp && Pflag)
-			xo_emit(" {:log-id/%s}", tp->xt_logid[0] == '\0' ?
-			    "-" : tp->xt_logid);
+		if (istcp) {
+			if (cflag)
+				xo_emit(" {:stack/%-*.*s}",
+					
+					fnamelen, fnamelen, tp->xt_stack);
+			if (Cflag)
+				xo_emit(" {:cc/%-*.*s}"
+					" {:snd-cwnd/%10lu}"
+					" {:snd-ssthresh/%10lu}"
+					" {:t-maxseg/%5u} {:ecn/%3s}",
+					cnamelen, cnamelen, tp->xt_cc,
+					tp->t_snd_cwnd, tp->t_snd_ssthresh,
+					tp->t_maxseg,
+					(tp->t_state >= TCPS_ESTABLISHED ?
+					    (tp->xt_ecn > 0 ?
+						(tp->xt_ecn == 1 ?
+						    "ecn" : "ace")
+						: "off")
+					    : "n/a"));
+			if (Pflag)
+				xo_emit(" {:log-id/%s}",
+				    tp->xt_logid[0] == '\0' ?
+				    "-" : tp->xt_logid);
+		}
 		xo_emit("\n");
 		xo_close_instance("socket");
 	}
@@ -640,8 +699,8 @@ tcp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	    "{N:/discarded for bad header offset field%s}\n");
 	p1a(tcps_rcvshort, "\t\t{:discard-too-short/%ju} "
 	    "{N:discarded because packet too short}\n");
-	p1a(tcps_rcvmemdrop, "\t\t{:discard-memory-problems/%ju} "
-	    "{N:discarded due to memory problems}\n");
+	p1a(tcps_rcvreassfull, "\t\t{:discard-reassembly-queue-full/%ju} "
+	    "{N:discarded due to full reassembly queue}\n");
 	p(tcps_connattempt, "\t{:connection-requests/%ju} "
 	    "{N:/connection request%s}\n");
 	p(tcps_accepts, "\t{:connections-accepts/%ju} "
@@ -1222,18 +1281,36 @@ void
 igmp_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 {
 	struct igmpstat igmpstat;
+	int error, zflag0;
 
 	if (fetch_stats("net.inet.igmp.stats", 0, &igmpstat,
 	    sizeof(igmpstat), kread) != 0)
 		return;
+	/*
+	 * Reread net.inet.igmp.stats when zflag == 1.
+	 * This is because this MIB contains version number and
+	 * length of the structure which are not set when clearing
+	 * the counters.
+	 */
+	zflag0 = zflag;
+	if (zflag) {
+		zflag = 0;
+		error = fetch_stats("net.inet.igmp.stats", 0, &igmpstat,
+		    sizeof(igmpstat), kread);
+		zflag = zflag0;
+		if (error)
+			return;
+	}
 
 	if (igmpstat.igps_version != IGPS_VERSION_3) {
 		xo_warnx("%s: version mismatch (%d != %d)", __func__,
 		    igmpstat.igps_version, IGPS_VERSION_3);
+		return;
 	}
 	if (igmpstat.igps_len != IGPS_VERSION3_LEN) {
 		xo_warnx("%s: size mismatch (%d != %d)", __func__,
 		    igmpstat.igps_len, IGPS_VERSION3_LEN);
+		return;
 	}
 
 	xo_open_container(name);

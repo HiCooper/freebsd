@@ -270,7 +270,6 @@ static struct nfe_type nfe_devs[] = {
 	{0, 0, NULL}
 };
 
-
 /* Probe for supported hardware ID's */
 static int
 nfe_probe(device_t dev)
@@ -337,7 +336,6 @@ nfe_alloc_msix(struct nfe_softc *sc, int count)
 	}
 }
 
-
 static int
 nfe_detect_msik9(struct nfe_softc *sc)
 {
@@ -360,7 +358,6 @@ nfe_detect_msik9(struct nfe_softc *sc)
 
 	return (found);
 }
-
 
 static int
 nfe_attach(device_t dev)
@@ -604,7 +601,6 @@ nfe_attach(device_t dev)
 	if_setsendqlen(ifp, NFE_TX_RING_COUNT - 1);
 	if_setsendqready(ifp);
 
-
 	if (sc->nfe_flags & NFE_HW_CSUM) {
 		if_setcapabilitiesbit(ifp, IFCAP_HWCSUM | IFCAP_TSO4, 0);
 		if_sethwassistbits(ifp, NFE_CSUM_FEATURES | CSUM_TSO, 0);
@@ -654,7 +650,7 @@ nfe_attach(device_t dev)
 	}
 	ether_ifattach(ifp, sc->eaddr);
 
-	TASK_INIT(&sc->nfe_int_task, 0, nfe_int_task, sc);
+	NET_TASK_INIT(&sc->nfe_int_task, 0, nfe_int_task, sc);
 	sc->nfe_tq = taskqueue_create_fast("nfe_taskq", M_WAITOK,
 	    taskqueue_thread_enqueue, &sc->nfe_tq);
 	taskqueue_start_threads(&sc->nfe_tq, 1, PI_NET, "%s taskq",
@@ -687,7 +683,6 @@ fail:
 
 	return (error);
 }
-
 
 static int
 nfe_detach(device_t dev)
@@ -786,7 +781,6 @@ nfe_detach(device_t dev)
 	return (0);
 }
 
-
 static int
 nfe_suspend(device_t dev)
 {
@@ -802,7 +796,6 @@ nfe_suspend(device_t dev)
 
 	return (0);
 }
-
 
 static int
 nfe_resume(device_t dev)
@@ -822,7 +815,6 @@ nfe_resume(device_t dev)
 
 	return (0);
 }
-
 
 static int
 nfe_can_use_msix(struct nfe_softc *sc)
@@ -865,7 +857,6 @@ nfe_can_use_msix(struct nfe_softc *sc)
 	return (use_msix);
 }
 
-
 /* Take PHY/NIC out of powerdown, from Linux */
 static void
 nfe_power(struct nfe_softc *sc)
@@ -888,7 +879,6 @@ nfe_power(struct nfe_softc *sc)
 		pwr |= NFE_PWR2_REVA3;
 	NFE_WRITE(sc, NFE_PWR2_CTL, pwr);
 }
-
 
 static void
 nfe_miibus_statchg(device_t dev)
@@ -930,7 +920,6 @@ nfe_miibus_statchg(device_t dev)
 	NFE_WRITE(sc, NFE_TX_CTL, txctl);
 	NFE_WRITE(sc, NFE_RX_CTL, rxctl);
 }
-
 
 static void
 nfe_mac_config(struct nfe_softc *sc, struct mii_data *mii)
@@ -1024,7 +1013,6 @@ nfe_mac_config(struct nfe_softc *sc, struct mii_data *mii)
 	}
 }
 
-
 static int
 nfe_miibus_readreg(device_t dev, int phy, int reg)
 {
@@ -1064,7 +1052,6 @@ nfe_miibus_readreg(device_t dev, int phy, int reg)
 
 	return (val);
 }
-
 
 static int
 nfe_miibus_writereg(device_t dev, int phy, int reg, int val)
@@ -1197,7 +1184,6 @@ fail:
 	return (error);
 }
 
-
 static void
 nfe_alloc_jrx_ring(struct nfe_softc *sc, struct nfe_jrx_ring *ring)
 {
@@ -1317,7 +1303,6 @@ fail:
 	sc->nfe_jumbo_disable = 1;
 }
 
-
 static int
 nfe_init_rx_ring(struct nfe_softc *sc, struct nfe_rx_ring *ring)
 {
@@ -1345,7 +1330,6 @@ nfe_init_rx_ring(struct nfe_softc *sc, struct nfe_rx_ring *ring)
 	return (0);
 }
 
-
 static int
 nfe_init_jrx_ring(struct nfe_softc *sc, struct nfe_jrx_ring *ring)
 {
@@ -1372,7 +1356,6 @@ nfe_init_jrx_ring(struct nfe_softc *sc, struct nfe_jrx_ring *ring)
 
 	return (0);
 }
-
 
 static void
 nfe_free_rx_ring(struct nfe_softc *sc, struct nfe_rx_ring *ring)
@@ -1419,7 +1402,6 @@ nfe_free_rx_ring(struct nfe_softc *sc, struct nfe_rx_ring *ring)
 		ring->rx_desc_tag = NULL;
 	}
 }
-
 
 static void
 nfe_free_jrx_ring(struct nfe_softc *sc, struct nfe_jrx_ring *ring)
@@ -1473,7 +1455,6 @@ nfe_free_jrx_ring(struct nfe_softc *sc, struct nfe_jrx_ring *ring)
 		ring->jrx_desc_tag = NULL;
 	}
 }
-
 
 static int
 nfe_alloc_tx_ring(struct nfe_softc *sc, struct nfe_tx_ring *ring)
@@ -1559,7 +1540,6 @@ fail:
 	return (error);
 }
 
-
 static void
 nfe_init_tx_ring(struct nfe_softc *sc, struct nfe_tx_ring *ring)
 {
@@ -1581,7 +1561,6 @@ nfe_init_tx_ring(struct nfe_softc *sc, struct nfe_tx_ring *ring)
 	bus_dmamap_sync(ring->tx_desc_tag, ring->tx_desc_map,
 	    BUS_DMASYNC_PREREAD | BUS_DMASYNC_PREWRITE);
 }
-
 
 static void
 nfe_free_tx_ring(struct nfe_softc *sc, struct nfe_tx_ring *ring)
@@ -1635,7 +1614,6 @@ nfe_free_tx_ring(struct nfe_softc *sc, struct nfe_tx_ring *ring)
 #ifdef DEVICE_POLLING
 static poll_handler_t nfe_poll;
 
-
 static int
 nfe_poll(if_t ifp, enum poll_cmd cmd, int count)
 {
@@ -1684,7 +1662,6 @@ nfe_set_intr(struct nfe_softc *sc)
 		NFE_WRITE(sc, NFE_IRQ_MASK, NFE_IRQ_WANTED);
 }
 
-
 /* In MSIX, a write to mask reegisters behaves as XOR. */
 static __inline void
 nfe_enable_intr(struct nfe_softc *sc)
@@ -1698,7 +1675,6 @@ nfe_enable_intr(struct nfe_softc *sc)
 		NFE_WRITE(sc, sc->nfe_irq_mask, sc->nfe_intrs);
 }
 
-
 static __inline void
 nfe_disable_intr(struct nfe_softc *sc)
 {
@@ -1710,7 +1686,6 @@ nfe_disable_intr(struct nfe_softc *sc)
 	} else
 		NFE_WRITE(sc, sc->nfe_irq_mask, sc->nfe_nointrs);
 }
-
 
 static int
 nfe_ioctl(if_t ifp, u_long cmd, caddr_t data)
@@ -1863,7 +1838,6 @@ nfe_ioctl(if_t ifp, u_long cmd, caddr_t data)
 	return (error);
 }
 
-
 static int
 nfe_intr(void *arg)
 {
@@ -1880,7 +1854,6 @@ nfe_intr(void *arg)
 
 	return (FILTER_HANDLED);
 }
-
 
 static void
 nfe_int_task(void *arg, int pending)
@@ -1943,7 +1916,6 @@ nfe_int_task(void *arg, int pending)
 	nfe_enable_intr(sc);
 }
 
-
 static __inline void
 nfe_discard_rxbuf(struct nfe_softc *sc, int idx)
 {
@@ -1969,7 +1941,6 @@ nfe_discard_rxbuf(struct nfe_softc *sc, int idx)
 	}
 }
 
-
 static __inline void
 nfe_discard_jrxbuf(struct nfe_softc *sc, int idx)
 {
@@ -1994,7 +1965,6 @@ nfe_discard_jrxbuf(struct nfe_softc *sc, int idx)
 		desc32->flags = htole16(NFE_RX_READY);
 	}
 }
-
 
 static int
 nfe_newbuf(struct nfe_softc *sc, int idx)
@@ -2051,7 +2021,6 @@ nfe_newbuf(struct nfe_softc *sc, int idx)
 	return (0);
 }
 
-
 static int
 nfe_jnewbuf(struct nfe_softc *sc, int idx)
 {
@@ -2105,7 +2074,6 @@ nfe_jnewbuf(struct nfe_softc *sc, int idx)
 
 	return (0);
 }
-
 
 static int
 nfe_rxeof(struct nfe_softc *sc, int count, int *rx_npktsp)
@@ -2221,7 +2189,6 @@ nfe_rxeof(struct nfe_softc *sc, int count, int *rx_npktsp)
 	return (count > 0 ? 0 : EAGAIN);
 }
 
-
 static int
 nfe_jrxeof(struct nfe_softc *sc, int count, int *rx_npktsp)
 {
@@ -2336,7 +2303,6 @@ nfe_jrxeof(struct nfe_softc *sc, int count, int *rx_npktsp)
 		*rx_npktsp = rx_npkts;
 	return (count > 0 ? 0 : EAGAIN);
 }
-
 
 static void
 nfe_txeof(struct nfe_softc *sc)
@@ -2557,75 +2523,67 @@ nfe_encap(struct nfe_softc *sc, struct mbuf **m_head)
 	return (0);
 }
 
+struct nfe_hash_maddr_ctx {
+	uint8_t addr[ETHER_ADDR_LEN];
+	uint8_t mask[ETHER_ADDR_LEN];
+};
+
+static u_int
+nfe_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	struct nfe_hash_maddr_ctx *ctx = arg;
+	uint8_t *addrp, mcaddr;
+	int j;
+
+	addrp = LLADDR(sdl);
+	for (j = 0; j < ETHER_ADDR_LEN; j++) {
+		mcaddr = addrp[j];
+		ctx->addr[j] &= mcaddr;
+		ctx->mask[j] &= ~mcaddr;
+	}
+
+	return (1);
+}
 
 static void
 nfe_setmulti(struct nfe_softc *sc)
 {
 	if_t ifp = sc->nfe_ifp;
-	int i, mc_count, mcnt;
+	struct nfe_hash_maddr_ctx ctx;
 	uint32_t filter;
-	uint8_t addr[ETHER_ADDR_LEN], mask[ETHER_ADDR_LEN];
 	uint8_t etherbroadcastaddr[ETHER_ADDR_LEN] = {
 		0xff, 0xff, 0xff, 0xff, 0xff, 0xff
 	};
-	uint8_t *mta;
+	int i;
 
 	NFE_LOCK_ASSERT(sc);
 
 	if ((if_getflags(ifp) & (IFF_ALLMULTI | IFF_PROMISC)) != 0) {
-		bzero(addr, ETHER_ADDR_LEN);
-		bzero(mask, ETHER_ADDR_LEN);
+		bzero(ctx.addr, ETHER_ADDR_LEN);
+		bzero(ctx.mask, ETHER_ADDR_LEN);
 		goto done;
 	}
 
-	bcopy(etherbroadcastaddr, addr, ETHER_ADDR_LEN);
-	bcopy(etherbroadcastaddr, mask, ETHER_ADDR_LEN);
+	bcopy(etherbroadcastaddr, ctx.addr, ETHER_ADDR_LEN);
+	bcopy(etherbroadcastaddr, ctx.mask, ETHER_ADDR_LEN);
 
-	mc_count = if_multiaddr_count(ifp, -1);
-	mta = malloc(sizeof(uint8_t) * ETHER_ADDR_LEN * mc_count, M_DEVBUF,
-	    M_NOWAIT);
-
-	/* Unable to get memory - process without filtering */
-	if (mta == NULL) {
-		device_printf(sc->nfe_dev, "nfe_setmulti: failed to allocate"
-		    "temp multicast buffer!\n");
-
-		bzero(addr, ETHER_ADDR_LEN);
-		bzero(mask, ETHER_ADDR_LEN);
-		goto done;
-	}
-
-	if_multiaddr_array(ifp, mta, &mcnt, mc_count);
-
-	for (i = 0; i < mcnt; i++) {
-		uint8_t *addrp;
-		int j;
-
-		addrp = mta + (i * ETHER_ADDR_LEN);
-		for (j = 0; j < ETHER_ADDR_LEN; j++) {
-			u_int8_t mcaddr = addrp[j];
-			addr[j] &= mcaddr;
-			mask[j] &= ~mcaddr;
-		}
-	}
-
-	free(mta, M_DEVBUF);
+	if_foreach_llmaddr(ifp, nfe_hash_maddr, &ctx);
 
 	for (i = 0; i < ETHER_ADDR_LEN; i++) {
-		mask[i] |= addr[i];
+		ctx.mask[i] |= ctx.addr[i];
 	}
 
 done:
-	addr[0] |= 0x01;	/* make sure multicast bit is set */
+	ctx.addr[0] |= 0x01;	/* make sure multicast bit is set */
 
-	NFE_WRITE(sc, NFE_MULTIADDR_HI,
-	    addr[3] << 24 | addr[2] << 16 | addr[1] << 8 | addr[0]);
+	NFE_WRITE(sc, NFE_MULTIADDR_HI, ctx.addr[3] << 24 | ctx.addr[2] << 16 |
+	    ctx.addr[1] << 8 | ctx.addr[0]);
 	NFE_WRITE(sc, NFE_MULTIADDR_LO,
-	    addr[5] <<  8 | addr[4]);
-	NFE_WRITE(sc, NFE_MULTIMASK_HI,
-	    mask[3] << 24 | mask[2] << 16 | mask[1] << 8 | mask[0]);
+	    ctx.addr[5] <<  8 | ctx.addr[4]);
+	NFE_WRITE(sc, NFE_MULTIMASK_HI, ctx.mask[3] << 24 | ctx.mask[2] << 16 |
+	    ctx.mask[1] << 8 | ctx.mask[0]);
 	NFE_WRITE(sc, NFE_MULTIMASK_LO,
-	    mask[5] <<  8 | mask[4]);
+	    ctx.mask[5] <<  8 | ctx.mask[4]);
 
 	filter = NFE_READ(sc, NFE_RXFILTER);
 	filter &= NFE_PFF_RX_PAUSE;
@@ -2633,7 +2591,6 @@ done:
 	filter |= (if_getflags(ifp) & IFF_PROMISC) ? NFE_PFF_PROMISC : NFE_PFF_U2M;
 	NFE_WRITE(sc, NFE_RXFILTER, filter);
 }
-
 
 static void
 nfe_start(if_t ifp)
@@ -2689,7 +2646,6 @@ nfe_start_locked(if_t ifp)
 	}
 }
 
-
 static void
 nfe_watchdog(if_t ifp)
 {
@@ -2726,7 +2682,6 @@ nfe_watchdog(if_t ifp)
 	nfe_init_locked(sc);
 }
 
-
 static void
 nfe_init(void *xsc)
 {
@@ -2736,7 +2691,6 @@ nfe_init(void *xsc)
 	nfe_init_locked(sc);
 	NFE_UNLOCK(sc);
 }
-
 
 static void
 nfe_init_locked(void *xsc)
@@ -2888,7 +2842,6 @@ nfe_init_locked(void *xsc)
 	callout_reset(&sc->nfe_stat_ch, hz, nfe_tick, sc);
 }
 
-
 static void
 nfe_stop(if_t ifp)
 {
@@ -2963,7 +2916,6 @@ nfe_stop(if_t ifp)
 	nfe_stats_update(sc);
 }
 
-
 static int
 nfe_ifmedia_upd(if_t ifp)
 {
@@ -2977,7 +2929,6 @@ nfe_ifmedia_upd(if_t ifp)
 
 	return (0);
 }
-
 
 static void
 nfe_ifmedia_sts(if_t ifp, struct ifmediareq *ifmr)
@@ -2995,7 +2946,6 @@ nfe_ifmedia_sts(if_t ifp, struct ifmediareq *ifmr)
 	ifmr->ifm_status = mii->mii_media_status;
 	NFE_UNLOCK(sc);
 }
-
 
 void
 nfe_tick(void *xsc)
@@ -3017,14 +2967,12 @@ nfe_tick(void *xsc)
 	callout_reset(&sc->nfe_stat_ch, hz, nfe_tick, sc);
 }
 
-
 static int
 nfe_shutdown(device_t dev)
 {
 
 	return (nfe_suspend(dev));
 }
-
 
 static void
 nfe_get_macaddr(struct nfe_softc *sc, uint8_t *addr)
@@ -3054,7 +3002,6 @@ nfe_get_macaddr(struct nfe_softc *sc, uint8_t *addr)
 	}
 }
 
-
 static void
 nfe_set_macaddr(struct nfe_softc *sc, uint8_t *addr)
 {
@@ -3063,7 +3010,6 @@ nfe_set_macaddr(struct nfe_softc *sc, uint8_t *addr)
 	NFE_WRITE(sc, NFE_MACADDR_HI, addr[3] << 24 | addr[2] << 16 |
 	    addr[1] << 8 | addr[0]);
 }
-
 
 /*
  * Map a single buffer address.
@@ -3083,7 +3029,6 @@ nfe_dma_map_segs(void *arg, bus_dma_segment_t *segs, int nseg, int error)
 	ctx->nfe_busaddr = segs[0].ds_addr;
 }
 
-
 static int
 sysctl_int_range(SYSCTL_HANDLER_ARGS, int low, int high)
 {
@@ -3102,7 +3047,6 @@ sysctl_int_range(SYSCTL_HANDLER_ARGS, int low, int high)
 	return (0);
 }
 
-
 static int
 sysctl_hw_nfe_proc_limit(SYSCTL_HANDLER_ARGS)
 {
@@ -3110,7 +3054,6 @@ sysctl_hw_nfe_proc_limit(SYSCTL_HANDLER_ARGS)
 	return (sysctl_int_range(oidp, arg1, arg2, req, NFE_PROC_MIN,
 	    NFE_PROC_MAX));
 }
-
 
 #define	NFE_SYSCTL_STAT_ADD32(c, h, n, p, d)	\
 	    SYSCTL_ADD_UINT(c, h, OID_AUTO, n, CTLFLAG_RD, p, 0, d)
@@ -3129,8 +3072,8 @@ nfe_sysctl_node(struct nfe_softc *sc)
 	stats = &sc->nfe_stats;
 	ctx = device_get_sysctl_ctx(sc->nfe_dev);
 	child = SYSCTL_CHILDREN(device_get_sysctl_tree(sc->nfe_dev));
-	SYSCTL_ADD_PROC(ctx, child,
-	    OID_AUTO, "process_limit", CTLTYPE_INT | CTLFLAG_RW,
+	SYSCTL_ADD_PROC(ctx, child, OID_AUTO, "process_limit",
+	    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
 	    &sc->nfe_process_limit, 0, sysctl_hw_nfe_proc_limit, "I",
 	    "max number of Rx events to process");
 
@@ -3151,13 +3094,13 @@ nfe_sysctl_node(struct nfe_softc *sc)
 	if ((sc->nfe_flags & (NFE_MIB_V1 | NFE_MIB_V2 | NFE_MIB_V3)) == 0)
 		return;
 
-	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats", CTLFLAG_RD,
-	    NULL, "NFE statistics");
+	tree = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, "stats",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "NFE statistics");
 	parent = SYSCTL_CHILDREN(tree);
 
 	/* Rx statistics. */
-	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "rx", CTLFLAG_RD,
-	    NULL, "Rx MAC statistics");
+	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "rx",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Rx MAC statistics");
 	child = SYSCTL_CHILDREN(tree);
 
 	NFE_SYSCTL_STAT_ADD32(ctx, child, "frame_errors",
@@ -3194,8 +3137,8 @@ nfe_sysctl_node(struct nfe_softc *sc)
 	}
 
 	/* Tx statistics. */
-	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "tx", CTLFLAG_RD,
-	    NULL, "Tx MAC statistics");
+	tree = SYSCTL_ADD_NODE(ctx, parent, OID_AUTO, "tx",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Tx MAC statistics");
 	child = SYSCTL_CHILDREN(tree);
 	NFE_SYSCTL_STAT_ADD64(ctx, child, "octets",
 	    &stats->tx_octets, "Octets");
@@ -3307,7 +3250,6 @@ nfe_stats_update(struct nfe_softc *sc)
 	}
 }
 
-
 static void
 nfe_set_linkspeed(struct nfe_softc *sc)
 {
@@ -3376,7 +3318,6 @@ nfe_set_linkspeed(struct nfe_softc *sc)
 	mii->mii_media_active = IFM_ETHER | IFM_100_TX | IFM_FDX;
 	nfe_mac_config(sc, mii);
 }
-
 
 static void
 nfe_set_wol(struct nfe_softc *sc)

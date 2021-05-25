@@ -133,7 +133,6 @@ struct pqi_ident
 	{0x9005, 0x028f, 0x9005, 0x1201, PQI_HWIF_SRCV, "SmartRAID 3154-8i16e"},
 	{0x9005, 0x028f, 0x9005, 0x1202, PQI_HWIF_SRCV, "SmartRAID 3154-8i8e"},
 	{0x9005, 0x028f, 0x1bd4, 0x0047, PQI_HWIF_SRCV, "INSPUR RAID 8240-24i"},
-
 	{0, 0, 0, 0, 0, 0}
 };
 
@@ -201,7 +200,6 @@ void pqisrc_save_controller_info(struct pqisrc_softstate *softs)
 	softs->device_id = (uint32_t)pci_get_device(dev);
 	softs->func_id = (uint32_t)pci_get_function(dev);	
 }
-
 
 /*
  * Allocate resources for our device, set up the bus interface.
@@ -312,7 +310,7 @@ smartpqi_attach(device_t dev)
 
 	softs->os_specific.sim_registered = FALSE;
 	softs->os_name = "FreeBSD ";
-	
+
 	/* Initialize the PQI library */
 	error = pqisrc_init(softs);
 	if (error) {
@@ -324,6 +322,8 @@ smartpqi_attach(device_t dev)
         mtx_init(&softs->os_specific.cam_lock, "cam_lock", NULL, MTX_DEF);
         softs->os_specific.mtx_init = TRUE;
         mtx_init(&softs->os_specific.map_lock, "map_lock", NULL, MTX_DEF);
+        callout_init(&softs->os_specific.wellness_periodic, 1);
+        callout_init(&softs->os_specific.heartbeat_timeout_id, 1);
 
         /*
          * Create DMA tag for mapping buffers into controller-addressable space.
@@ -355,8 +355,8 @@ smartpqi_attach(device_t dev)
 	}
 
 	os_start_heartbeat_timer((void *)softs); /* Start the heart-beat timer */
-	softs->os_specific.wellness_periodic = timeout( os_wellness_periodic, 
-							softs, 120*hz);
+	callout_reset(&softs->os_specific.wellness_periodic, 120*hz,
+		      os_wellness_periodic, softs);
 	/* Register our shutdown handler. */
 	softs->os_specific.eh = EVENTHANDLER_REGISTER(shutdown_final, 
 				smartpqi_shutdown, softs, SHUTDOWN_PRI_DEFAULT);
@@ -410,18 +410,16 @@ smartpqi_detach(device_t dev)
 	EVENTHANDLER_DEREGISTER(shutdown_final, softs->os_specific.eh);
 
 	/* kill the periodic event */
-	untimeout(os_wellness_periodic, softs, 
-			softs->os_specific.wellness_periodic);
+	callout_drain(&softs->os_specific.wellness_periodic);
 	/* Kill the heart beat event */
-	untimeout(os_start_heartbeat_timer, softs, 
-			softs->os_specific.heartbeat_timeout_id);
+	callout_drain(&softs->os_specific.heartbeat_timeout_id);
 
 	smartpqi_shutdown(softs);
 	destroy_char_dev(softs);
 	pqisrc_uninit(softs);
 	deregister_sim(softs);
 	pci_release_msi(dev);
-	
+
 	DBG_FUNC("OUT\n");
 	return 0;
 }

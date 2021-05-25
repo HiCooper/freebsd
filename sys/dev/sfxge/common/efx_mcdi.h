@@ -196,7 +196,6 @@ efx_mcdi_mac_spoofing_supported(
 	__in			efx_nic_t *enp,
 	__out			boolean_t *supportedp);
 
-
 #if EFSYS_OPT_BIST
 #if EFSYS_OPT_HUNTINGTON || EFSYS_OPT_MEDFORD || EFSYS_OPT_MEDFORD2
 extern	__checkReturn		efx_rc_t
@@ -235,7 +234,6 @@ efx_mcdi_mac_stats_periodic(
 	__in		efsys_mem_t *esmp,
 	__in		uint16_t period_ms,
 	__in		boolean_t events);
-
 
 #if EFSYS_OPT_LOOPBACK
 extern	__checkReturn	efx_rc_t
@@ -412,6 +410,11 @@ efx_mcdi_phy_module_get_info(
 	(((mask) & (MC_CMD_PRIVILEGE_MASK_IN_GRP_ ## priv)) ==		\
 	(MC_CMD_PRIVILEGE_MASK_IN_GRP_ ## priv))
 
+#define	EFX_MCDI_BUF_SIZE(_in_len, _out_len)				\
+	EFX_P2ROUNDUP(size_t,						\
+		MAX(MAX(_in_len, _out_len), (2 * sizeof (efx_dword_t))),\
+		sizeof (efx_dword_t))
+
 /*
  * The buffer size must be a multiple of dword to ensure that MCDI works
  * properly with Siena based boards (which use on-chip buffer). Also, it
@@ -419,9 +422,7 @@ efx_mcdi_phy_module_get_info(
  * error responses if the request/response buffer sizes are smaller.
  */
 #define EFX_MCDI_DECLARE_BUF(_name, _in_len, _out_len)			\
-	uint8_t _name[P2ROUNDUP(MAX(MAX(_in_len, _out_len),		\
-				    (2 * sizeof (efx_dword_t))),	\
-				sizeof (efx_dword_t))] = {0}
+	uint8_t _name[EFX_MCDI_BUF_SIZE(_in_len, _out_len)] = {0}
 
 typedef enum efx_mcdi_feature_id_e {
 	EFX_MCDI_FEATURE_FW_UPDATE = 0,

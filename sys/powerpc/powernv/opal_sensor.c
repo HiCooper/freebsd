@@ -92,13 +92,14 @@ const char *opal_sensor_types[] = {
  * Retrieve the raw value from OPAL.  This will be cooked by the sysctl handler.
  */
 static int
-opal_sensor_get_val(uint32_t key, uint64_t *val)
+opal_sensor_get_val(struct opal_sensor_softc *sc, uint32_t key, uint64_t *val)
 {
 	struct opal_msg msg;
 	uint32_t val32;
 	int rv, token;
 
 	token = opal_alloc_async_token();
+	SENSOR_LOCK(sc);
 	rv = opal_call(OPAL_SENSOR_READ, key, token, vtophys(&val32));
 
 	if (rv == OPAL_ASYNC_COMPLETION) {
@@ -110,12 +111,13 @@ opal_sensor_get_val(uint32_t key, uint64_t *val)
 		if (rv == OPAL_SUCCESS)
 			val32 = msg.params[0];
 	}
+	SENSOR_UNLOCK(sc);
 
 	if (rv == OPAL_SUCCESS)
 		*val = val32;
 	else
 		rv = EIO;
-	
+
 	opal_free_async_token(token);
 	return (rv);
 }
@@ -131,15 +133,13 @@ opal_sensor_sysctl(SYSCTL_HANDLER_ARGS)
 	sc = arg1;
 	sensor = arg2;
 
-	SENSOR_LOCK(sc);
-	error = opal_sensor_get_val(sensor, &sensval);
-	SENSOR_UNLOCK(sc);
+	error = opal_sensor_get_val(sc, sensor, &sensval);
 
 	if (error)
 		return (error);
 
 	result = sensval;
-	
+
 	switch (sc->sc_type) {
 	case OPAL_SENSOR_TEMP:
 		result = result * 10 + 2731; /* Convert to K */
@@ -179,7 +179,7 @@ opal_sensor_attach(device_t dev)
 	sc->sc_dev = dev;
 
 	node = ofw_bus_get_node(dev);
-	
+
 	if (OF_getencprop(node, "sensor-data", &sensor_id, sizeof(sensor_id)) < 0) {
 		device_printf(dev, "Missing sensor ID\n");
 		return (ENXIO);
@@ -188,7 +188,7 @@ opal_sensor_attach(device_t dev)
 		device_printf(dev, "Missing sensor type\n");
 		return (ENXIO);
 	}
-	
+
 	sc->sc_type = -1;
 	for (i = 0; i < OPAL_SENSOR_MAX; i++) {
 		if (strcmp(type, opal_sensor_types[i]) == 0) {
@@ -206,9 +206,9 @@ opal_sensor_attach(device_t dev)
 
 	sc->sc_handle = sensor_id;
 	SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
-	    "sensor", CTLTYPE_INT | CTLFLAG_RD, sc, sensor_id,
-	    opal_sensor_sysctl, (sc->sc_type == OPAL_SENSOR_TEMP) ? "IK" : "I",
-	    "current value");
+	    "sensor", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE, sc,
+	    sensor_id, opal_sensor_sysctl,
+	    (sc->sc_type == OPAL_SENSOR_TEMP) ? "IK" : "I", "current value");
 
 	SYSCTL_ADD_STRING(ctx, SYSCTL_CHILDREN(tree), OID_AUTO, "type",
 	    CTLFLAG_RD, __DECONST(char *, opal_sensor_types[sc->sc_type]),
@@ -222,8 +222,8 @@ opal_sensor_attach(device_t dev)
 	    &sensor_id, sizeof(sensor_id)) > 0) {
 		sc->sc_min_handle = sensor_id;
 		SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
-		    "sensor_min", CTLTYPE_INT | CTLFLAG_RD, sc, sensor_id,
-		    opal_sensor_sysctl,
+		    "sensor_min", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE,
+		    sc, sensor_id, opal_sensor_sysctl,
 		    (sc->sc_type == OPAL_SENSOR_TEMP) ? "IK" : "I",
 		    "minimum value");
 	}
@@ -232,8 +232,8 @@ opal_sensor_attach(device_t dev)
 	    &sensor_id, sizeof(sensor_id)) > 0) {
 		sc->sc_max_handle = sensor_id;
 		SYSCTL_ADD_PROC(ctx, SYSCTL_CHILDREN(tree), OID_AUTO,
-		    "sensor_max", CTLTYPE_INT | CTLFLAG_RD, sc, sensor_id,
-		    opal_sensor_sysctl,
+		    "sensor_max", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_MPSAFE,
+		    sc, sensor_id, opal_sensor_sysctl,
 		    (sc->sc_type == OPAL_SENSOR_TEMP) ? "IK" : "I",
 		    "maximum value");
 	}
@@ -258,7 +258,6 @@ static devclass_t opal_sensor_devclass;
 
 DRIVER_MODULE(opal_sensor, opalsens, opal_sensor_driver, opal_sensor_devclass,
     NULL, NULL);
-
 
 static int
 opalsens_probe(device_t dev)

@@ -39,10 +39,11 @@
 #define	_C_LABEL(x)	x
 
 #define	ENTRY(sym)						\
-	.text; .globl sym; .align 2; .type sym,#function; sym:
+	.text; .globl sym; .align 2; .type sym,#function; sym:	\
+	.cfi_startproc
 #define	EENTRY(sym)						\
 	.globl	sym; sym:
-#define	END(sym) .size sym, . - sym
+#define	END(sym) .cfi_endproc; .size sym, . - sym
 #define	EEND(sym)
 
 #define	WEAK_REFERENCE(sym, alias)				\
@@ -89,5 +90,17 @@
 	cbz	reg, 999f;			/* If no PAN skip */	\
 	.inst	0xd500409f | (1 << 8);		/* Set PAN */		\
 	999:
+
+/*
+ * Some AArch64 CPUs speculate past an eret instruction. As the user may
+ * control the registers at this point add a speculation barrier usable on
+ * all AArch64 CPUs after the eret instruction.
+ * TODO: ARMv8.5 adds a specific instruction for this, we could use that
+ * if we know we are running on something that supports it.
+ */
+#define	ERET								\
+	eret;								\
+	dsb	sy;							\
+	isb
 
 #endif /* _MACHINE_ASM_H_ */

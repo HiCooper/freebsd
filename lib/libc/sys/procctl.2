@@ -29,7 +29,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd April 9, 2019
+.Dd June 13, 2020
 .Dt PROCCTL 2
 .Os
 .Sh NAME
@@ -40,7 +40,7 @@
 .Sh SYNOPSIS
 .In sys/procctl.h
 .Ft int
-.Fn procctl "idtype_t idtype" "id_t id" "int cmd" "void *arg"
+.Fn procctl "idtype_t idtype" "id_t id" "int cmd" "void *data"
 .Sh DESCRIPTION
 The
 .Fn procctl
@@ -80,7 +80,7 @@ by
 in the specified process or its descendants that did not changed
 the control nor modified it by other means.
 The
-.Va arg
+.Fa data
 parameter must point to the integer variable holding one of the following
 values:
 .Bl -tag -width PROC_ASLR_FORCE_DISABLE
@@ -91,15 +91,15 @@ The image flag and set-uid might prevent ASLR enablement still.
 .It Dv PROC_ASLR_FORCE_DISABLE
 Request that ASLR is disabled after execution.
 Same notes as for
-.Dv PROC_ASKR_FORCE_ENABLE
+.Dv PROC_ASLR_FORCE_ENABLE
 apply.
 .It Dv PROC_ASLR_NOFORCE
-Use system-wide configured policy for ASLR.
+Use the system-wide configured policy for ASLR.
 .El
 .It Dv PROC_ASLR_STATUS
 Returns the current status of ASLR enablement for the target process.
 The
-.Va arg
+.Fa data
 parameter must point to the integer variable, where one of the
 following values is written:
 .Bl -tag -width PROC_ASLR_FORCE_DISABLE
@@ -112,12 +112,53 @@ If the currently executed image in the process itself has ASLR enabled,
 the
 .Dv PROC_ASLR_ACTIVE
 flag is or-ed with the value listed above.
+.It Dv PROC_PROTMAX_CTL
+Controls implicit application of PROT_MAX protection equal to the
+.Fa prot
+argument of the
+.Xr mmap 2
+syscall, in the target process.
+The
+.Fa data
+parameter must point to the integer variable holding one of the following
+values:
+.Bl -tag -width PROC_PROTMAX_FORCE_DISABLE
+.It Dv PROC_PROTMAX_FORCE_ENABLE
+Enables implicit PROT_MAX application,
+even if it is disabled system-wide by the sysctl
+.Va vm.imply_prot_max .
+The image flag might still prevent the enablement.
+.It Dv PROC_PROTMAX_FORCE_DISABLE
+Request that implicit application of PROT_MAX be disabled.
+Same notes as for
+.Dv PROC_PROTMAX_FORCE_ENABLE
+apply.
+.It Dv PROC_PROTMAX_NOFORCE
+Use the system-wide configured policy for PROT_MAX.
+.El
+.It Dv PROC_PROTMAX_STATUS
+Returns the current status of implicit PROT_MAX enablement for the
+target process.
+The
+.Fa data
+parameter must point to the integer variable, where one of the
+following values is written:
+.Bl -tag -width PROC_PROTMAX_FORCE_DISABLE
+.It Dv PROC_PROTMAX_FORCE_ENABLE
+.It Dv PROC_PROTMAX_FORCE_DISABLE
+.It Dv PROC_PROTMAX_NOFORCE
+.El
+.Pp
+If the currently executed image in the process itself has implicit PROT_MAX
+application enabled, the
+.Dv PROC_PROTMAX_ACTIVE
+flag is or-ed with the value listed above.
 .It Dv PROC_SPROTECT
 Set process protection state.
 This is used to mark a process as protected from being killed if the system
 exhausts the available memory and swap.
 The
-.Fa arg
+.Fa data
 parameter must point to an integer containing an operation and zero or more
 optional flags.
 The following operations are supported:
@@ -442,7 +483,7 @@ and
 must be the either caller's pid or zero, with no difference in effect.
 The value is cleared for child processes
 and when executing set-user-ID or set-group-ID binaries.
-.Fa arg
+.Fa data
 must point to a value of type
 .Vt int
 indicating the signal
@@ -457,12 +498,115 @@ must be
 and
 .Fa id
 must be the either caller's pid or zero, with no difference in effect.
-.Fa arg
+.Fa data
 must point to a memory location that can hold a value of type
 .Vt int .
 If signal delivery has not been requested, it will contain zero
 on return.
+.It Dv PROC_STACKGAP_CTL
+Controls the stack gaps in the specified process.
+A stack gap is the part of the growth area for a
+.Dv MAP_STACK
+mapped region that is reserved and never filled by memory.
+Instead, the process is guaranteed to receive a
+.Dv SIGSEGV
+signal on accessing pages in the gap.
+Gaps protect against stack overflow corrupting memory adjacent
+to the stack.
+.Pp
+The
+.Fa data
+argument must point to an integer variable containing flags.
+The following flags are allowed:
+.Bl -tag -width PROC_STACKGAP_DISABLE_EXEC
+.It Dv PROC_STACKGAP_ENABLE
+This flag is only accepted for consistency with
+.Dv PROC_STACKGAP_STATUS .
+If stack gaps are enabled, the flag is ignored.
+If disabled, the flag causes an
+.Ev EINVAL
+error to be returned.
+After gaps are disabled in a process, they can only be re-enabled when an
+.Xr execve 2
+is performed.
+.It Dv PROC_STACKGAP_DISABLE
+Disable stack gaps for the process.
+For existing stacks, the gap is no longer a reserved part of the growth
+area and can be filled by memory on access.
+.It Dv PROC_STACKGAP_ENABLE_EXEC
+Enable stack gaps for programs started after an
+.Xr execve 2
+by the specified process.
+.It Dv PROC_STACKGAP_DISABLE_EXEC
+Inherit disabled stack gaps state after
+.Xr execve 2 .
+In other words, if the currently executing program has stack gaps disabled,
+they are kept disabled on exec.
+If gaps were enabled, they are kept enabled after exec.
 .El
+.Pp
+The stack gap state is inherited from the parent on
+.Xr fork 2 .
+.It Dv PROC_STACKGAP_STATUS
+Returns the current stack gap state for the specified process.
+.Fa data
+must point to an integer variable, which is used to return a bitmask
+consisting of the following flags:
+.Bl -tag -width PROC_STACKGAP_DISABLE_EXEC
+.It Dv PROC_STACKGAP_ENABLE
+Stack gaps are enabled.
+.It Dv PROC_STACKGAP_DISABLE
+Stack gaps are disabled.
+.It Dv PROC_STACKGAP_ENABLE_EXEC
+Stack gaps are enabled in the process after
+.Xr execve 2 .
+.It Dv PROC_STACKGAP_DISABLE_EXEC
+Stack gaps are disabled in the process after
+.Xr execve 2 .
+.El
+.El
+.Sh x86 MACHINE-SPECIFIC REQUESTS
+.Bl -tag -width PROC_KPTI_STATUS
+.It Dv PROC_KPTI_CTL
+AMD64 only.
+Controls the Kernel Page Table Isolation (KPTI) option for the children
+of the specified process.
+For the command to work, the
+.Va vm.pmap.kpti
+tunable must be enabled on boot.
+It is not possible to change the KPTI setting for a running process,
+except at the
+.Xr execve 2 ,
+where the address space is reinitialized.
+.Pp
+The
+.Fa data
+parameter must point to an integer variable containing one of the
+following commands:
+.Bl -tag -width PROC_KPTI_CTL_DISABLE_ON_EXEC
+.It Dv PROC_KPTI_CTL_ENABLE_ON_EXEC
+Enable KPTI after
+.Xr execve 2 .
+.It Dv PROC_KPTI_CTL_DISABLE_ON_EXEC
+Disable KPTI after
+.Xr execve 2 .
+Only root or a process having the
+.Va PRIV_IO
+privilege might use this option.
+.El
+.It Dv PROC_KPTI_STATUS
+Returns the current KPTI status for the specified process.
+.Fa data
+must point to the integer variable, which returns the
+following statuses:
+.Bl -tag -width PROC_KPTI_CTL_DISABLE_ON_EXEC
+.It Dv PROC_KPTI_CTL_ENABLE_ON_EXEC
+.It Dv PROC_KPTI_CTL_DISABLE_ON_EXEC
+.El
+.Pp
+The status is or-ed with the
+.Va PROC_KPTI_STATUS_ACTIVE
+in case KPTI is active for the current address space of the process.
 .Sh NOTES
 Disabling tracing on a process should not be considered a security
 feature, as it is bypassable both by the kernel and privileged processes,
@@ -481,7 +625,7 @@ will fail if:
 .Bl -tag -width Er
 .It Bq Er EFAULT
 The
-.Fa arg
+.Fa data
 parameter points outside the process's allocated address space.
 .It Bq Er EINVAL
 The
@@ -501,7 +645,7 @@ and
 .Fa id .
 .It Bq Er EINVAL
 An invalid operation or flag was passed in
-.Fa arg
+.Fa data
 for a
 .Dv PROC_SPROTECT
 command.
@@ -572,9 +716,11 @@ or invalid signal number.
 .Xr dtrace 1 ,
 .Xr proccontrol 1 ,
 .Xr protect 1 ,
-.Xr cap_enter 2,
+.Xr cap_enter 2 ,
 .Xr kill 2 ,
 .Xr ktrace 2 ,
+.Xr mmap 2 ,
+.Xr mprotect 2 ,
 .Xr ptrace 2 ,
 .Xr wait 2 ,
 .Xr capsicum 4 ,

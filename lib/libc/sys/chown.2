@@ -28,7 +28,7 @@
 .\"     @(#)chown.2	8.4 (Berkeley) 4/19/94
 .\" $FreeBSD$
 .\"
-.Dd November 11, 2018
+.Dd September 23, 2020
 .Dt CHOWN 2
 .Os
 .Sh NAME
@@ -126,6 +126,13 @@ See the description of the
 flag in the
 .Xr open 2
 manual page.
+.It Dv AT_RESOLVE_BENEATH
+Only walks paths below the topping directory.
+See the description of the
+.Dv O_RESOLVE_BENEATH
+flag in the
+.Xr open 2
+manual page.
 .El
 .Pp
 If
@@ -183,6 +190,8 @@ argument
 points outside the process's allocated address space.
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to the file system.
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .El
 .Pp
 The
@@ -205,6 +214,8 @@ The effective user ID is not the super-user.
 The named file resides on a read-only file system.
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to the file system.
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .El
 .Pp
 In addition to the errors specified for

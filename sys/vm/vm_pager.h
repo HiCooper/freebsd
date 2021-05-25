@@ -61,6 +61,7 @@ typedef boolean_t pgo_haspage_t(vm_object_t, vm_pindex_t, int *, int *);
 typedef int pgo_populate_t(vm_object_t, vm_pindex_t, int, vm_prot_t,
     vm_pindex_t *, vm_pindex_t *);
 typedef void pgo_pageunswapped_t(vm_page_t);
+typedef void pgo_writecount_t(vm_object_t, vm_offset_t, vm_offset_t);
 
 struct pagerops {
 	pgo_init_t		*pgo_init;		/* Initialize pager. */
@@ -72,6 +73,9 @@ struct pagerops {
 	pgo_haspage_t		*pgo_haspage;		/* Query page. */
 	pgo_populate_t		*pgo_populate;		/* Bulk spec pagein. */
 	pgo_pageunswapped_t	*pgo_pageunswapped;
+	/* Operations for specialized writecount handling */
+	pgo_writecount_t	*pgo_update_writecount;
+	pgo_writecount_t	*pgo_release_writecount;
 };
 
 extern struct pagerops defaultpagerops;
@@ -108,6 +112,12 @@ extern struct pagerops mgtdevicepagerops;
 extern struct pagerops *pagertab[];
 extern struct mtx_padalign pbuf_mtx;
 
+/*
+ * Number of pages that pbuf buffer can store in b_pages.
+ * It is +1 to allow for unaligned data buffer of maxphys size.
+ */
+#define	PBUF_PAGES	(atop(maxphys) + 1)
+
 vm_object_t vm_pager_allocate(objtype_t, void *, vm_ooffset_t, vm_prot_t,
     vm_ooffset_t, struct ucred *);
 void vm_pager_bufferinit(void);
@@ -126,7 +136,6 @@ vm_pager_put_pages(
 	int flags,
 	int *rtvals
 ) {
-
 	VM_OBJECT_ASSERT_WLOCKED(object);
 	(*pagertab[object->type]->pgo_putpages)
 	    (object, m, count, flags, rtvals);
@@ -151,7 +160,7 @@ vm_pager_has_page(
 ) {
 	boolean_t ret;
 
-	VM_OBJECT_ASSERT_WLOCKED(object);
+	VM_OBJECT_ASSERT_LOCKED(object);
 	ret = (*pagertab[object->type]->pgo_haspage)
 	    (object, offset, before, after);
 	return (ret);
@@ -164,20 +173,16 @@ vm_pager_populate(vm_object_t object, vm_pindex_t pidx, int fault_type,
 
 	MPASS((object->flags & OBJ_POPULATE) != 0);
 	MPASS(pidx < object->size);
-	MPASS(object->paging_in_progress > 0);
+	MPASS(blockcount_read(&object->paging_in_progress) > 0);
 	return ((*pagertab[object->type]->pgo_populate)(object, pidx,
 	    fault_type, max_prot, first, last));
 }
-
 
 /* 
  *      vm_pager_page_unswapped
  * 
  *	Destroy swap associated with the page.
  * 
- *	The object containing the page must be locked.
- *      This function may not block.
- *
  *	XXX: A much better name would be "vm_pager_page_dirtied()"
  *	XXX: It is not obvious if this could be profitably used by any
  *	XXX: pagers besides the swap_pager or if it should even be a
@@ -187,9 +192,28 @@ static __inline void
 vm_pager_page_unswapped(vm_page_t m)
 {
 
-	VM_OBJECT_ASSERT_LOCKED(m->object);
 	if (pagertab[m->object->type]->pgo_pageunswapped)
 		(*pagertab[m->object->type]->pgo_pageunswapped)(m);
+}
+
+static __inline void
+vm_pager_update_writecount(vm_object_t object, vm_offset_t start,
+    vm_offset_t end)
+{
+
+	if (pagertab[object->type]->pgo_update_writecount)
+		pagertab[object->type]->pgo_update_writecount(object, start,
+		    end);
+}
+
+static __inline void
+vm_pager_release_writecount(vm_object_t object, vm_offset_t start,
+    vm_offset_t end)
+{
+
+	if (pagertab[object->type]->pgo_release_writecount)
+		pagertab[object->type]->pgo_release_writecount(object, start,
+		    end);
 }
 
 struct cdev_pager_ops {
@@ -208,6 +232,23 @@ vm_object_t cdev_pager_allocate(void *handle, enum obj_type tp,
     vm_ooffset_t foff, struct ucred *cred);
 vm_object_t cdev_pager_lookup(void *handle);
 void cdev_pager_free_page(vm_object_t object, vm_page_t m);
+
+struct phys_pager_ops {
+	int (*phys_pg_getpages)(vm_object_t vm_obj, vm_page_t *m, int count,
+	    int *rbehind, int *rahead);
+	int (*phys_pg_populate)(vm_object_t vm_obj, vm_pindex_t pidx,
+	    int fault_type, vm_prot_t max_prot, vm_pindex_t *first,
+	    vm_pindex_t *last);
+	boolean_t (*phys_pg_haspage)(vm_object_t obj,  vm_pindex_t pindex,
+	    int *before, int *after);
+	void (*phys_pg_ctor)(vm_object_t vm_obj, vm_prot_t prot,
+	    vm_ooffset_t foff, struct ucred *cred);
+	void (*phys_pg_dtor)(vm_object_t vm_obj);
+};
+extern struct phys_pager_ops default_phys_pg_ops;
+vm_object_t phys_pager_allocate(void *handle, struct phys_pager_ops *ops,
+    void *data, vm_ooffset_t size, vm_prot_t prot, vm_ooffset_t foff,
+    struct ucred *cred);
 
 #endif				/* _KERNEL */
 #endif				/* _VM_PAGER_ */

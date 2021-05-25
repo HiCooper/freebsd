@@ -56,10 +56,21 @@ extern "C" {
 /* The macro expands divider twice */
 #define	EFX_DIV_ROUND_UP(_n, _d)		(((_n) + (_d) - 1) / (_d))
 
+/* Round value up to the nearest power of two. */
+#define	EFX_P2ROUNDUP(_type, _value, _align)	\
+	(-(-(_type)(_value) & -(_type)(_align)))
+
+/* Align value down to the nearest power of two. */
+#define	EFX_P2ALIGN(_type, _value, _align)	\
+	((_type)(_value) & -(_type)(_align))
+
+/* Test if value is power of 2 aligned. */
+#define	EFX_IS_P2ALIGNED(_type, _value, _align)	\
+	((((_type)(_value)) & ((_type)(_align) - 1)) == 0)
+
 /* Return codes */
 
 typedef __success(return == 0) int efx_rc_t;
-
 
 /* Chip families */
 
@@ -79,7 +90,6 @@ efx_family(
 	__in		uint16_t devid,
 	__out		efx_family_t *efp,
 	__out		unsigned int *membarp);
-
 
 #define	EFX_PCI_VENID_SFC			0x1924
 
@@ -104,7 +114,6 @@ efx_family(
 #define	EFX_PCI_DEVID_MEDFORD2			0x0B03	/* SFC9250 PF */
 #define	EFX_PCI_DEVID_MEDFORD2_VF		0x1B03	/* SFC9250 VF */
 
-
 #define	EFX_MEM_BAR_SIENA			2
 
 #define	EFX_MEM_BAR_HUNTINGTON_PF		2
@@ -114,7 +123,6 @@ efx_family(
 #define	EFX_MEM_BAR_MEDFORD_VF			0
 
 #define	EFX_MEM_BAR_MEDFORD2			0
-
 
 /* Error codes */
 
@@ -140,7 +148,6 @@ efx_crc32_calculate(
 	__in			uint32_t crc_init,
 	__in_ecount(length)	uint8_t const *input,
 	__in			int length);
-
 
 /* Type prototypes */
 
@@ -522,10 +529,10 @@ typedef enum efx_link_mode_e {
 	    + /* bug16011 */ 16)				\
 
 #define	EFX_MAC_PDU(_sdu)					\
-	P2ROUNDUP((_sdu) + EFX_MAC_PDU_ADJUSTMENT, 8)
+	EFX_P2ROUNDUP(size_t, (_sdu) + EFX_MAC_PDU_ADJUSTMENT, 8)
 
 /*
- * Due to the P2ROUNDUP in EFX_MAC_PDU(), EFX_MAC_SDU_FROM_PDU() may give
+ * Due to the EFX_P2ROUNDUP in EFX_MAC_PDU(), EFX_MAC_SDU_FROM_PDU() may give
  * the SDU rounded up slightly.
  */
 #define	EFX_MAC_SDU_FROM_PDU(_pdu)	((_pdu) - EFX_MAC_PDU_ADJUSTMENT)
@@ -597,7 +604,6 @@ efx_mac_fcntl_get(
 	__out		unsigned int *fcntl_wantedp,
 	__out		unsigned int *fcntl_linkp);
 
-
 #if EFSYS_OPT_MAC_STATS
 
 #if EFSYS_OPT_NAMES
@@ -611,8 +617,9 @@ efx_mac_stat_name(
 
 #define	EFX_MAC_STATS_MASK_BITS_PER_PAGE	(8 * sizeof (uint32_t))
 
-#define	EFX_MAC_STATS_MASK_NPAGES	\
-	(P2ROUNDUP(EFX_MAC_NSTATS, EFX_MAC_STATS_MASK_BITS_PER_PAGE) / \
+#define	EFX_MAC_STATS_MASK_NPAGES				\
+	(EFX_P2ROUNDUP(uint32_t, EFX_MAC_NSTATS,		\
+		       EFX_MAC_STATS_MASK_BITS_PER_PAGE) /	\
 	    EFX_MAC_STATS_MASK_BITS_PER_PAGE)
 
 /*
@@ -631,7 +638,6 @@ efx_mac_stats_get_mask(
 #define	EFX_MAC_STAT_SUPPORTED(_mask, _stat)	\
 	((_mask)[(_stat) / EFX_MAC_STATS_MASK_BITS_PER_PAGE] &	\
 	    (1ULL << ((_stat) & (EFX_MAC_STATS_MASK_BITS_PER_PAGE - 1))))
-
 
 extern	__checkReturn			efx_rc_t
 efx_mac_stats_clear(
@@ -1009,7 +1015,6 @@ typedef enum efx_phy_cap_type_e {
 	EFX_PHY_CAP_NTYPES
 } efx_phy_cap_type_t;
 
-
 #define	EFX_PHY_CAP_CURRENT	0x00000000
 #define	EFX_PHY_CAP_DEFAULT	0x00000001
 #define	EFX_PHY_CAP_PERM	0x00000002
@@ -1083,7 +1088,6 @@ efx_phy_media_type_get(
  * Maximum accessible data offset for PHY module information.
  */
 #define	EFX_PHY_MEDIA_INFO_MAX_OFFSET		0x100
-
 
 extern	__checkReturn		efx_rc_t
 efx_phy_module_get_info(
@@ -1166,7 +1170,6 @@ efx_phy_stats_update(
 	__inout_ecount(EFX_PHY_NSTATS)	uint32_t *stat);
 
 #endif	/* EFSYS_OPT_PHY_STATS */
-
 
 #if EFSYS_OPT_BIST
 
@@ -1499,7 +1502,6 @@ efx_nic_get_vi_pool(
 	__out		uint32_t *rxq_countp,
 	__out		uint32_t *txq_countp);
 
-
 #if EFSYS_OPT_VPD
 
 typedef enum efx_vpd_tag_e {
@@ -1517,7 +1519,6 @@ typedef struct efx_vpd_value_s {
 	uint8_t			evv_length;
 	uint8_t			evv_value[0x100];
 } efx_vpd_value_t;
-
 
 #define	EFX_VPD_KEYWORD(x, y) ((x) | ((y) << 8))
 
@@ -1729,7 +1730,6 @@ efx_bootcfg_write(
 	__in_bcount(size)	uint8_t *data,
 	__in			size_t size);
 
-
 /*
  * Processing routines for buffers arranged in the DHCP/BOOTP option format
  * (see https://tools.ietf.org/html/rfc1533)
@@ -1785,7 +1785,6 @@ efx_dhcp_find_end(
 	__in				size_t buffer_length,
 	__deref_out			uint8_t **endpp);
 
-
 extern	__checkReturn	efx_rc_t
 efx_dhcp_delete_tag(
 	__inout_bcount(buffer_length)	uint8_t *bufferp,
@@ -1808,7 +1807,6 @@ efx_dhcp_update_tag(
 	__in				uint8_t *value_locationp,
 	__in_bcount_opt(value_length)	uint8_t *valuep,
 	__in				size_t value_length);
-
 
 #endif	/* EFSYS_OPT_BOOTCFG */
 
@@ -1861,7 +1859,6 @@ typedef struct efx_image_header_s {
 #define	EFX_IMAGE_HEADER_SIZE		(40)
 #define	EFX_IMAGE_HEADER_VERSION	(4)
 #define	EFX_IMAGE_HEADER_MAGIC		(0x106F1A5)
-
 
 typedef struct efx_image_trailer_s {
 	uint32_t	eit_crc;
@@ -2062,7 +2059,6 @@ typedef __checkReturn	boolean_t
  */
 #define	EFX_PKT_PACKED_STREAM_NEW_BUFFER	EFX_PKT_START
 #define	EFX_PKT_PACKED_STREAM_PARSE_INCOMPLETE	EFX_PKT_CONT
-
 
 #define	EFX_EV_RX_NLABELS	32
 #define	EFX_EV_TX_NLABELS	32
@@ -2435,7 +2431,6 @@ efx_rx_hash_default_support_get(
 	__in		efx_nic_t *enp,
 	__out		efx_rx_hash_support_t *supportp);
 
-
 extern	__checkReturn	efx_rc_t
 efx_rx_scale_default_support_get(
 	__in		efx_nic_t *enp,
@@ -2805,7 +2800,6 @@ extern		void
 efx_tx_qdestroy(
 	__in	efx_txq_t *etp);
 
-
 /* FILTER */
 
 #if EFSYS_OPT_FILTER
@@ -2923,7 +2917,6 @@ typedef struct efx_filter_spec_s {
 	uint8_t				efs_vni_or_vsid[EFX_VNI_OR_VSID_LEN];
 	uint8_t				efs_ifrm_loc_mac[EFX_MAC_ADDR_LEN];
 } efx_filter_spec_t;
-
 
 /* Default values for use in filter specifications */
 #define	EFX_FILTER_SPEC_RX_DMAQ_ID_DROP		0xfff
@@ -3110,7 +3103,6 @@ efx_lic_get_id(
 	__out		uint32_t *typep,
 	__out		size_t *lengthp,
 	__out_opt	uint8_t *bufferp);
-
 
 extern	__checkReturn		efx_rc_t
 efx_lic_find_start(
@@ -3300,7 +3292,6 @@ extern	__checkReturn	efx_rc_t
 efx_phy_link_state_get(
 	__in		efx_nic_t *enp,
 	__out		efx_phy_link_state_t  *eplsp);
-
 
 #ifdef	__cplusplus
 }

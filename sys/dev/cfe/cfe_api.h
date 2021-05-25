@@ -63,13 +63,13 @@
  * CFE_API_* can be defined here as desired.
  */
 /* Begin customization. */
+#include <sys/types.h>
 #include <sys/stdint.h>		/* All of the typedefs.  */
 #include <sys/systm.h>		/* strlen() prototype.  */
 
 #define	CFE_API_ALL
 #define	cfe_strlen(x)	strlen(x)
 /* End customization. */
-
 
 /*  *********************************************************************
     *  Constants
@@ -122,7 +122,6 @@ typedef struct {
     int64_t fwi_bootarea_pa;		/* PA of boot area */
     int64_t fwi_bootarea_size;	        /* size of boot area */
 } cfe_fwinfo_t;
-
 
 /*
  * cfe_strlen is handled specially: If already defined, it has been

@@ -29,7 +29,6 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
-
 #include <sys/param.h>
 #include <sys/conf.h>
 #include <sys/bus.h>
@@ -51,7 +50,7 @@ __FBSDID("$FreeBSD$");
 	CLKDEV_READ_4(clknode_get_device(_clk), off, val)
 #define	MD4(_clk, off, clr, set )					\
 	CLKDEV_MODIFY_4(clknode_get_device(_clk), off, clr, set)
-#define	DEVICE_LOCK(_clk)							\
+#define	DEVICE_LOCK(_clk)						\
 	CLKDEV_DEVICE_LOCK(clknode_get_device(_clk))
 #define	DEVICE_UNLOCK(_clk)						\
 	CLKDEV_DEVICE_UNLOCK(clknode_get_device(_clk))
@@ -74,7 +73,6 @@ static clknode_method_t rk_clk_mux_methods[] = {
 };
 DEFINE_CLASS_1(rk_clk_mux, rk_clk_mux_class, rk_clk_mux_methods,
    sizeof(struct rk_clk_mux_sc), clknode_class);
-
 
 static int
 rk_clk_mux_init(struct clknode *clk, device_t dev)

@@ -40,6 +40,7 @@ __FBSDID("$FreeBSD$");
 #include "opt_ddb.h"
 
 #include <sys/param.h>
+#include <sys/gsb_crc32.h>
 #include <sys/systm.h>
 #include <sys/namei.h>
 #include <sys/priv.h>
@@ -57,6 +58,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/mutex.h>
 #include <sys/rwlock.h>
+#include <sys/sysctl.h>
 #include <sys/vmmeter.h>
 
 #include <security/mac/mac_framework.h>
@@ -82,6 +84,7 @@ __FBSDID("$FreeBSD$");
 #include <ddb/ddb.h>
 
 static uma_zone_t uma_inode, uma_ufs1, uma_ufs2;
+VFS_SMR_DECLARE;
 
 static int	ffs_mountfs(struct vnode *, struct mount *, struct thread *);
 static void	ffs_oldfscompat_read(struct fs *, struct ufsmount *,
@@ -108,7 +111,8 @@ static struct vfsops ufs_vfsops = {
 	.vfs_mount =		ffs_mount,
 	.vfs_cmount =		ffs_cmount,
 	.vfs_quotactl =		ufs_quotactl,
-	.vfs_root =		ufs_root,
+	.vfs_root =		vfs_cache_root,
+	.vfs_cachedroot =	ufs_root,
 	.vfs_statfs =		ffs_statfs,
 	.vfs_sync =		ffs_sync,
 	.vfs_uninit =		ffs_uninit,
@@ -144,12 +148,229 @@ static struct buf_ops ffs_ops = {
 static const char *ffs_opts[] = { "acls", "async", "noatime", "noclusterr",
     "noclusterw", "noexec", "export", "force", "from", "groupquota",
     "multilabel", "nfsv4acls", "fsckpid", "snapshot", "nosuid", "suiddir",
-    "nosymfollow", "sync", "union", "userquota", NULL };
+    "nosymfollow", "sync", "union", "userquota", "untrusted", NULL };
+
+static int ffs_enxio_enable = 1;
+SYSCTL_DECL(_vfs_ffs);
+SYSCTL_INT(_vfs_ffs, OID_AUTO, enxio_enable, CTLFLAG_RWTUN,
+    &ffs_enxio_enable, 0,
+    "enable mapping of other disk I/O errors to ENXIO");
+
+/*
+ * Return buffer with the contents of block "offset" from the beginning of
+ * directory "ip".  If "res" is non-zero, fill it in with a pointer to the
+ * remaining space in the directory.
+ */
+static int
+ffs_blkatoff(struct vnode *vp, off_t offset, char **res, struct buf **bpp)
+{
+	struct inode *ip;
+	struct fs *fs;
+	struct buf *bp;
+	ufs_lbn_t lbn;
+	int bsize, error;
+
+	ip = VTOI(vp);
+	fs = ITOFS(ip);
+	lbn = lblkno(fs, offset);
+	bsize = blksize(fs, ip, lbn);
+
+	*bpp = NULL;
+	error = bread(vp, lbn, bsize, NOCRED, &bp);
+	if (error) {
+		return (error);
+	}
+	if (res)
+		*res = (char *)bp->b_data + blkoff(fs, offset);
+	*bpp = bp;
+	return (0);
+}
+
+/*
+ * Load up the contents of an inode and copy the appropriate pieces
+ * to the incore copy.
+ */
+static int
+ffs_load_inode(struct buf *bp, struct inode *ip, struct fs *fs, ino_t ino)
+{
+	struct ufs1_dinode *dip1;
+	struct ufs2_dinode *dip2;
+	int error;
+
+	if (I_IS_UFS1(ip)) {
+		dip1 = ip->i_din1;
+		*dip1 =
+		    *((struct ufs1_dinode *)bp->b_data + ino_to_fsbo(fs, ino));
+		ip->i_mode = dip1->di_mode;
+		ip->i_nlink = dip1->di_nlink;
+		ip->i_effnlink = dip1->di_nlink;
+		ip->i_size = dip1->di_size;
+		ip->i_flags = dip1->di_flags;
+		ip->i_gen = dip1->di_gen;
+		ip->i_uid = dip1->di_uid;
+		ip->i_gid = dip1->di_gid;
+		return (0);
+	}
+	dip2 = ((struct ufs2_dinode *)bp->b_data + ino_to_fsbo(fs, ino));
+	if ((error = ffs_verify_dinode_ckhash(fs, dip2)) != 0 &&
+	    !ffs_fsfail_cleanup(ITOUMP(ip), error)) {
+		printf("%s: inode %jd: check-hash failed\n", fs->fs_fsmnt,
+		    (intmax_t)ino);
+		return (error);
+	}
+	*ip->i_din2 = *dip2;
+	dip2 = ip->i_din2;
+	ip->i_mode = dip2->di_mode;
+	ip->i_nlink = dip2->di_nlink;
+	ip->i_effnlink = dip2->di_nlink;
+	ip->i_size = dip2->di_size;
+	ip->i_flags = dip2->di_flags;
+	ip->i_gen = dip2->di_gen;
+	ip->i_uid = dip2->di_uid;
+	ip->i_gid = dip2->di_gid;
+	return (0);
+}
+
+/*
+ * Verify that a filesystem block number is a valid data block.
+ * This routine is only called on untrusted filesystems.
+ */
+static int
+ffs_check_blkno(struct mount *mp, ino_t inum, ufs2_daddr_t daddr, int blksize)
+{
+	struct fs *fs;
+	struct ufsmount *ump;
+	ufs2_daddr_t end_daddr;
+	int cg, havemtx;
+
+	KASSERT((mp->mnt_flag & MNT_UNTRUSTED) != 0,
+	    ("ffs_check_blkno called on a trusted file system"));
+	ump = VFSTOUFS(mp);
+	fs = ump->um_fs;
+	cg = dtog(fs, daddr);
+	end_daddr = daddr + numfrags(fs, blksize);
+	/*
+	 * Verify that the block number is a valid data block. Also check
+	 * that it does not point to an inode block or a superblock. Accept
+	 * blocks that are unalloacted (0) or part of snapshot metadata
+	 * (BLK_NOCOPY or BLK_SNAP).
+	 *
+	 * Thus, the block must be in a valid range for the filesystem and
+	 * either in the space before a backup superblock (except the first
+	 * cylinder group where that space is used by the bootstrap code) or
+	 * after the inode blocks and before the end of the cylinder group.
+	 */
+	if ((uint64_t)daddr <= BLK_SNAP ||
+	    ((uint64_t)end_daddr <= fs->fs_size &&
+	    ((cg > 0 && end_daddr <= cgsblock(fs, cg)) ||
+	    (daddr >= cgdmin(fs, cg) &&
+	    end_daddr <= cgbase(fs, cg) + fs->fs_fpg))))
+		return (0);
+	if ((havemtx = mtx_owned(UFS_MTX(ump))) == 0)
+		UFS_LOCK(ump);
+	if (ppsratecheck(&ump->um_last_integritymsg,
+	    &ump->um_secs_integritymsg, 1)) {
+		UFS_UNLOCK(ump);
+		uprintf("\n%s: inode %jd, out-of-range indirect block "
+		    "number %jd\n", mp->mnt_stat.f_mntonname, inum, daddr);
+		if (havemtx)
+			UFS_LOCK(ump);
+	} else if (!havemtx)
+		UFS_UNLOCK(ump);
+	return (EINTEGRITY);
+}
+
+/*
+ * Initiate a forcible unmount.
+ * Used to unmount filesystems whose underlying media has gone away.
+ */
+static void
+ffs_fsfail_unmount(void *v, int pending)
+{
+	struct fsfail_task *etp;
+	struct mount *mp;
+
+	etp = v;
+
+	/*
+	 * Find our mount and get a ref on it, then try to unmount.
+	 */
+	mp = vfs_getvfs(&etp->fsid);
+	if (mp != NULL)
+		dounmount(mp, MNT_FORCE, curthread);
+	free(etp, M_UFSMNT);
+}
+
+/*
+ * On first ENXIO error, start a task that forcibly unmounts the filesystem.
+ *
+ * Return true if a cleanup is in progress.
+ */
+int
+ffs_fsfail_cleanup(struct ufsmount *ump, int error)
+{
+	int retval;
+
+	UFS_LOCK(ump);
+	retval = ffs_fsfail_cleanup_locked(ump, error);
+	UFS_UNLOCK(ump);
+	return (retval);
+}
+
+int
+ffs_fsfail_cleanup_locked(struct ufsmount *ump, int error)
+{
+	struct fsfail_task *etp;
+	struct task *tp;
+
+	mtx_assert(UFS_MTX(ump), MA_OWNED);
+	if (error == ENXIO && (ump->um_flags & UM_FSFAIL_CLEANUP) == 0) {
+		ump->um_flags |= UM_FSFAIL_CLEANUP;
+		/*
+		 * Queue an async forced unmount.
+		 */
+		etp = ump->um_fsfail_task;
+		ump->um_fsfail_task = NULL;
+		if (etp != NULL) {
+			tp = &etp->task;
+			TASK_INIT(tp, 0, ffs_fsfail_unmount, etp);
+			taskqueue_enqueue(taskqueue_thread, tp);
+			printf("UFS: forcibly unmounting %s from %s\n",
+			    ump->um_mountp->mnt_stat.f_mntfromname,
+			    ump->um_mountp->mnt_stat.f_mntonname);
+		}
+	}
+	return ((ump->um_flags & UM_FSFAIL_CLEANUP) != 0);
+}
+
+/*
+ * Wrapper used during ENXIO cleanup to allocate empty buffers when
+ * the kernel is unable to read the real one. They are needed so that
+ * the soft updates code can use them to unwind its dependencies.
+ */
+int
+ffs_breadz(struct ufsmount *ump, struct vnode *vp, daddr_t lblkno,
+    daddr_t dblkno, int size, daddr_t *rablkno, int *rabsize, int cnt,
+    struct ucred *cred, int flags, void (*ckhashfunc)(struct buf *),
+    struct buf **bpp)
+{
+	int error;
+
+	flags |= GB_CVTENXIO;
+	error = breadn_flags(vp, lblkno, dblkno, size, rablkno, rabsize, cnt,
+	    cred, flags, ckhashfunc, bpp);
+	if (error != 0 && ffs_fsfail_cleanup(ump, error)) {
+		error = getblkx(vp, lblkno, dblkno, size, 0, 0, flags, bpp);
+		KASSERT(error == 0, ("getblkx failed"));
+		vfs_bio_bzero_buf(*bpp, 0, size);
+	}
+	return (error);
+}
 
 static int
 ffs_mount(struct mount *mp)
 {
-	struct vnode *devvp;
+	struct vnode *devvp, *odevvp;
 	struct thread *td;
 	struct ufsmount *ump = NULL;
 	struct fs *fs;
@@ -173,6 +394,7 @@ ffs_mount(struct mount *mp)
 		uma_ufs2 = uma_zcreate("FFS2 dinode",
 		    sizeof(struct ufs2_dinode), NULL, NULL, NULL, NULL,
 		    UMA_ALIGN_PTR, 0);
+		VFS_SMR_ZONE_SET(uma_inode);
 	}
 
 	vfs_deleteopt(mp->mnt_optnew, "groupquota");
@@ -183,6 +405,9 @@ ffs_mount(struct mount *mp)
 		return (error);
 
 	mntorflags = 0;
+	if (vfs_getopt(mp->mnt_optnew, "untrusted", NULL, NULL) == 0)
+		mntorflags |= MNT_UNTRUSTED;
+
 	if (vfs_getopt(mp->mnt_optnew, "acls", NULL, NULL) == 0)
 		mntorflags |= MNT_ACLS;
 
@@ -232,6 +457,7 @@ ffs_mount(struct mount *mp)
 	}
 
 	MNT_ILOCK(mp);
+	mp->mnt_kern_flag &= ~MNTK_FPLOOKUP;
 	mp->mnt_flag |= mntorflags;
 	MNT_IUNLOCK(mp);
 	/*
@@ -241,6 +467,7 @@ ffs_mount(struct mount *mp)
 	if (mp->mnt_flag & MNT_UPDATE) {
 		ump = VFSTOUFS(mp);
 		fs = ump->um_fs;
+		odevvp = ump->um_odevvp;
 		devvp = ump->um_devvp;
 		if (fsckpid == -1 && ump->um_fsckpid > 0) {
 			if ((error = ffs_flushfiles(mp, WRITECLOSE, td)) != 0 ||
@@ -332,16 +559,15 @@ ffs_mount(struct mount *mp)
 			 * If upgrade to read-write by non-root, then verify
 			 * that user has necessary permissions on the device.
 			 */
-			vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
-			error = VOP_ACCESS(devvp, VREAD | VWRITE,
+			vn_lock(odevvp, LK_EXCLUSIVE | LK_RETRY);
+			error = VOP_ACCESS(odevvp, VREAD | VWRITE,
 			    td->td_ucred, td);
 			if (error)
 				error = priv_check(td, PRIV_VFS_MOUNT_PERM);
+			VOP_UNLOCK(odevvp);
 			if (error) {
-				VOP_UNLOCK(devvp, 0);
 				return (error);
 			}
-			VOP_UNLOCK(devvp, 0);
 			fs->fs_flags &= ~FS_UNCLEAN;
 			if (fs->fs_clean == 0) {
 				fs->fs_flags |= FS_UNCLEAN;
@@ -502,7 +728,7 @@ ffs_mount(struct mount *mp)
 		return (error);
 	NDFREE(&ndp, NDF_ONLY_PNBUF);
 	devvp = ndp.ni_vp;
-	if (!vn_isdisk(devvp, &error)) {
+	if (!vn_isdisk_error(devvp, &error)) {
 		vput(devvp);
 		return (error);
 	}
@@ -572,6 +798,17 @@ ffs_mount(struct mount *mp)
 			}
 		}
 	}
+
+	MNT_ILOCK(mp);
+	/*
+	 * This is racy versus lookup, see ufs_fplookup_vexec for details.
+	 */
+	if ((mp->mnt_kern_flag & MNTK_FPLOOKUP) != 0)
+		panic("MNTK_FPLOOKUP set on mount %p when it should not be", mp);
+	if ((mp->mnt_flag & (MNT_ACLS | MNT_NFS4ACLS | MNT_UNION)) == 0)
+		mp->mnt_kern_flag |= MNTK_FPLOOKUP;
+	MNT_IUNLOCK(mp);
+
 	vfs_mountedfrom(mp, fspec);
 	return (0);
 }
@@ -584,7 +821,6 @@ static int
 ffs_cmount(struct mntarg *ma, void *data, uint64_t flags)
 {
 	struct ufs_args args;
-	struct export_args exp;
 	int error;
 
 	if (data == NULL)
@@ -592,10 +828,9 @@ ffs_cmount(struct mntarg *ma, void *data, uint64_t flags)
 	error = copyin(data, &args, sizeof args);
 	if (error)
 		return (error);
-	vfs_oexport_conv(&args.export, &exp);
 
 	ma = mount_argsu(ma, "from", args.fspec, MAXPATHLEN);
-	ma = mount_arg(ma, "export", &exp, sizeof(exp));
+	ma = mount_arg(ma, "export", &args.export, sizeof(args.export));
 	error = kernel_mount(ma, flags);
 
 	return (error);
@@ -638,7 +873,7 @@ ffs_reload(struct mount *mp, struct thread *td, int flags)
 		return (EINVAL);
 	}
 	MNT_IUNLOCK(mp);
-	
+
 	/*
 	 * Step 1: invalidate all cached meta-data.
 	 */
@@ -646,7 +881,7 @@ ffs_reload(struct mount *mp, struct thread *td, int flags)
 	vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
 	if (vinvalbuf(devvp, 0, 0, 0) != 0)
 		panic("ffs_reload: dirty1");
-	VOP_UNLOCK(devvp, 0);
+	VOP_UNLOCK(devvp);
 
 	/*
 	 * Step 2: re-read superblock from disk.
@@ -664,14 +899,11 @@ ffs_reload(struct mount *mp, struct thread *td, int flags)
 			return (EIO);		/* XXX needs translation */
 	}
 	/*
-	 * Copy pointer fields back into superblock before copying in	XXX
-	 * new superblock. These should really be in the ufsmount.	XXX
-	 * Note that important parameters (eg fs_ncg) are unchanged.
+	 * Preserve the summary information, read-only status, and
+	 * superblock location by copying these fields into our new
+	 * superblock before using it to update the existing superblock.
 	 */
-	newfs->fs_csp = fs->fs_csp;
-	newfs->fs_maxcluster = fs->fs_maxcluster;
-	newfs->fs_contigdirs = fs->fs_contigdirs;
-	newfs->fs_active = fs->fs_active;
+	newfs->fs_si = fs->fs_si;
 	newfs->fs_ronly = fs->fs_ronly;
 	sblockloc = fs->fs_sblockloc;
 	bcopy(newfs, fs, (u_int)fs->fs_sbsize);
@@ -742,7 +974,7 @@ loop:
 		/*
 		 * Step 4: invalidate all cached file data.
 		 */
-		if (vget(vp, LK_EXCLUSIVE | LK_INTERLOCK, td)) {
+		if (vget(vp, LK_EXCLUSIVE | LK_INTERLOCK)) {
 			MNT_VNODE_FOREACH_ALL_ABORT(mp, mvp);
 			goto loop;
 		}
@@ -777,8 +1009,8 @@ loop:
  * Common code for mount and mountroot
  */
 static int
-ffs_mountfs(devvp, mp, td)
-	struct vnode *devvp;
+ffs_mountfs(odevvp, mp, td)
+	struct vnode *odevvp;
 	struct mount *mp;
 	struct thread *td;
 {
@@ -789,7 +1021,9 @@ ffs_mountfs(devvp, mp, td)
 	struct ucred *cred;
 	struct g_consumer *cp;
 	struct mount *nmp;
-	int candelete;
+	struct vnode *devvp;
+	struct fsfail_task *etp;
+	int candelete, canspeedup;
 	off_t loc;
 
 	fs = NULL;
@@ -797,11 +1031,13 @@ ffs_mountfs(devvp, mp, td)
 	cred = td ? td->td_ucred : NOCRED;
 	ronly = (mp->mnt_flag & MNT_RDONLY) != 0;
 
+	devvp = mntfs_allocvp(mp, odevvp);
+	VOP_UNLOCK(odevvp);
 	KASSERT(devvp->v_type == VCHR, ("reclaimed devvp"));
 	dev = devvp->v_rdev;
 	if (atomic_cmpset_acq_ptr((uintptr_t *)&dev->si_mountpt, 0,
 	    (uintptr_t)mp) == 0) {
-		VOP_UNLOCK(devvp, 0);
+		mntfs_freevp(devvp);
 		return (EBUSY);
 	}
 	g_topology_lock();
@@ -809,16 +1045,18 @@ ffs_mountfs(devvp, mp, td)
 	g_topology_unlock();
 	if (error != 0) {
 		atomic_store_rel_ptr((uintptr_t *)&dev->si_mountpt, 0);
-		VOP_UNLOCK(devvp, 0);
+		mntfs_freevp(devvp);
 		return (error);
 	}
 	dev_ref(dev);
 	devvp->v_bufobj.bo_ops = &ffs_ops;
-	VOP_UNLOCK(devvp, 0);
+	BO_LOCK(&odevvp->v_bufobj);
+	odevvp->v_bufobj.bo_flag |= BO_NOBUFS;
+	BO_UNLOCK(&odevvp->v_bufobj);
 	if (dev->si_iosize_max != 0)
 		mp->mnt_iosize_max = dev->si_iosize_max;
-	if (mp->mnt_iosize_max > MAXPHYS)
-		mp->mnt_iosize_max = MAXPHYS;
+	if (mp->mnt_iosize_max > maxphys)
+		mp->mnt_iosize_max = maxphys;
 	if ((SBLOCKSIZE % cp->provider->sectorsize) != 0) {
 		error = EINVAL;
 		vfs_mount_error(mp,
@@ -832,10 +1070,6 @@ ffs_mountfs(devvp, mp, td)
 		loc = STDSB_NOHASHFAIL;
 	if ((error = ffs_sbget(devvp, &fs, loc, M_UFSMNT, ffs_use_bread)) != 0)
 		goto out;
-	/* none of these types of check-hashes are maintained by this kernel */
-	fs->fs_metackhash &= ~(CK_INDIR | CK_DIR);
-	/* no support for any undefined flags */
-	fs->fs_flags &= FS_SUPPORTED;
 	fs->fs_flags &= ~FS_UNCLEAN;
 	if (fs->fs_clean == 0) {
 		fs->fs_flags |= FS_UNCLEAN;
@@ -915,6 +1149,10 @@ ffs_mountfs(devvp, mp, td)
 	ump->um_ifree = ffs_ifree;
 	ump->um_rdonly = ffs_rdonly;
 	ump->um_snapgone = ffs_snapgone;
+	if ((mp->mnt_flag & MNT_UNTRUSTED) != 0)
+		ump->um_check_blkno = ffs_check_blkno;
+	else
+		ump->um_check_blkno = NULL;
 	mtx_init(UFS_MTX(ump), "FFS", "FFS Lock", MTX_DEF);
 	ffs_oldfscompat_read(fs, ump, fs->fs_sblockloc);
 	fs->fs_ronly = ronly;
@@ -1002,9 +1240,16 @@ ffs_mountfs(devvp, mp, td)
 		}
 	}
 
+	len = sizeof(int);
+	if (g_io_getattr("GEOM::canspeedup", cp, &len, &canspeedup) == 0) {
+		if (canspeedup)
+			ump->um_flags |= UM_CANSPEEDUP;
+	}
+
 	ump->um_mountp = mp;
 	ump->um_dev = dev;
 	ump->um_devvp = devvp;
+	ump->um_odevvp = odevvp;
 	ump->um_nindir = fs->fs_nindir;
 	ump->um_bptrtodb = fs->fs_fsbtodb;
 	ump->um_seqinc = fs->fs_frag;
@@ -1064,10 +1309,14 @@ ffs_mountfs(devvp, mp, td)
 	(void) ufs_extattr_autostart(mp, td);
 #endif /* !UFS_EXTATTR_AUTOSTART */
 #endif /* !UFS_EXTATTR */
+	etp = malloc(sizeof *ump->um_fsfail_task, M_UFSMNT, M_WAITOK | M_ZERO);
+	etp->fsid = mp->mnt_stat.f_fsid;
+	ump->um_fsfail_task = etp;
 	return (0);
 out:
 	if (fs != NULL) {
 		free(fs->fs_csp, M_UFSMNT);
+		free(fs->fs_si, M_UFSMNT);
 		free(fs, M_UFSMNT);
 	}
 	if (cp != NULL) {
@@ -1084,7 +1333,11 @@ out:
 		free(ump, M_UFSMNT);
 		mp->mnt_data = NULL;
 	}
+	BO_LOCK(&odevvp->v_bufobj);
+	odevvp->v_bufobj.bo_flag &= ~BO_NOBUFS;
+	BO_UNLOCK(&odevvp->v_bufobj);
 	atomic_store_rel_ptr((uintptr_t *)&dev->si_mountpt, 0);
+	mntfs_freevp(devvp);
 	dev_rel(dev);
 	return (error);
 }
@@ -1109,7 +1362,6 @@ ffs_use_bread(void *devfd, off_t loc, void **bufp, int size)
 	return (0);
 }
 
-#include <sys/sysctl.h>
 static int bigcgs = 0;
 SYSCTL_INT(_debug, OID_AUTO, bigcgs, CTLFLAG_RW, &bigcgs, 0, "");
 
@@ -1222,11 +1474,9 @@ ffs_unmount(mp, mntflags)
 	flags = 0;
 	td = curthread;
 	fs = ump->um_fs;
-	susp = 0;
-	if (mntflags & MNT_FORCE) {
+	if (mntflags & MNT_FORCE)
 		flags |= FORCECLOSE;
-		susp = fs->fs_ronly == 0;
-	}
+	susp = fs->fs_ronly == 0;
 #ifdef UFS_EXTATTR
 	if ((error = ufs_extattr_stop(mp, td))) {
 		if (error != EOPNOTSUPP)
@@ -1248,7 +1498,7 @@ ffs_unmount(mp, mntflags)
 		error = softdep_flushfiles(mp, flags, td);
 	else
 		error = ffs_flushfiles(mp, flags, td);
-	if (error != 0 && error != ENXIO)
+	if (error != 0 && !ffs_fsfail_cleanup(ump, error))
 		goto fail;
 
 	UFS_LOCK(ump);
@@ -1265,7 +1515,9 @@ ffs_unmount(mp, mntflags)
 	if (fs->fs_ronly == 0 || ump->um_fsckpid > 0) {
 		fs->fs_clean = fs->fs_flags & (FS_UNCLEAN|FS_NEEDSFSCK) ? 0 : 1;
 		error = ffs_sbupdate(ump, MNT_WAIT, 0);
-		if (error && error != ENXIO) {
+		if (ffs_fsfail_cleanup(ump, error))
+			error = 0;
+		if (error != 0 && !ffs_fsfail_cleanup(ump, error)) {
 			fs->fs_clean = 0;
 			goto fail;
 		}
@@ -1289,8 +1541,12 @@ ffs_unmount(mp, mntflags)
 	}
 	g_vfs_close(ump->um_cp);
 	g_topology_unlock();
+	BO_LOCK(&ump->um_odevvp->v_bufobj);
+	ump->um_odevvp->v_bufobj.bo_flag &= ~BO_NOBUFS;
+	BO_UNLOCK(&ump->um_odevvp->v_bufobj);
 	atomic_store_rel_ptr((uintptr_t *)&ump->um_dev->si_mountpt, 0);
-	vrele(ump->um_devvp);
+	mntfs_freevp(ump->um_devvp);
+	vrele(ump->um_odevvp);
 	dev_rel(ump->um_dev);
 	mtx_destroy(UFS_MTX(ump));
 	if (mp->mnt_gjprovider != NULL) {
@@ -1298,7 +1554,10 @@ ffs_unmount(mp, mntflags)
 		mp->mnt_gjprovider = NULL;
 	}
 	free(fs->fs_csp, M_UFSMNT);
+	free(fs->fs_si, M_UFSMNT);
 	free(fs, M_UFSMNT);
+	if (ump->um_fsfail_task != NULL)
+		free(ump->um_fsfail_task, M_UFSMNT);
 	free(ump, M_UFSMNT);
 	mp->mnt_data = NULL;
 	MNT_ILOCK(mp);
@@ -1394,7 +1653,7 @@ ffs_flushfiles(mp, flags, td)
 	 */
 	vn_lock(ump->um_devvp, LK_EXCLUSIVE | LK_RETRY);
 	error = VOP_FSYNC(ump->um_devvp, MNT_WAIT, td);
-	VOP_UNLOCK(ump->um_devvp, 0);
+	VOP_UNLOCK(ump->um_devvp);
 	return (error);
 }
 
@@ -1437,6 +1696,23 @@ sync_doupdate(struct inode *ip)
 	    IN_UPDATE)) != 0);
 }
 
+static int
+ffs_sync_lazy_filter(struct vnode *vp, void *arg __unused)
+{
+	struct inode *ip;
+
+	/*
+	 * Flags are safe to access because ->v_data invalidation
+	 * is held off by listmtx.
+	 */
+	if (vp->v_type == VNON)
+		return (false);
+	ip = VTOI(vp);
+	if (!sync_doupdate(ip) && (vp->v_iflag & VI_OWEINACT) == 0)
+		return (false);
+	return (true);
+}
+
 /*
  * For a lazy sync, we only care about access times, quotas and the
  * superblock.  Other filesystem changes are already converted to
@@ -1454,9 +1730,13 @@ ffs_sync_lazy(mp)
 
 	allerror = 0;
 	td = curthread;
-	if ((mp->mnt_flag & MNT_NOATIME) != 0)
-		goto qupdate;
-	MNT_VNODE_FOREACH_ACTIVE(vp, mp, mvp) {
+	if ((mp->mnt_flag & MNT_NOATIME) != 0) {
+#ifdef QUOTA
+		qsync(mp);
+#endif
+		goto sbupdate;
+	}
+	MNT_VNODE_FOREACH_LAZY(vp, mp, mvp, ffs_sync_lazy_filter, NULL) {
 		if (vp->v_type == VNON) {
 			VI_UNLOCK(vp);
 			continue;
@@ -1474,21 +1754,18 @@ ffs_sync_lazy(mp)
 			VI_UNLOCK(vp);
 			continue;
 		}
-		if ((error = vget(vp, LK_EXCLUSIVE | LK_NOWAIT | LK_INTERLOCK,
-		    td)) != 0)
+		if ((error = vget(vp, LK_EXCLUSIVE | LK_NOWAIT | LK_INTERLOCK)) != 0)
 			continue;
+#ifdef QUOTA
+		qsyncvp(vp);
+#endif
 		if (sync_doupdate(ip))
 			error = ffs_update(vp, 0);
 		if (error != 0)
 			allerror = error;
 		vput(vp);
 	}
-
-qupdate:
-#ifdef QUOTA
-	qsync(mp);
-#endif
-
+sbupdate:
 	if (VFSTOUFS(mp)->um_fs->fs_fmod != 0 &&
 	    (error = ffs_sbupdate(VFSTOUFS(mp), MNT_LAZY, 0)) != 0)
 		allerror = error;
@@ -1574,15 +1851,24 @@ loop:
 			VI_UNLOCK(vp);
 			continue;
 		}
-		if ((error = vget(vp, lockreq, td)) != 0) {
+		if ((error = vget(vp, lockreq)) != 0) {
 			if (error == ENOENT || error == ENOLCK) {
 				MNT_VNODE_FOREACH_ALL_ABORT(mp, mvp);
 				goto loop;
 			}
 			continue;
 		}
-		if ((error = ffs_syncvnode(vp, waitfor, 0)) != 0)
-			allerror = error;
+#ifdef QUOTA
+		qsyncvp(vp);
+#endif
+		for (;;) {
+			error = ffs_syncvnode(vp, waitfor, 0);
+			if (error == ERELOOKUP)
+				continue;
+			if (error != 0)
+				allerror = error;
+			break;
+		}
 		vput(vp);
 	}
 	/*
@@ -1591,13 +1877,12 @@ loop:
 	if (waitfor == MNT_WAIT || rebooting) {
 		if ((error = softdep_flushworklist(ump->um_mountp, &count, td)))
 			allerror = error;
+		if (ffs_fsfail_cleanup(ump, allerror))
+			allerror = 0;
 		/* Flushed work items may create new vnodes to clean */
 		if (allerror == 0 && count)
 			goto loop;
 	}
-#ifdef QUOTA
-	qsync(mp);
-#endif
 
 	devvp = ump->um_devvp;
 	bo = &devvp->v_bufobj;
@@ -1606,11 +1891,13 @@ loop:
 		BO_UNLOCK(bo);
 		vn_lock(devvp, LK_EXCLUSIVE | LK_RETRY);
 		error = VOP_FSYNC(devvp, waitfor, td);
-		VOP_UNLOCK(devvp, 0);
+		VOP_UNLOCK(devvp);
 		if (MOUNTEDSOFTDEP(mp) && (error == 0 || error == EAGAIN))
 			error = ffs_sbupdate(ump, waitfor, 0);
 		if (error != 0)
 			allerror = error;
+		if (ffs_fsfail_cleanup(ump, allerror))
+			allerror = 0;
 		if (allerror == 0 && waitfor == MNT_WAIT)
 			goto loop;
 	} else if (suspend != 0) {
@@ -1635,6 +1922,8 @@ loop:
 	if (fs->fs_fmod != 0 &&
 	    (error = ffs_sbupdate(ump, waitfor, suspended)) != 0)
 		allerror = error;
+	if (ffs_fsfail_cleanup(ump, allerror))
+		allerror = 0;
 	return (allerror);
 }
 
@@ -1661,11 +1950,20 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 	struct ufsmount *ump;
 	struct buf *bp;
 	struct vnode *vp;
+	daddr_t dbn;
 	int error;
 
+	MPASS((ffs_flags & FFSV_REPLACE) == 0 || (flags & LK_EXCLUSIVE) != 0);
+
 	error = vfs_hash_get(mp, ino, flags, curthread, vpp, NULL, NULL);
-	if (error || *vpp != NULL)
+	if (error != 0)
 		return (error);
+	if (*vpp != NULL) {
+		if ((ffs_flags & FFSV_REPLACE) == 0)
+			return (0);
+		vgone(*vpp);
+		vput(*vpp);
+	}
 
 	/*
 	 * We must promote to an exclusive lock for vnode creation.  This
@@ -1685,14 +1983,14 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 
 	ump = VFSTOUFS(mp);
 	fs = ump->um_fs;
-	ip = uma_zalloc(uma_inode, M_WAITOK | M_ZERO);
+	ip = uma_zalloc_smr(uma_inode, M_WAITOK | M_ZERO);
 
 	/* Allocate a new vnode/inode. */
 	error = getnewvnode("ufs", mp, fs->fs_magic == FS_UFS1_MAGIC ?
 	    &ffs_vnodeops1 : &ffs_vnodeops2, &vp);
 	if (error) {
 		*vpp = NULL;
-		uma_zfree(uma_inode, ip);
+		uma_zfree_smr(uma_inode, ip);
 		return (error);
 	}
 	/*
@@ -1709,6 +2007,9 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 	ip->i_nextclustercg = -1;
 	ip->i_flag = fs->fs_magic == FS_UFS1_MAGIC ? 0 : IN_UFS2;
 	ip->i_mode = 0; /* ensure error cases below throw away vnode */
+#ifdef DIAGNOSTIC
+	ufs_init_trackers(ip);
+#endif
 #ifdef QUOTA
 	{
 		int i;
@@ -1721,26 +2022,38 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 		vp->v_vflag |= VV_FORCEINSMQ;
 	error = insmntque(vp, mp);
 	if (error != 0) {
-		uma_zfree(uma_inode, ip);
+		uma_zfree_smr(uma_inode, ip);
 		*vpp = NULL;
 		return (error);
 	}
 	vp->v_vflag &= ~VV_FORCEINSMQ;
 	error = vfs_hash_insert(vp, ino, flags, curthread, vpp, NULL, NULL);
-	if (error || *vpp != NULL)
+	if (error != 0)
 		return (error);
+	if (*vpp != NULL) {
+		/*
+		 * Calls from ffs_valloc() (i.e. FFSV_REPLACE set)
+		 * operate on empty inode, which must not be found by
+		 * other threads until fully filled.  Vnode for empty
+		 * inode must be not re-inserted on the hash by other
+		 * thread, after removal by us at the beginning.
+		 */
+		MPASS((ffs_flags & FFSV_REPLACE) == 0);
+		return (0);
+	}
 
 	/* Read in the disk contents for the inode, copy into the inode. */
-	error = bread(ump->um_devvp, fsbtodb(fs, ino_to_fsba(fs, ino)),
-	    (int)fs->fs_bsize, NOCRED, &bp);
-	if (error) {
+	dbn = fsbtodb(fs, ino_to_fsba(fs, ino));
+	error = ffs_breadz(ump, ump->um_devvp, dbn, dbn, (int)fs->fs_bsize,
+	    NULL, NULL, 0, NOCRED, 0, NULL, &bp);
+	if (error != 0) {
 		/*
 		 * The inode does not contain anything useful, so it would
 		 * be misleading to leave it on its hash chain. With mode
 		 * still zero, it will be unlinked and returned to the free
 		 * list by vput().
 		 */
-		brelse(bp);
+		vgone(vp);
 		vput(vp);
 		*vpp = NULL;
 		return (error);
@@ -1751,6 +2064,7 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 		ip->i_din2 = uma_zalloc(uma_ufs2, M_WAITOK);
 	if ((error = ffs_load_inode(bp, ip, fs, ino)) != 0) {
 		bqrelse(bp);
+		vgone(vp);
 		vput(vp);
 		*vpp = NULL;
 		return (error);
@@ -1768,6 +2082,7 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 	error = ufs_vinit(mp, I_IS_UFS1(ip) ? &ffs_fifoops1 : &ffs_fifoops2,
 	    &vp);
 	if (error) {
+		vgone(vp);
 		vput(vp);
 		*vpp = NULL;
 		return (error);
@@ -1789,7 +2104,7 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 		while (ip->i_gen == 0)
 			ip->i_gen = arc4random();
 		if ((vp->v_mount->mnt_flag & MNT_RDONLY) == 0) {
-			ip->i_flag |= IN_MODIFIED;
+			UFS_INODE_SET_FLAG(ip, IN_MODIFIED);
 			DIP_SET(ip, i_gen, ip->i_gen);
 		}
 	}
@@ -1803,6 +2118,7 @@ ffs_vgetf(mp, ino, flags, vpp, ffs_flags)
 		error = mac_vnode_associate_extattr(mp, vp);
 		if (error) {
 			/* ufs_inactive will release ip->i_devvp ref. */
+			vgone(vp);
 			vput(vp);
 			*vpp = NULL;
 			return (error);
@@ -1854,7 +2170,7 @@ ffs_fhtovp(mp, fhp, flags, vpp)
 	if (fs->fs_magic != FS_UFS2_MAGIC)
 		return (ufs_fhtovp(mp, ufhp, flags, vpp));
 	cg = ino_to_cg(fs, ino);
-	if ((error = ffs_getcg(fs, ump->um_devvp, cg, &bp, &cgp)) != 0)
+	if ((error = ffs_getcg(fs, ump->um_devvp, cg, 0, &bp, &cgp)) != 0)
 		return (error);
 	if (ino >= cg * fs->fs_ipg + cgp->cg_initediblk) {
 		brelse(bp);
@@ -1889,6 +2205,7 @@ ffs_uninit(vfsp)
 	ret = ufs_uninit(vfsp);
 	softdep_uninitialize();
 	ffs_susp_uninitialize();
+	taskqueue_drain_all(taskqueue_thread);
 	return (ret);
 }
 
@@ -1971,6 +2288,8 @@ ffs_use_bwrite(void *devfd, off_t loc, void *buf, int size)
 	 * Writing the superblock itself. We need to do special checks for it.
 	 */
 	bp = devfdp->sbbp;
+	if (ffs_fsfail_cleanup(ump, devfdp->error))
+		devfdp->error = 0;
 	if (devfdp->error != 0) {
 		brelse(bp);
 		return (devfdp->error);
@@ -1990,7 +2309,11 @@ ffs_use_bwrite(void *devfd, off_t loc, void *buf, int size)
 	if (MOUNTEDSOFTDEP(ump->um_mountp))
 		softdep_setup_sbupdate(ump, (struct fs *)bp->b_data, bp);
 	bcopy((caddr_t)fs, bp->b_data, (u_int)fs->fs_sbsize);
-	ffs_oldfscompat_write((struct fs *)bp->b_data, ump);
+	fs = (struct fs *)bp->b_data;
+	ffs_oldfscompat_write(fs, ump);
+	fs->fs_si = NULL;
+	/* Recalculate the superblock hash */
+	fs->fs_ckhash = ffs_calc_sbhash(fs);
 	if (devfdp->suspended)
 		bp->b_flags |= B_VALIDSUSPWRT;
 	if (devfdp->waitfor != MNT_WAIT)
@@ -2022,7 +2345,7 @@ ffs_ifree(struct ufsmount *ump, struct inode *ip)
 		uma_zfree(uma_ufs1, ip->i_din1);
 	else if (ip->i_din2 != NULL)
 		uma_zfree(uma_ufs2, ip->i_din2);
-	uma_zfree(uma_inode, ip);
+	uma_zfree_smr(uma_inode, ip);
 }
 
 static int dobkgrdwrite = 1;
@@ -2038,6 +2361,11 @@ ffs_backgroundwritedone(struct buf *bp)
 	struct bufobj *bufobj;
 	struct buf *origbp;
 
+#ifdef SOFTUPDATES
+	if (!LIST_EMPTY(&bp->b_dep) && (bp->b_ioflags & BIO_ERROR) != 0)
+		softdep_handle_error(bp);
+#endif
+
 	/*
 	 * Find the original buffer that we are writing.
 	 */
@@ -2048,7 +2376,7 @@ ffs_backgroundwritedone(struct buf *bp)
 
 	/*
 	 * We should mark the cylinder group buffer origbp as
-	 * dirty, to not loose the failed write.
+	 * dirty, to not lose the failed write.
 	 */
 	if ((bp->b_ioflags & BIO_ERROR) != 0)
 		origbp->b_vflags |= BV_BKGRDERR;
@@ -2095,7 +2423,6 @@ ffs_backgroundwritedone(struct buf *bp)
 	}
 	BO_UNLOCK(bufobj);
 }
-
 
 /*
  * Write, release buffer on completion.  (Done by iodone
@@ -2210,7 +2537,6 @@ ffs_bufwrite(struct buf *bp)
 		/* Mark the buffer clean */
 		bundirty(bp);
 
-
 	/* Let the normal bufwrite do the rest for us */
 normal_write:
 	/*
@@ -2223,7 +2549,6 @@ normal_write:
 	return (bufwrite(bp));
 }
 
-
 static void
 ffs_geom_strategy(struct bufobj *bo, struct buf *bp)
 {
@@ -2231,7 +2556,19 @@ ffs_geom_strategy(struct bufobj *bo, struct buf *bp)
 	struct buf *tbp;
 	int error, nocopy;
 
+	/*
+	 * This is the bufobj strategy for the private VCHR vnodes
+	 * used by FFS to access the underlying storage device.
+	 * We override the default bufobj strategy and thus bypass
+	 * VOP_STRATEGY() for these vnodes.
+	 */
 	vp = bo2vnode(bo);
+	KASSERT(bp->b_vp == NULL || bp->b_vp->v_type != VCHR ||
+	    bp->b_vp->v_rdev == NULL ||
+	    bp->b_vp->v_rdev->si_mountpt == NULL ||
+	    VFSTOUFS(bp->b_vp->v_rdev->si_mountpt) == NULL ||
+	    vp == VFSTOUFS(bp->b_vp->v_rdev->si_mountpt)->um_devvp,
+	    ("ffs_geom_strategy() with wrong vp"));
 	if (bp->b_iocmd == BIO_WRITE) {
 		if ((bp->b_flags & B_VALIDSUSPWRT) == 0 &&
 		    bp->b_vp != NULL && bp->b_vp->v_mount != NULL &&
@@ -2250,6 +2587,7 @@ ffs_geom_strategy(struct bufobj *bo, struct buf *bp)
 					    error != EOPNOTSUPP) {
 						bp->b_error = error;
 						bp->b_ioflags |= BIO_ERROR;
+						bp->b_flags &= ~B_BARRIER;
 						bufdone(bp);
 						return;
 					}
@@ -2262,6 +2600,7 @@ ffs_geom_strategy(struct bufobj *bo, struct buf *bp)
 				if (error != 0 && error != EOPNOTSUPP) {
 					bp->b_error = error;
 					bp->b_ioflags |= BIO_ERROR;
+					bp->b_flags &= ~B_BARRIER;
 					bufdone(bp);
 					return;
 				}
@@ -2307,6 +2646,8 @@ ffs_geom_strategy(struct bufobj *bo, struct buf *bp)
 			break;
 		}
 	}
+	if (bp->b_iocmd != BIO_READ && ffs_enxio_enable)
+		bp->b_xflags |= BX_CVTENXIO;
 	g_vfs_strategy(bo, bp);
 }
 

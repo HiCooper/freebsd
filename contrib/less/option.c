@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2020  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -23,8 +23,9 @@
 static struct loption *pendopt;
 public int plusoption = FALSE;
 
-static char *optstring();
-static int flip_triple();
+static char *optstring LESSPARAMS((char *s, char **p_str, char *printopt,
+    char *validchars));
+static int flip_triple LESSPARAMS((int val, int lc));
 
 extern int screen_trashed;
 extern int less_is_more;
@@ -150,8 +151,11 @@ scan_option(s)
 			if (s == NULL)
 				return;
 			if (*str == '+')
+			{
+				if (every_first_cmd != NULL)
+					free(every_first_cmd);
 				every_first_cmd = save(str+1);
-			else
+			} else
 			{
 				ungetcc(CHAR_END_COMMAND);
 				ungetsc(str);
@@ -523,6 +527,24 @@ opt_prompt(o)
 }
 
 /*
+ * If the specified option can be toggled, return NULL.
+ * Otherwise return an appropriate error message.
+ */
+	public char *
+opt_toggle_disallowed(c)
+	int c;
+{
+	switch (c)
+	{
+	case 'o':
+		if (ch_getflags() & CH_CANSEEK)
+			return "Input is not a pipe";
+		break;
+	}
+	return NULL;
+}
+
+/*
  * Return whether or not there is a string option pending;
  * that is, if the previous option was a string-valued option letter 
  * (like -P) without a following string.
@@ -530,7 +552,7 @@ opt_prompt(o)
  * the previous option.
  */
 	public int
-isoptpending()
+isoptpending(VOID_PARAM)
 {
 	return (pendopt != NULL);
 }
@@ -551,7 +573,7 @@ nostring(printopt)
  * Print error message if a STRING type option is not followed by a string.
  */
 	public void
-nopendopt()
+nopendopt(VOID_PARAM)
 {
 	nostring(opt_desc(pendopt));
 }
@@ -699,7 +721,7 @@ getfraction(sp, printopt, errp)
  * Get the value of the -e flag.
  */
 	public int
-get_quit_at_eof()
+get_quit_at_eof(VOID_PARAM)
 {
 	if (!less_is_more)
 		return quit_at_eof;

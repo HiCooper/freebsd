@@ -34,11 +34,11 @@ extern const union __nan_un {
 	float		__uf;
 } __nan;
 
-#if __GNUC_PREREQ__(3, 3) || (defined(__INTEL_COMPILER) && __INTEL_COMPILER >= 800)
+#if __GNUC_PREREQ__(3, 3)
 #define	__MATH_BUILTIN_CONSTANTS
 #endif
 
-#if __GNUC_PREREQ__(3, 0) && !defined(__INTEL_COMPILER)
+#if __GNUC_PREREQ__(3, 0)
 #define	__MATH_BUILTIN_RELOPS
 #endif
 
@@ -213,6 +213,12 @@ __inline_isnanl(__const long double __x)
 
 	return (__x != __x);
 }
+
+/*
+ * Define the following aliases, for compatibility with glibc and CUDA.
+ */
+#define __isnan __inline_isnan
+#define __isnanf __inline_isnanf
 
 /*
  * Version 2 of the Single UNIX Specification (UNIX98) defined isnan() and

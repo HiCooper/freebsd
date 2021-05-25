@@ -42,7 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/rwlock.h>
 #include <sys/spigenio.h>
 #include <sys/types.h>
- 
+
 #include <vm/vm.h>
 #include <vm/vm_extern.h>
 #include <vm/vm_object.h>
@@ -325,8 +325,9 @@ spigen_mmap_single(struct cdev *cdev, vm_ooffset_t *offset,
 	vm_object_reference_locked(mmap->bufobj); // kernel and userland both
 	for (n = 0; n < pages; n++) {
 		m[n] = vm_page_grab(mmap->bufobj, n,
-		    VM_ALLOC_NOBUSY | VM_ALLOC_ZERO | VM_ALLOC_WIRED);
-		m[n]->valid = VM_PAGE_BITS_ALL;
+		    VM_ALLOC_ZERO | VM_ALLOC_WIRED);
+		vm_page_valid(m[n]);
+		vm_page_xunbusy(m[n]);
 	}
 	VM_OBJECT_WUNLOCK(mmap->bufobj);
 	pmap_qenter(mmap->kvaddr, m, pages);
@@ -369,7 +370,7 @@ spigen_detach(device_t dev)
 
 	if (sc->sc_cdev)
 		destroy_dev(sc->sc_cdev);
-	
+
 	mtx_destroy(&sc->sc_mtx);
 
 	return (0);
@@ -382,7 +383,6 @@ static device_method_t spigen_methods[] = {
 	DEVMETHOD(device_probe,		spigen_probe),
 	DEVMETHOD(device_attach,	spigen_attach),
 	DEVMETHOD(device_detach,	spigen_detach),
-
 	{ 0, 0 }
 };
 

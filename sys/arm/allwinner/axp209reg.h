@@ -1,6 +1,5 @@
 /*-
  * Copyright (c) 2016 Emmanuel Vadot <manu@freeebsd.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -204,7 +203,6 @@
 #define	AXP221_REG_ALDO1_VOLTAGE	0x28
 #define	AXP221_REG_ALDO2_VOLTAGE	0x29
 #define	AXP221_REG_ALDO3_VOLTAGE	0x2A
-
 
 enum axp2xx_sensor {
 	AXP209_ACVOLT,

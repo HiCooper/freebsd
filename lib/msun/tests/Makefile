@@ -10,11 +10,12 @@ CFLAGS+=	-DHAVE_FENV_H
 # For isqemu.h
 CFLAGS+=	-I${TESTSRC:H}/libc/gen
 
-# Not sure why this isn't defined for all architectures, since most
-# have long double.
+# Define __HAVE_LONG_DOUBLE for architectures whose long double has greater
+# precision than their double.
 .if ${MACHINE_CPUARCH} == "aarch64" || \
     ${MACHINE_CPUARCH} == "amd64" || \
-    ${MACHINE_CPUARCH} == "i386"
+    ${MACHINE_CPUARCH} == "i386" || \
+    ${MACHINE_CPUARCH} == "riscv"
 CFLAGS+=	-D__HAVE_LONG_DOUBLE
 .endif
 
@@ -74,8 +75,6 @@ ATF_TESTS_C+=	trig_test
 CFLAGS+=	-O0
 .endif
 
-CSTD=		c99
-
 #COPTS+=	-Wfloat-equal
 
 IGNORE_PRAGMA=
@@ -98,6 +97,8 @@ ARCH_SUBDIR= ${MACHINE_CPUARCH}
 # XXX: for some odd reason float.h doesn't tell the full story about what the
 # precision is.
 CFLAGS+=	-DLDBL_PREC=${LDBL_PREC}
+
+CFLAGS.fe_round_test+=	-D__HAVE_FENV
 
 .include <netbsd-tests.test.mk>
 

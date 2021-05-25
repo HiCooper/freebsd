@@ -1,7 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD AND BSD-2-Clause-NetBSD
  *
- * Copyright (c) 2013 M. Warner Losh.
+ * Copyright (c) 2013 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -105,8 +105,10 @@ typedef struct {	/* Auxiliary vector entry on initial stack */
 	int	a_type;			/* Entry type. */
 	union {
 		int	a_val;		/* Integer value. */
+#if defined(__mips_o32) || defined(__mips_n32)
 		void	*a_ptr;		/* Address. */
 		void	(*a_fcn)(void); /* Function pointer (not used). */
+#endif
 	} a_un;
 } Elf32_Auxinfo;
 

@@ -668,11 +668,7 @@ int ib_init_ah_from_path(struct ib_device *device, u8 port_num,
 		struct rdma_dev_addr dev_addr = {.bound_dev_if = rec->ifindex,
 						 .net = rec->net ? rec->net :
 							 &init_net};
-		union {
-			struct sockaddr     _sockaddr;
-			struct sockaddr_in  _sockaddr_in;
-			struct sockaddr_in6 _sockaddr_in6;
-		} sgid_addr, dgid_addr;
+		union rdma_sockaddr sgid_addr, dgid_addr;
 
 		if (!device->get_netdev)
 			return -EOPNOTSUPP;
@@ -702,12 +698,10 @@ int ib_init_ah_from_path(struct ib_device *device, u8 port_num,
 			return -ENODEV;
 		}
 		ndev = ib_get_ndev_from_path(rec);
-		rcu_read_lock();
 		if ((ndev && ndev != resolved_dev) ||
 		    (resolved_dev != idev &&
-		     !rdma_is_upper_dev_rcu(idev, resolved_dev)))
+		     rdma_vlan_dev_real_dev(resolved_dev) != idev))
 			ret = -EHOSTUNREACH;
-		rcu_read_unlock();
 		dev_put(idev);
 		dev_put(resolved_dev);
 		if (ret) {

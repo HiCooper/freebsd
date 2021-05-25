@@ -77,7 +77,6 @@ struct _ip6dn_args {
        u_long mtu_or;
 };
 
-
 /*
  * Arguments for calling ipfw_chk() and dummynet_io(). We put them
  * all into a structure because this way it is easier and more
@@ -335,7 +334,6 @@ struct table_value {
 	uint32_t	zoneid;		/* scope zone id for nh6 */
 	uint64_t	refcnt;		/* Number of references */
 };
-
 
 struct named_object {
 	TAILQ_ENTRY(named_object)	nn_next;	/* namehash */
@@ -615,7 +613,6 @@ enum ipfw_sets_cmd {
 typedef int (ipfw_obj_sets_cb)(struct ip_fw_chain *ch,
     uint16_t set, uint8_t new_set, enum ipfw_sets_cmd cmd);
 
-
 struct opcode_obj_rewrite {
 	uint32_t		opcode;		/* Opcode to act upon */
 	uint32_t		etlv;		/* Relevant export TLV id  */
@@ -665,6 +662,7 @@ struct ip_fw *ipfw_alloc_rule(struct ip_fw_chain *chain, size_t rulesize);
 void ipfw_free_rule(struct ip_fw *rule);
 int ipfw_match_range(struct ip_fw *rule, ipfw_range_tlv *rt);
 int ipfw_mark_object_kidx(uint32_t *bmask, uint16_t etlv, uint16_t kidx);
+ipfw_insn *ipfw_get_action(struct ip_fw *);
 
 typedef int (sopt_handler_f)(struct ip_fw_chain *ch,
     ip_fw3_opheader *op3, struct sockopt_data *sd);

@@ -49,7 +49,6 @@ device		mpcore_timer
 
 # Pseudo devices.
 device		loop			# Network loopback
-device		random			# Entropy device
 device		vlan			# 802.1Q VLAN support
 device		tuntap			# Packet tunnel.
 device		md			# Memory "disks"
@@ -117,6 +116,15 @@ device		hdmi
 options 	FDT			# Configure using FDT/DTB data
 makeoptions	MODULES_EXTRA="dtb/imx6 imx"
 device  	fdt_pinctrl		# FDT pinmux driver
+
+# EXT_RESOURCES pseudo devices
+options 	EXT_RESOURCES
+device		clk
+device		phy
+device		hwreset
+device		nvmem
+device		regulator
+device		syscon
 
 # SoC-specific devices
 device		ffec			# Freescale Fast Ethernet Controller

@@ -26,7 +26,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd May 16, 2017
+.Dd April 24, 2020
 .Dt SGLIST 9
 .Os
 .Sh NAME
@@ -35,6 +35,7 @@
 .Nm sglist_append ,
 .Nm sglist_append_bio ,
 .Nm sglist_append_mbuf ,
+.Nm sglist_append_mbuf_epg,
 .Nm sglist_append_phys ,
 .Nm sglist_append_sglist ,
 .Nm sglist_append_uio ,
@@ -44,6 +45,7 @@
 .Nm sglist_clone ,
 .Nm sglist_consume_uio ,
 .Nm sglist_count ,
+.Nm sglist_count_mbuf_epg ,
 .Nm sglist_count_vmpages ,
 .Nm sglist_free ,
 .Nm sglist_hold ,
@@ -64,6 +66,8 @@
 .Ft int
 .Fn sglist_append_bio "struct sglist *sg" "struct bio *bp"
 .Ft int
+.Fn sglist_append_mbuf_epg "struct sglist *sg" "struct mbuf *m" "size_t offset" "size_t len"
+.Ft int
 .Fn sglist_append_mbuf "struct sglist *sg" "struct mbuf *m"
 .Ft int
 .Fn sglist_append_phys "struct sglist *sg" "vm_paddr_t paddr" "size_t len"
@@ -83,6 +87,8 @@
 .Fn sglist_consume_uio "struct sglist *sg" "struct uio *uio" "size_t resid"
 .Ft int
 .Fn sglist_count "void *buf" "size_t len"
+.Ft int
+.Fn sglist_count_mbuf_epg "struct mbuf *m" "size_t offset" "size_t len"
 .Ft int
 .Fn sglist_count_vmpages "vm_page_t *m" "size_t pgoff" "size_t len"
 .Ft void
@@ -142,6 +148,17 @@ the physical address ranges mapped by a single kernel virtual address range.
 The kernel virtual address range starts at
 .Fa buf
 and is
+.Fa len
+bytes long.
+.Pp
+The
+.Nm sglist_count_mbuf_epg
+function returns the number of scatter/gather list elements needed to describe
+the external multipage mbuf buffer
+.Fa m .
+The ranges start at an offset of
+.Fa offset
+relative to the start of the buffer and is
 .Fa len
 bytes long.
 .Pp
@@ -235,6 +252,28 @@ function appends the physical address ranges described by a single bio
 .Fa bp
 to the scatter/gather list
 .Fa sg .
+.Pp
+The
+.Nm sglist_append_mbuf_epg
+function appends the physical address ranges described by the
+external multipage
+.Xr mbuf 9
+buffer
+.Fa ext_pgs
+to the scatter/gather list
+.Fa sg .
+The physical address ranges start at offset
+.Fa offset
+within
+.Fa ext_pgs
+and continue for
+.Fa len
+bytes.
+Note that unlike
+.Nm sglist_append_mbuf ,
+.Nm sglist_append_mbuf_epg
+only adds ranges for a single mbuf,
+not an entire mbuf chain.
 .Pp
 The
 .Nm sglist_append_mbuf
@@ -467,8 +506,7 @@ functions return zero on success or an error on failure.
 .Pp
 The
 .Nm sglist_count
-and
-.Nm sglist_count_vmpages
+family of
 functions return a count of scatter/gather list elements.
 .Pp
 The

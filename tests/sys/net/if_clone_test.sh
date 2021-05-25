@@ -39,6 +39,51 @@
 
 TESTLEN=10	# seconds
 
+atf_test_case epair_stress cleanup
+epair_stress_head()
+{
+	atf_set "descr" "Simultaneously create and destroy an epair(4)"
+	atf_set "require.user" "root"
+}
+epair_stress_body()
+{
+	do_stress "epair"
+}
+epair_stress_cleanup()
+{
+	cleanup_ifaces
+}
+
+atf_test_case epair_up_stress cleanup
+epair_up_stress_head()
+{
+	atf_set "descr" "Simultaneously up and detroy an epair(4)"
+	atf_set "require.user" "root"
+}
+epair_up_stress_body()
+{
+	do_up_stress "epair" "" ""
+}
+epair_up_stress_cleanup()
+{
+	cleanup_ifaces
+}
+
+atf_test_case epair_ipv6_up_stress cleanup
+epair_ipv6_up_stress_head()
+{
+	atf_set "descr" "Simultaneously up and destroy an epair(4) with IPv6"
+	atf_set "require.user" "root"
+}
+epair_ipv6_up_stress_body()
+{
+	do_up_stress "epair" "6" ""
+}
+epair_ipv6_up_stress_cleanup()
+{
+	cleanup_ifaces
+}
+
 atf_test_case faith_stress cleanup
 faith_stress_head()
 {
@@ -62,7 +107,6 @@ faith_up_stress_head()
 }
 faith_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "faith" "" ""
 }
 faith_up_stress_cleanup()
@@ -78,7 +122,6 @@ faith_ipv6_up_stress_head()
 }
 faith_ipv6_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "faith" "6" ""
 }
 faith_ipv6_up_stress_cleanup()
@@ -109,7 +152,6 @@ gif_up_stress_head()
 }
 gif_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "gif" "" "p2p"
 }
 gif_up_stress_cleanup()
@@ -125,7 +167,6 @@ gif_ipv6_up_stress_head()
 }
 gif_ipv6_up_stress_body()
 {
-	atf_skip "Quickly panics: rt_tables_get_rnh_ptr: fam out of bounds."
 	do_up_stress "gif" "6" "p2p"
 }
 gif_ipv6_up_stress_cleanup()
@@ -156,7 +197,6 @@ lo_up_stress_head()
 }
 lo_up_stress_body()
 {
-	atf_skip "Quickly panics: GPF in rtsock_routemsg"
 	do_up_stress "lo" "" ""
 }
 lo_up_stress_cleanup()
@@ -172,7 +212,6 @@ lo_ipv6_up_stress_head()
 }
 lo_ipv6_up_stress_body()
 {
-	atf_skip "Quickly panics: page fault in rtsock_addrmsg"
 	do_up_stress "lo" "6" ""
 }
 lo_ipv6_up_stress_cleanup()
@@ -203,7 +242,6 @@ tap_up_stress_head()
 }
 tap_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "tap" "" ""
 }
 tap_up_stress_cleanup()
@@ -250,7 +288,6 @@ tun_up_stress_head()
 }
 tun_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "tun" "" "p2p"
 }
 tun_up_stress_cleanup()
@@ -266,7 +303,6 @@ tun_ipv6_up_stress_head()
 }
 tun_ipv6_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "tun" "6" "p2p"
 }
 tun_ipv6_up_stress_cleanup()
@@ -297,7 +333,6 @@ vlan_up_stress_head()
 }
 vlan_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "vlan" "" ""
 }
 vlan_up_stress_cleanup()
@@ -313,7 +348,6 @@ vlan_ipv6_up_stress_head()
 }
 vlan_ipv6_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "vlan" "6" ""
 }
 vlan_ipv6_up_stress_cleanup()
@@ -359,7 +393,6 @@ vmnet_ipv6_up_stress_head()
 }
 vmnet_ipv6_up_stress_body()
 {
-	atf_skip "Quickly panics: if_freemulti: protospec not NULL"
 	do_up_stress "vmnet" "6" ""
 }
 vmnet_ipv6_up_stress_cleanup()
@@ -369,7 +402,9 @@ vmnet_ipv6_up_stress_cleanup()
 
 atf_init_test_cases()
 {
-	# TODO: add epair(4) tests, which need a different syntax
+	atf_add_test_case epair_ipv6_up_stress
+	atf_add_test_case epair_stress
+	atf_add_test_case epair_up_stress
 	atf_add_test_case faith_ipv6_up_stress
 	atf_add_test_case faith_stress
 	atf_add_test_case faith_up_stress
@@ -396,19 +431,19 @@ atf_init_test_cases()
 
 do_stress()
 {
-	local IFACE
+	local IFACE CREATOR_PID DESTROYER_PID
 
 	IFACE=`get_iface $1`
 
 	# First thread: create the interface
 	while true; do
-		ifconfig $IFACE create 2>/dev/null && \
+		ifconfig ${IFACE%a} create 2>/dev/null && \
 			echo -n . >> creator_count.txt
 	done &
 	CREATOR_PID=$!
 
 	# Second thread: destroy the lagg
-	while true; do 
+	while true; do
 		ifconfig $IFACE destroy 2>/dev/null && \
 			echo -n . >> destroyer_count.txt
 	done &
@@ -417,7 +452,7 @@ do_stress()
 	sleep ${TESTLEN}
 	kill $CREATOR_PID
 	kill $DESTROYER_PID
-	echo "Created $IFACE `stat -f %z creator_count.txt` times."
+	echo "Created ${IFACE%a} `stat -f %z creator_count.txt` times."
 	echo "Destroyed it `stat -f %z destroyer_count.txt` times."
 }
 
@@ -428,7 +463,8 @@ do_stress()
 # $3	p2p for point to point interfaces, anything else for normal interfaces
 do_up_stress()
 {
-	local IFACE IPv6 MAC P2P SRCDIR
+	local ADDR DSTADDR MASK MEAN_SLEEP_SECONDS MAX_SLEEP_USECS \
+	    IFACE IPV6 P2P SRCDIR LOOP_PID ipv6_cmd up_cmd
 
 	# Configure the interface to use an RFC5737 nonrouteable addresses
 	ADDR="192.0.2.2"
@@ -464,7 +500,7 @@ do_up_stress()
 			ifconfig $IFACE destroy &&
 			echo -n . >> destroy_count.txt ; } &
 		wait
-		ifconfig $IFACE create
+		ifconfig ${IFACE%a} create
 	done &
 	LOOP_PID=$!
 
@@ -489,7 +525,11 @@ get_iface()
 			N=$(($N + 1))
 		fi
 	done
-	local DEV=${CLASS}${N}
+	if [ ${CLASS} = "epair" ]; then
+		DEV=${CLASS}${N}a
+	else
+		DEV=${CLASS}${N}
+	fi
 	# Record the device so we can clean it up later
 	echo ${DEV} >> "devices_to_cleanup"
 	echo ${DEV}
@@ -501,11 +541,7 @@ cleanup_ifaces()
 	local DEV
 
 	for DEV in `cat "devices_to_cleanup"`; do
-		if [ ${DEV%%[0-9]*a} = "epair" ]; then
-			ifconfig ${DEV}a destroy
-		else
-			ifconfig ${DEV} destroy
-		fi
+		ifconfig ${DEV} destroy
 	done
 	true
 }

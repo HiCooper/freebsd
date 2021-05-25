@@ -1,8 +1,36 @@
 #!/usr/local/bin/perl -wC
+
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
+# Copyright 2009 Edwin Groothuis <edwin@FreeBSD.org>
+# Copyright 2015 John Marino <draco@marino.st>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
 # $FreeBSD$
 
 use strict;
 use Getopt::Long;
+use Encode qw(encode decode);
 
 if ($#ARGV != 0) {
 	print "Usage: $0 --unidir=<unidir>\n";
@@ -24,6 +52,23 @@ parse_unidata ("$UNIDIR/UnicodeData.txt");
 generate_footer ();
 
 ############################
+
+sub utf8to32 {
+	my @kl = split /\\x/, $_[0];
+
+	shift @kl if ($kl[0] eq '');
+	my $k = pack('H2' x scalar @kl, @kl);
+	my $ux = encode('UTF-32BE', decode('UTF-8', $k));
+	my $u = uc(unpack('H*', $ux));
+	# Remove BOM
+	$u =~ s/^0000FEFF//;
+	# Remove heading bytes of 0
+	while ($u =~ m/^0/ and length($u) > 4) {
+		$u =~ s/^0//;
+	}
+
+	return $u;
+}
 
 sub get_utf8map {
 	my $file = shift;
@@ -48,9 +93,10 @@ sub get_utf8map {
 		last if ($l eq "END CHARMAP");
 
 		$l =~ /^(<[^\s]+>)\s+(.*)/;
-		my $k = $2;
+		my $k = utf8to32($2);	# UTF-8 char code
 		my $v = $1;
-		$k =~ s/\\x//g;		# UTF-8 char code
+
+#		print STDERR "register: $k - $v\n";
 		$utf8map{$k} = $v;
 	}
 }
@@ -116,7 +162,7 @@ sub parse_unidata {
 
 	foreach my $l (@lines) {
 		my @d = split(/;/, $l, -1);
-		my $mb = wctomb($d[0]);
+		my $mb = $d[0];
 		my $cat;
 
 		# XXX There are code points present in UnicodeData.txt
@@ -134,7 +180,8 @@ sub parse_unidata {
 			$cat = "alpha";
 		} elsif ($d[2] =~ /^P/) {
 			$cat = "punct";
-		} elsif ($d[2] =~ /^M/ || $d[2] =~ /^N/ || $d[2] =~ /^S/) {
+		} elsif ($d[2] =~ /^Co/ || $d[2] =~ /^M/ || $d[2] =~ /^N/ ||
+		    $d[2] =~ /^S/) {
 			$cat = "graph";
 		} elsif ($d[2] =~ /^C/) {
 			$cat = "cntrl";
@@ -152,9 +199,9 @@ sub parse_unidata {
 
 		# Check if there's upper/lower mapping
 		if ($d[12] ne "") {
-			$data{'toupper'}{$mb} = wctomb($d[12]);
+			$data{'toupper'}{$mb} = $d[12];
 		} elsif ($d[13] ne "") {
-			$data{'tolower'}{$mb} = wctomb($d[13]);
+			$data{'tolower'}{$mb} = $d[13];
 		}
 	}
 
@@ -165,7 +212,7 @@ sub parse_unidata {
 	foreach my $cat (sort keys (%data)) {
 		print FOUT "$cat\t";
 		$first = 1;
-	foreach my $mb (sort keys (%{$data{$cat}})) {
+	foreach my $mb (sort {hex($a) <=> hex($b)} keys (%{$data{$cat}})) {
 		if ($first == 1) {
 			$first = 0;
 		} elsif ($inrange == 1) {

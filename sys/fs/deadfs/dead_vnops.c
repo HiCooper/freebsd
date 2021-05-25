@@ -79,7 +79,9 @@ struct vop_vector dead_vnodeops = {
 	.vop_vptocnp =		VOP_EBADF,
 	.vop_unset_text =	dead_unset_text,
 	.vop_write =		dead_write,
+	.vop_fplookup_vexec =	VOP_EOPNOTSUPP,
 };
+VFS_VOP_VECTOR_REGISTER(dead_vnodeops);
 
 static int
 dead_getwritemount(struct vop_getwritemount_args *ap)

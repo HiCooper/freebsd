@@ -119,13 +119,13 @@ extern struct fs_ops ufs_fsops;
 extern struct fs_ops tftp_fsops;
 extern struct fs_ops nfs_fsops;
 extern struct fs_ops cd9660_fsops;
-extern struct fs_ops nandfs_fsops;
 extern struct fs_ops gzipfs_fsops;
 extern struct fs_ops bzipfs_fsops;
 extern struct fs_ops dosfs_fsops;
 extern struct fs_ops ext2fs_fsops;
 extern struct fs_ops splitfs_fsops;
 extern struct fs_ops pkgfs_fsops;
+extern struct fs_ops efihttp_fsops;
 
 /* where values for lseek(2) */
 #define	SEEK_SET	0	/* set file offset to offset */
@@ -264,9 +264,6 @@ static __inline int tolower(int c)
 extern void	setheap(void *base, void *top);
 extern char	*sbrk(int incr);
 
-extern void	*reallocf(void *ptr, size_t size);
-extern void	mallocstats(void);
-
 extern int	printf(const char *fmt, ...) __printflike(1, 2);
 extern int	asprintf(char **buf, const char *cfmt, ...) __printflike(2, 3);
 extern int	sprintf(char *buf, const char *cfmt, ...) __printflike(2, 3);
@@ -340,6 +337,7 @@ extern struct env_var	*env_getenv(const char *name);
 extern int		env_setenv(const char *name, int flags,
 				   const void *value, ev_sethook_t sethook,
 				   ev_unsethook_t unsethook);
+extern void		env_discard(struct env_var *);
 extern char		*getenv(const char *name);
 extern int		setenv(const char *name, const char *value,
 			       int overwrite);
@@ -411,6 +409,11 @@ extern struct fs_ops	*exclusive_file_system;
 extern struct devsw	*devsw[];
 
 /*
+ * Time routines
+ */
+time_t time(time_t *);
+
+/*
  * Expose byteorder(3) functions.
  */
 #ifndef _BYTEORDER_PROTOTYPED
@@ -430,20 +433,44 @@ extern uint16_t		ntohs(uint16_t);
 #endif
 
 void *Malloc(size_t, const char *, int);
+void *Memalign(size_t, size_t, const char *, int);
 void *Calloc(size_t, size_t, const char *, int);
 void *Realloc(void *, size_t, const char *, int);
+void *Reallocf(void *, size_t, const char *, int);
 void Free(void *, const char *, int);
+extern void	mallocstats(void);
 
-#ifdef DEBUG_MALLOC
+const char *x86_hypervisor(void);
+
+#ifdef USER_MALLOC
+extern void *malloc(size_t);
+extern void *memalign(size_t, size_t);
+extern void *calloc(size_t, size_t);
+extern void free(void *);
+extern void *realloc(void *, size_t);
+extern void *reallocf(void *, size_t);
+#elif defined(DEBUG_MALLOC)
 #define malloc(x)	Malloc(x, __FILE__, __LINE__)
+#define memalign(x, y)	Memalign(x, y, __FILE__, __LINE__)
 #define calloc(x, y)	Calloc(x, y, __FILE__, __LINE__)
 #define free(x)		Free(x, __FILE__, __LINE__)
 #define realloc(x, y)	Realloc(x, y, __FILE__, __LINE__)
+#define reallocf(x, y)	Reallocf(x, y, __FILE__, __LINE__)
 #else
 #define malloc(x)	Malloc(x, NULL, 0)
+#define memalign(x, y)	Memalign(x, y, NULL, 0)
 #define calloc(x, y)	Calloc(x, y, NULL, 0)
 #define free(x)		Free(x, NULL, 0)
 #define realloc(x, y)	Realloc(x, y, NULL, 0)
+#define reallocf(x, y)	Reallocf(x, y, NULL, 0)
 #endif
+
+/*
+ * va <-> pa routines. MD code must supply.
+ */
+caddr_t ptov(uintptr_t);
+
+/* hexdump.c */
+void	hexdump(caddr_t region, size_t len);
 
 #endif	/* STAND_H */

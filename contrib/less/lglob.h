@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2020  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -56,7 +56,7 @@
 					char ext[_MAX_EXT];	\
 					int handle;
 #else
-#if MSDOS_COMPILER==WIN32C && defined(_MSC_VER)
+#if MSDOS_COMPILER==WIN32C && (defined(_MSC_VER) || defined(MINGW))
 
 #define	GLOB_FIRST_NAME(filename,fndp,h) h = _findfirst(filename, fndp)
 #define	GLOB_FIRST_FAILED(handle)	((handle) == -1)
@@ -69,7 +69,7 @@
 					char dir[_MAX_DIR];	\
 					char fname[_MAX_FNAME];	\
 					char ext[_MAX_EXT];	\
-					long handle;
+					intptr_t handle;
 
 #else
 #if MSDOS_COMPILER==WIN32C && !defined(_MSC_VER) /* Borland C for Windows */

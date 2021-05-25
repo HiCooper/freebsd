@@ -72,10 +72,12 @@ public:
 
 
     void setTraceOnReason(const trace_on_reason_t reason);
+    void setUnSyncEOTReason(const unsync_info_t reason);
 
-    void setAddrRange(const ocsd_vaddr_t  st_addr, const ocsd_vaddr_t en_addr);
-    void setLastInstrInfo(const bool exec, const ocsd_instr_type last_i_type, const ocsd_instr_subtype last_i_subtype);
+    void setAddrRange(const ocsd_vaddr_t  st_addr, const ocsd_vaddr_t en_addr, const int num_instr = 1);
+    void setLastInstrInfo(const bool exec, const ocsd_instr_type last_i_type, const ocsd_instr_subtype last_i_subtype, const uint8_t size);
     void setAddrStart(const ocsd_vaddr_t  st_addr) { this->st_addr = st_addr; };
+    void setLastInstrCond(const int is_cond) { this->last_instr_cond = is_cond; };
 
     void setSWTInfo(const ocsd_swt_info_t swt_info) { sw_trace_info = swt_info; };
     void setExtendedDataPtr(const void *data_ptr);
@@ -93,7 +95,8 @@ public:
     // return current context
     const ocsd_pe_context &getContext() const {  return context; };
 
-    
+    void copyPersistentData(const OcsdTraceElement &src);
+
 private:
     void printSWInfoPkt(std::ostringstream &oss) const;
     void clearPerPktData(); //!< clear flags that indicate validity / have values on a per packet basis
@@ -122,15 +125,17 @@ inline void OcsdTraceElement::setEvent(const event_t ev_type, const uint16_t num
     trace_event.ev_number = ev_type == EVENT_NUMBERED ? number : 0;
 }
 
-inline void OcsdTraceElement::setAddrRange(const ocsd_vaddr_t  st_addr, const ocsd_vaddr_t en_addr)
+inline void OcsdTraceElement::setAddrRange(const ocsd_vaddr_t  st_addr, const ocsd_vaddr_t en_addr, const int num_instr /* = 1 */)
 {
     this->st_addr = st_addr;
     this->en_addr = en_addr;
+    this->num_instr_range = num_instr;
 }
 
-inline void OcsdTraceElement::setLastInstrInfo(const bool exec, const ocsd_instr_type last_i_type, const ocsd_instr_subtype last_i_subtype)
+inline void OcsdTraceElement::setLastInstrInfo(const bool exec, const ocsd_instr_type last_i_type, const ocsd_instr_subtype last_i_subtype, const uint8_t size)
 {
     last_instr_exec = exec ? 1 : 0;
+    last_instr_sz = size & 0x7;
     this->last_i_type = last_i_type;
     this->last_i_subtype = last_i_subtype;
 }
@@ -168,14 +173,19 @@ inline void OcsdTraceElement::init()
 
 inline void OcsdTraceElement::clearPerPktData()
 {
-    flag_bits = 0; // union with trace_on_reason / trace_event
-
+    flag_bits = 0;          // bit-field with various flags.
+    exception_number = 0;   // union with trace_on_reason / trace_event
     ptr_extended_data = 0;  // extended data pointer
 }
 
 inline void OcsdTraceElement::setTraceOnReason(const trace_on_reason_t reason)
 {
     trace_on_reason = reason;
+}
+
+inline void OcsdTraceElement::setUnSyncEOTReason(const unsync_info_t reason)
+{
+    unsync_eot_info = reason;
 }
 
 inline void OcsdTraceElement::setISA(const ocsd_isa isa_update)
@@ -198,6 +208,12 @@ inline void OcsdTraceElement::setExtendedDataPtr(const void *data_ptr)
     ptr_extended_data = data_ptr;
 }
 
+// set persistent data between output packets.
+inline void OcsdTraceElement::copyPersistentData(const OcsdTraceElement &src)
+{
+    isa = src.isa;
+    context = src.context;
+}
 
 /** @}*/
 

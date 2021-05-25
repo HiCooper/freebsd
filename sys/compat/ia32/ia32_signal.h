@@ -88,7 +88,6 @@ struct ia32_ucontext {
 	u_int32_t		__spare__[4];
 };
 
-
 #if defined(COMPAT_FREEBSD4)
 struct ia32_mcontext4 {
 	u_int32_t	mc_onstack;		/* XXX - sigcontext compat. */
@@ -206,7 +205,7 @@ extern int sz_ia32_osigcode;
 extern int sz_lcall_tramp;
 void ia32_sendsig(sig_t, struct ksiginfo *, sigset_t *);
 void ia32_setregs(struct thread *td, struct image_params *imgp,
-    u_long stack);
+    uintptr_t stack);
 int setup_lcall_gate(void);
 
 #endif

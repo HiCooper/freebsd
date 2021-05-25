@@ -37,6 +37,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/kernel.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/bus.h>
 
 #include <cam/cam.h>
 #include <cam/cam_ccb.h>
@@ -82,6 +83,7 @@ cam_sim_alloc(sim_action_func sim_action, sim_poll_func sim_poll,
 	sim->sim_name = sim_name;
 	sim->softc = softc;
 	sim->path_id = CAM_PATH_ANY;
+	sim->sim_dev = NULL;	/* set only by cam_sim_alloc_dev */
 	sim->unit_number = unit;
 	sim->bus_id = 0;	/* set in xpt_bus_register */
 	sim->max_tagged_dev_openings = max_tagged_dev_transactions;
@@ -100,25 +102,46 @@ cam_sim_alloc(sim_action_func sim_action, sim_poll_func sim_poll,
 	return (sim);
 }
 
+struct cam_sim *
+cam_sim_alloc_dev(sim_action_func sim_action, sim_poll_func sim_poll,
+	      const char *sim_name, void *softc, device_t dev,
+	      struct mtx *mtx, int max_dev_transactions,
+	      int max_tagged_dev_transactions, struct cam_devq *queue)
+{
+	struct cam_sim *sim;
+
+	KASSERT(dev != NULL, ("%s: dev is null for sim_name %s softc %p\n",
+	    __func__, sim_name, softc));
+
+	sim = cam_sim_alloc(sim_action, sim_poll, sim_name, softc,
+	    device_get_unit(dev), mtx, max_dev_transactions,
+	    max_tagged_dev_transactions, queue);
+	if (sim != NULL)
+		sim->sim_dev = dev;
+	return (sim);
+}
+
 void
 cam_sim_free(struct cam_sim *sim, int free_devq)
 {
-	struct mtx *mtx = sim->mtx;
+	struct mtx *mtx;
 	int error;
 
-	if (mtx) {
-		mtx_assert(mtx, MA_OWNED);
-	} else {
+	if (sim->mtx == NULL) {
 		mtx = &cam_sim_free_mtx;
 		mtx_lock(mtx);
+	} else {
+		mtx = sim->mtx;
+		mtx_assert(mtx, MA_OWNED);
 	}
+	KASSERT(sim->refcount >= 1, ("sim->refcount >= 1"));
 	sim->refcount--;
 	if (sim->refcount > 0) {
 		error = msleep(sim, mtx, PRIBIO, "simfree", 0);
 		KASSERT(error == 0, ("invalid error value for msleep(9)"));
 	}
 	KASSERT(sim->refcount == 0, ("sim->refcount == 0"));
-	if (sim->mtx == NULL)
+	if (mtx == &cam_sim_free_mtx)	/* sim->mtx == NULL */
 		mtx_unlock(mtx);
 
 	if (free_devq)
@@ -129,17 +152,16 @@ cam_sim_free(struct cam_sim *sim, int free_devq)
 void
 cam_sim_release(struct cam_sim *sim)
 {
-	struct mtx *mtx = sim->mtx;
+	struct mtx *mtx;
 
-	if (mtx) {
-		if (!mtx_owned(mtx))
-			mtx_lock(mtx);
-		else
-			mtx = NULL;
-	} else {
+	if (sim->mtx == NULL)
 		mtx = &cam_sim_free_mtx;
+	else if (!mtx_owned(sim->mtx))
+		mtx = sim->mtx;
+	else
+		mtx = NULL;	/* We hold the lock. */
+	if (mtx)
 		mtx_lock(mtx);
-	}
 	KASSERT(sim->refcount >= 1, ("sim->refcount >= 1"));
 	sim->refcount--;
 	if (sim->refcount == 0)
@@ -151,17 +173,16 @@ cam_sim_release(struct cam_sim *sim)
 void
 cam_sim_hold(struct cam_sim *sim)
 {
-	struct mtx *mtx = sim->mtx;
+	struct mtx *mtx;
 
-	if (mtx) {
-		if (!mtx_owned(mtx))
-			mtx_lock(mtx);
-		else
-			mtx = NULL;
-	} else {
+	if (sim->mtx == NULL)
 		mtx = &cam_sim_free_mtx;
+	else if (!mtx_owned(sim->mtx))
+		mtx = sim->mtx;
+	else
+		mtx = NULL;	/* We hold the lock. */
+	if (mtx)
 		mtx_lock(mtx);
-	}
 	KASSERT(sim->refcount >= 1, ("sim->refcount >= 1"));
 	sim->refcount++;
 	if (mtx)

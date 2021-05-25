@@ -64,10 +64,10 @@ __FBSDID("$FreeBSD$");
 
 #include <security/audit/audit.h>
 
-static SYSCTL_NODE(_kern, OID_AUTO, threads, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_kern, OID_AUTO, threads, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "thread allocation");
 
-static int max_threads_per_proc = 1500;
+int max_threads_per_proc = 1500;
 SYSCTL_INT(_kern_threads, OID_AUTO, max_threads_per_proc, CTLFLAG_RW,
     &max_threads_per_proc, 0, "Limit on threads per proc");
 
@@ -271,17 +271,14 @@ thread_create(struct thread *td, struct rtprio *rtp,
 
 	tidhash_add(newtd);
 
+	/* ignore timesharing class */
+	if (rtp != NULL && !(td->td_pri_class == PRI_TIMESHARE &&
+	    rtp->type == RTP_PRIO_NORMAL))
+		rtp_to_pri(rtp, newtd);
+
 	thread_lock(newtd);
-	if (rtp != NULL) {
-		if (!(td->td_pri_class == PRI_TIMESHARE &&
-		      rtp->type == RTP_PRIO_NORMAL)) {
-			rtp_to_pri(rtp, newtd);
-			sched_prio(newtd, newtd->td_user_pri);
-		} /* ignore timesharing class */
-	}
 	TD_SET_CAN_RUN(newtd);
 	sched_add(newtd, SRQ_BORING);
-	thread_unlock(newtd);
 
 	return (0);
 
@@ -356,14 +353,16 @@ kern_thr_exit(struct thread *td)
 		return (0);
 	}
 
-	p->p_pendingexits++;
+	if (p->p_sysent->sv_ontdexit != NULL)
+		p->p_sysent->sv_ontdexit(td);
+
 	td->td_dbgflags |= TDB_EXIT;
-	if (p->p_ptevents & PTRACE_LWP)
+	if (p->p_ptevents & PTRACE_LWP) {
+		p->p_pendingexits++;
 		ptracestop(td, SIGTRAP, NULL);
-	PROC_UNLOCK(p);
+		p->p_pendingexits--;
+	}
 	tidhash_remove(td);
-	PROC_LOCK(p);
-	p->p_pendingexits--;
 
 	/*
 	 * The check above should prevent all other threads from this

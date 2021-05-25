@@ -363,6 +363,7 @@ variable fd
 ;
 
 : line_buffer_resize  ( len -- len )
+  dup 0= if exit then
   >r
   line_buffer .len @ if
     line_buffer .addr @
@@ -376,6 +377,7 @@ variable fd
 ;
     
 : append_to_line_buffer  ( addr len -- )
+  dup 0= if 2drop exit then
   line_buffer strget
   2swap strcat
   line_buffer .len !
@@ -1055,8 +1057,16 @@ string current_file_name_ref	\ used to print the file name
 ;
 
 : include_nextboot_file ( -- )
-  get_nextboot_conf_file
-  ['] peek_file catch if 2drop then
+  s" nextboot_enable" getenv dup -1 <> if
+    2dup s' "YES"' compare >r
+    2dup s' "yes"' compare >r
+    2dup s" YES" compare >r
+    2dup s" yes" compare r> r> r> and and and 0= to nextboot?
+  else
+    drop
+    get_nextboot_conf_file
+    ['] peek_file catch if 2drop then
+  then
   nextboot? if
     get_nextboot_conf_file
     current_file_name_ref strref
@@ -1064,6 +1074,7 @@ string current_file_name_ref	\ used to print the file name
     process_conf_errors
     ['] rewrite_nextboot_file catch if 2drop then
   then
+  s' "NO"' s" nextboot_enable" setenv
 ;
 
 \ Module loading functions

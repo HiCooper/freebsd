@@ -12,6 +12,8 @@
         ..
         chmod
         ..
+        cp
+        ..
         date
         ..
         dd
@@ -248,6 +250,10 @@
                     ustack
                     ..
                 ..
+                amd64
+                    arrays
+                    ..
+                ..
             ..
             zfsd
             ..
@@ -380,6 +386,8 @@
         ..
         libdevdctl
         ..
+        libexecinfo
+        ..
         libkvm
         ..
         libmp
@@ -432,9 +440,15 @@
         ..
         mdconfig
         ..
+        nvmecontrol
+        ..
         pfctl
             files
             ..
+        ..
+        ping
+        ..
+        route
         ..
     ..
     secure
@@ -718,6 +732,8 @@
                 ..
             ..
         ..
+        devrandom
+        ..
         dtrace
         ..
         fifo
@@ -725,6 +741,8 @@
         file
         ..
         fs
+            fusefs
+            ..
             tmpfs
             ..
         ..
@@ -739,6 +757,8 @@
                 gpt
                 ..
                 mirror
+                ..
+                multipath
                 ..
                 nop
                 ..
@@ -778,15 +798,23 @@
         ..
         net
         ..
+        netgraph
+        ..
         netinet
+        ..
+        netinet6
+            frag6
+            ..
         ..
         netipsec
             tunnel
             ..
         ..
-    netmap
-    ..
+        netmap
+        ..
         netpfil
+            common
+            ..
             pf
                 ioctl
                 ..
@@ -976,6 +1004,8 @@
         ..
         getconf
         ..
+        gh-bc
+        ..
         grep
         ..
         gzip
@@ -996,6 +1026,8 @@
         ..
         limits
         ..
+        locale
+        ..
         m4
         ..
         mkimg
@@ -1003,6 +1035,8 @@
         ncal
         ..
         opensm
+        ..
+        patch
         ..
         pr
         ..
@@ -1040,6 +1074,8 @@
         ..
         uuencode
         ..
+        unifdef
+        ..
         uniq
         ..
         vmstat
@@ -1064,7 +1100,11 @@
         ..
         fstyp
         ..
+        jail
+        ..
         makefs
+        ..
+        mixer
         ..
         newsyslog
         ..

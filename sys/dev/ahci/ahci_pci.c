@@ -37,12 +37,16 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
+#include <sys/sysctl.h>
+#include <sys/taskqueue.h>
+#include <sys/tree.h>
 #include <machine/stdarg.h>
 #include <machine/resource.h>
 #include <machine/bus.h>
 #include <sys/rman.h>
 #include <dev/pci/pcivar.h>
 #include <dev/pci/pcireg.h>
+#include <dev/iommu/iommu.h>
 #include "ahci.h"
 
 static int force_ahci = 1;
@@ -90,6 +94,7 @@ static const struct {
 	{0x06221b21, 0x00, "ASMedia ASM106x",	AHCI_Q_NOCCS|AHCI_Q_NOAUX},
 	{0x06241b21, 0x00, "ASMedia ASM106x",	AHCI_Q_NOCCS|AHCI_Q_NOAUX},
 	{0x06251b21, 0x00, "ASMedia ASM106x",	AHCI_Q_NOCCS|AHCI_Q_NOAUX},
+	{0x79011d94, 0x00, "Hygon KERNCZ",	0},
 	{0x26528086, 0x00, "Intel ICH6",	AHCI_Q_NOFORCE},
 	{0x26538086, 0x00, "Intel ICH6M",	AHCI_Q_NOFORCE},
 	{0x26818086, 0x00, "Intel ESB2",	0},
@@ -179,6 +184,7 @@ static const struct {
 	{0x1f3e8086, 0x00, "Intel Avoton (RAID)",	0},
 	{0x1f3f8086, 0x00, "Intel Avoton (RAID)",	0},
 	{0x23a38086, 0x00, "Intel Coleto Creek",	0},
+	{0x5ae38086, 0x00, "Intel Apollo Lake",	0},
 	{0x8c028086, 0x00, "Intel Lynx Point",	0},
 	{0x8c038086, 0x00, "Intel Lynx Point",	0},
 	{0x8c048086, 0x00, "Intel Lynx Point (RAID)",	0},
@@ -212,6 +218,10 @@ static const struct {
 	{0x9c078086, 0x00, "Intel Lynx Point-LP (RAID)",	0},
 	{0x9c0e8086, 0x00, "Intel Lynx Point-LP (RAID)",	0},
 	{0x9c0f8086, 0x00, "Intel Lynx Point-LP (RAID)",	0},
+	{0x9c838086, 0x00, "Intel Wildcat Point-LP",	0},
+	{0x9c858086, 0x00, "Intel Wildcat Point-LP (RAID)",	0},
+	{0x9c878086, 0x00, "Intel Wildcat Point-LP (RAID)",	0},
+	{0x9c8f8086, 0x00, "Intel Wildcat Point-LP (RAID)",	0},
 	{0x9d038086, 0x00, "Intel Sunrise Point-LP",	0},
 	{0x9d058086, 0x00, "Intel Sunrise Point-LP (RAID)",	0},
 	{0x9d078086, 0x00, "Intel Sunrise Point-LP (RAID)",	0},
@@ -242,6 +252,10 @@ static const struct {
 	{0x2365197b, 0x00, "JMicron JMB365",	AHCI_Q_NOFORCE},
 	{0x2366197b, 0x00, "JMicron JMB366",	AHCI_Q_NOFORCE},
 	{0x2368197b, 0x00, "JMicron JMB368",	AHCI_Q_NOFORCE},
+	{0x2392197b, 0x00, "JMicron JMB388",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x0585197b, 0x00, "JMicron JMB58x",	0},
+	{0x01221c28, 0x00, "Lite-On Plextor M6E (Marvell 88SS9183)",
+	    AHCI_Q_IOMMU_BUSWIDE},
 	{0x611111ab, 0x00, "Marvell 88SE6111",	AHCI_Q_NOFORCE | AHCI_Q_NOPMP |
 	    AHCI_Q_1CH | AHCI_Q_EDGEIS},
 	{0x612111ab, 0x00, "Marvell 88SE6121",	AHCI_Q_NOFORCE | AHCI_Q_NOPMP |
@@ -250,19 +264,28 @@ static const struct {
 	    AHCI_Q_4CH | AHCI_Q_EDGEIS | AHCI_Q_NONCQ | AHCI_Q_NOCOUNT},
 	{0x614511ab, 0x00, "Marvell 88SE6145",	AHCI_Q_NOFORCE | AHCI_Q_NOPMP |
 	    AHCI_Q_4CH | AHCI_Q_EDGEIS | AHCI_Q_NONCQ | AHCI_Q_NOCOUNT},
-	{0x91201b4b, 0x00, "Marvell 88SE912x",	AHCI_Q_EDGEIS},
-	{0x91231b4b, 0x11, "Marvell 88SE912x",	AHCI_Q_ALTSIG},
-	{0x91231b4b, 0x00, "Marvell 88SE912x",	AHCI_Q_EDGEIS|AHCI_Q_SATA2},
+	{0x91201b4b, 0x00, "Marvell 88SE912x",	AHCI_Q_EDGEIS |
+	    AHCI_Q_IOMMU_BUSWIDE},
+	{0x91231b4b, 0x11, "Marvell 88SE912x",	AHCI_Q_ALTSIG |
+	    AHCI_Q_IOMMU_BUSWIDE},
+	{0x91231b4b, 0x00, "Marvell 88SE912x",	AHCI_Q_EDGEIS | AHCI_Q_SATA2 |
+	    AHCI_Q_IOMMU_BUSWIDE},
 	{0x91251b4b, 0x00, "Marvell 88SE9125",	0},
-	{0x91281b4b, 0x00, "Marvell 88SE9128",	AHCI_Q_ALTSIG},
-	{0x91301b4b, 0x00, "Marvell 88SE9130",  AHCI_Q_ALTSIG},
-	{0x91721b4b, 0x00, "Marvell 88SE9172",	0},
-	{0x91821b4b, 0x00, "Marvell 88SE9182",	0},
-	{0x91831b4b, 0x00, "Marvell 88SS9183",	0},
-	{0x91a01b4b, 0x00, "Marvell 88SE91Ax",	0},
+	{0x91281b4b, 0x00, "Marvell 88SE9128",	AHCI_Q_ALTSIG |
+	    AHCI_Q_IOMMU_BUSWIDE},
+	{0x91301b4b, 0x00, "Marvell 88SE9130",  AHCI_Q_ALTSIG |
+	    AHCI_Q_IOMMU_BUSWIDE},
+	{0x91701b4b, 0x00, "Marvell 88SE9170",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x91721b4b, 0x00, "Marvell 88SE9172",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x917a1b4b, 0x00, "Marvell 88SE917A",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x91821b4b, 0x00, "Marvell 88SE9182",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x91831b4b, 0x00, "Marvell 88SS9183",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x91a01b4b, 0x00, "Marvell 88SE91Ax",	AHCI_Q_IOMMU_BUSWIDE},
 	{0x92151b4b, 0x00, "Marvell 88SE9215",  0},
-	{0x92201b4b, 0x00, "Marvell 88SE9220",  AHCI_Q_ALTSIG},
-	{0x92301b4b, 0x00, "Marvell 88SE9230",  AHCI_Q_ALTSIG},
+	{0x92201b4b, 0x00, "Marvell 88SE9220",  AHCI_Q_ALTSIG |
+	    AHCI_Q_IOMMU_BUSWIDE},
+	{0x92301b4b, 0x00, "Marvell 88SE9230",  AHCI_Q_ALTSIG |
+	    AHCI_Q_IOMMU_BUSWIDE},
 	{0x92351b4b, 0x00, "Marvell 88SE9235",  0},
 	{0x06201103, 0x00, "HighPoint RocketRAID 620",	0},
 	{0x06201b4b, 0x00, "HighPoint RocketRAID 620",	0},
@@ -273,8 +296,8 @@ static const struct {
 	{0x06441103, 0x00, "HighPoint RocketRAID 644",	0},
 	{0x06441b4b, 0x00, "HighPoint RocketRAID 644",	0},
 	{0x06411103, 0x00, "HighPoint RocketRAID 640L",	0},
-	{0x06421103, 0x00, "HighPoint RocketRAID 642L",	0},
-	{0x06451103, 0x00, "HighPoint RocketRAID 644L",	0},
+	{0x06421103, 0x00, "HighPoint RocketRAID 642L",	AHCI_Q_IOMMU_BUSWIDE},
+	{0x06451103, 0x00, "HighPoint RocketRAID 644L",	AHCI_Q_IOMMU_BUSWIDE},
 	{0x044c10de, 0x00, "NVIDIA MCP65",	AHCI_Q_NOAA},
 	{0x044d10de, 0x00, "NVIDIA MCP65",	AHCI_Q_NOAA},
 	{0x044e10de, 0x00, "NVIDIA MCP65",	AHCI_Q_NOAA},
@@ -394,6 +417,7 @@ ahci_probe(device_t dev)
 		     !(ahci_ids[i].quirks & AHCI_Q_NOFORCE)))) {
 			/* Do not attach JMicrons with single PCI function. */
 			if (pci_get_vendor(dev) == 0x197b &&
+			    (ahci_ids[i].quirks & AHCI_Q_NOFORCE) &&
 			    (pci_read_config(dev, 0xdf, 1) & 0x40) == 0)
 				return (ENXIO);
 			snprintf(buf, sizeof(buf), "%s AHCI SATA controller",
@@ -463,6 +487,7 @@ ahci_pci_attach(device_t dev)
 	uint8_t revid = pci_get_revid(dev);
 	int msi_count, msix_count;
 	uint8_t table_bar = 0, pba_bar = 0;
+	uint32_t caps, pi;
 
 	msi_count = pci_msi_count(dev);
 	msix_count = pci_msix_count(dev);
@@ -473,6 +498,16 @@ ahci_pci_attach(device_t dev)
 	     ahci_ids[i].rev > revid))
 		i++;
 	ctlr->quirks = ahci_ids[i].quirks;
+
+	if (ctlr->quirks & AHCI_Q_IOMMU_BUSWIDE) {
+		/*
+		 * The controller issues DMA requests from PCI function 1,
+		 * but the device is not multifunction.
+		 * Ref: https://bugzilla.kernel.org/show_bug.cgi?id=42679
+		 */
+		bus_dma_iommu_set_buswide(dev);
+	}
+
 	/* Limit speed for my onboard JMicron external port.
 	 * It is not eSATA really, limit to SATA 1 */
 	if (pci_get_devid(dev) == 0x2363197b &&
@@ -494,6 +529,47 @@ ahci_pci_attach(device_t dev)
 	if (!(ctlr->r_mem = bus_alloc_resource_any(dev, SYS_RES_MEMORY,
 	    &ctlr->r_rid, RF_ACTIVE)))
 		return ENXIO;
+
+	/*
+	 * Intel RAID hardware can remap NVMe devices inside its BAR.
+	 * Try to detect this. Either we have to add the device
+	 * here, or the user has to change the mode in the BIOS
+	 * from RST to AHCI.
+	 */
+	if (pci_get_vendor(dev) == 0x8086) {
+		uint32_t vscap;
+
+		vscap = ATA_INL(ctlr->r_mem, AHCI_VSCAP);
+		if (vscap & 1) {
+			uint32_t cap = ATA_INL(ctlr->r_mem, 0x800); /* Intel's REMAP CAP */
+			int i;
+
+			ctlr->remap_offset = 0x4000;
+			ctlr->remap_size = 0x4000;
+
+			/*
+			 * Check each of the devices that might be remapped to
+			 * make sure they are an nvme device. At the present,
+			 * nvme are the only known devices remapped.
+			 */
+			for (i = 0; i < 3; i++) {
+				if (cap & (1 << i) &&
+				    (ATA_INL(ctlr->r_mem, 0x880 + i * 0x80) ==
+				     ((PCIC_STORAGE << 16) |
+				      (PCIS_STORAGE_NVM << 8) |
+				      PCIP_STORAGE_NVM_ENTERPRISE_NVMHCI_1_0))) {
+					ctlr->remapped_devices++;
+				}
+			}
+
+			/* If we have any remapped device, disable MSI */
+			if (ctlr->remapped_devices > 0) {
+				device_printf(dev, "Detected %d nvme remapped devices\n",
+				    ctlr->remapped_devices);
+				ctlr->quirks |= (AHCI_Q_NOMSIX | AHCI_Q_NOMSI);
+			}
+		}
+	}
 
 	if (ctlr->quirks & AHCI_Q_NOMSIX)
 		msix_count = 0;
@@ -555,9 +631,12 @@ ahci_pci_attach(device_t dev)
 
 	/* Setup MSI register parameters */
 	/* Process hints. */
+	caps = ATA_INL(ctlr->r_mem, AHCI_CAP);
+	pi = ATA_INL(ctlr->r_mem, AHCI_PI);
 	if (ctlr->quirks & AHCI_Q_NOMSI)
 		ctlr->msi = 0;
-	else if (ctlr->quirks & AHCI_Q_1MSI)
+	else if ((ctlr->quirks & AHCI_Q_1MSI) ||
+	    ((caps & (AHCI_CAP_NPMASK | AHCI_CAP_CCCS)) == 0 && pi == 1))
 		ctlr->msi = 1;
 	else
 		ctlr->msi = 2;

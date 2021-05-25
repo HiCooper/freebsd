@@ -138,9 +138,11 @@ openpic_ofw_attach(device_t dev)
 	    OF_getencprop(node, "ibm,phandle", &xref, sizeof(xref)) == -1 &&
 	    OF_getencprop(node, "linux,phandle", &xref, sizeof(xref)) == -1)
 		xref = node;
-	
-	if (ofw_bus_is_compatible(dev, "fsl,mpic"))
+
+	if (ofw_bus_is_compatible(dev, "fsl,mpic")) {
 		sc->sc_quirks = OPENPIC_QUIRK_SINGLE_BIND;
+		sc->sc_quirks |= OPENPIC_QUIRK_HIDDEN_IRQS;
+	}
 
 	return (openpic_common_attach(dev, xref));
 }
@@ -175,4 +177,3 @@ openpic_ofw_translate_code(device_t dev, u_int irq, int code,
 		*pol = INTR_POLARITY_CONFORM;
 	}
 }
-

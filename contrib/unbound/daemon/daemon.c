@@ -77,6 +77,7 @@
 #include "util/storage/lookup3.h"
 #include "util/storage/slabhash.h"
 #include "util/tcp_conn_limit.h"
+#include "util/edns.h"
 #include "services/listen_dnsport.h"
 #include "services/cache/rrset.h"
 #include "services/cache/infra.h"
@@ -221,7 +222,9 @@ daemon_init(void)
 	(void)sldns_key_EVP_load_gost_id();
 #  endif
 #  if OPENSSL_VERSION_NUMBER < 0x10100000 || !defined(HAVE_OPENSSL_INIT_CRYPTO)
+#    ifndef S_SPLINT_S
 	OpenSSL_add_all_algorithms();
+#    endif
 #  else
 	OPENSSL_init_crypto(OPENSSL_INIT_ADD_ALL_CIPHERS
 		| OPENSSL_INIT_ADD_ALL_DIGESTS
@@ -248,8 +251,6 @@ daemon_init(void)
 	/* init timezone info while we are not chrooted yet */
 	tzset();
 #endif
-	/* open /dev/random if needed */
-	ub_systemseed((unsigned)time(NULL)^(unsigned)getpid()^0xe67);
 	daemon->need_to_exit = 0;
 	modstack_init(&daemon->mods);
 	if(!(daemon->env = (struct module_env*)calloc(1, 
@@ -290,6 +291,15 @@ daemon_init(void)
 		free(daemon);
 		return NULL;
 	}
+	if(!(daemon->env->edns_strings = edns_strings_create())) {
+		auth_zones_delete(daemon->env->auth_zones);
+		acl_list_delete(daemon->acl);
+		tcl_list_delete(daemon->tcl);
+		edns_known_options_delete(daemon->env);
+		free(daemon->env);
+		free(daemon);
+		return NULL;
+	}
 	return daemon;	
 }
 
@@ -298,6 +308,8 @@ daemon_open_shared_ports(struct daemon* daemon)
 {
 	log_assert(daemon);
 	if(daemon->cfg->port != daemon->listening_port) {
+		char** resif = NULL;
+		int num_resif = 0;
 		size_t i;
 		struct listen_port* p0;
 		daemon->reuseport = 0;
@@ -308,15 +320,18 @@ daemon_open_shared_ports(struct daemon* daemon)
 			free(daemon->ports);
 			daemon->ports = NULL;
 		}
+		if(!resolve_interface_names(daemon->cfg, &resif, &num_resif))
+			return 0;
 		/* see if we want to reuseport */
 #ifdef SO_REUSEPORT
 		if(daemon->cfg->so_reuseport && daemon->cfg->num_threads > 0)
 			daemon->reuseport = 1;
 #endif
 		/* try to use reuseport */
-		p0 = listening_ports_open(daemon->cfg, &daemon->reuseport);
+		p0 = listening_ports_open(daemon->cfg, resif, num_resif, &daemon->reuseport);
 		if(!p0) {
 			listening_ports_free(p0);
+			config_del_strarray(resif, num_resif);
 			return 0;
 		}
 		if(daemon->reuseport) {
@@ -330,6 +345,7 @@ daemon_open_shared_ports(struct daemon* daemon)
 		if(!(daemon->ports = (struct listen_port**)calloc(
 			daemon->num_ports, sizeof(*daemon->ports)))) {
 			listening_ports_free(p0);
+			config_del_strarray(resif, num_resif);
 			return 0;
 		}
 		daemon->ports[0] = p0;
@@ -338,16 +354,19 @@ daemon_open_shared_ports(struct daemon* daemon)
 			for(i=1; i<daemon->num_ports; i++) {
 				if(!(daemon->ports[i]=
 					listening_ports_open(daemon->cfg,
+						resif, num_resif,
 						&daemon->reuseport))
 					|| !daemon->reuseport ) {
 					for(i=0; i<daemon->num_ports; i++)
 						listening_ports_free(daemon->ports[i]);
 					free(daemon->ports);
 					daemon->ports = NULL;
+					config_del_strarray(resif, num_resif);
 					return 0;
 				}
 			}
 		}
+		config_del_strarray(resif, num_resif);
 		daemon->listening_port = daemon->cfg->port;
 	}
 	if(!daemon->cfg->remote_control_enable && daemon->rc_port) {
@@ -427,9 +446,7 @@ daemon_create_workers(struct daemon* daemon)
 	int* shufport;
 	log_assert(daemon && daemon->cfg);
 	if(!daemon->rand) {
-		unsigned int seed = (unsigned int)time(NULL) ^ 
-			(unsigned int)getpid() ^ 0x438;
-		daemon->rand = ub_initstate(seed, NULL);
+		daemon->rand = ub_initstate(NULL);
 		if(!daemon->rand)
 			fatal_exit("could not init random generator");
 		hash_set_raninit((uint32_t)ub_random(daemon->rand));
@@ -453,11 +470,9 @@ daemon_create_workers(struct daemon* daemon)
 		fatal_exit("out of memory during daemon init");
 	if(daemon->cfg->dnstap) {
 #ifdef USE_DNSTAP
-		daemon->dtenv = dt_create(daemon->cfg->dnstap_socket_path,
-			(unsigned int)daemon->num);
+		daemon->dtenv = dt_create(daemon->cfg);
 		if (!daemon->dtenv)
 			fatal_exit("dt_create failed");
-		dt_apply_cfg(daemon->dtenv, daemon->cfg);
 #else
 		fatal_exit("dnstap enabled in config but not built with dnstap support");
 #endif
@@ -575,6 +590,9 @@ void
 daemon_fork(struct daemon* daemon)
 {
 	int have_view_respip_cfg = 0;
+#ifdef HAVE_SYSTEMD
+	int ret;
+#endif
 
 	log_assert(daemon);
 	if(!(daemon->views = views_create()))
@@ -616,8 +634,13 @@ daemon_fork(struct daemon* daemon)
 		have_view_respip_cfg;
 	
 	/* read auth zonefiles */
-	if(!auth_zones_apply_cfg(daemon->env->auth_zones, daemon->cfg, 1))
+	if(!auth_zones_apply_cfg(daemon->env->auth_zones, daemon->cfg, 1,
+		&daemon->use_rpz))
 		fatal_exit("auth_zones could not be setup");
+
+	/* Set-up EDNS strings */
+	if(!edns_strings_apply_cfg(daemon->env->edns_strings, daemon->cfg))
+		fatal_exit("Could not set up EDNS strings");
 
 	/* setup modules */
 	daemon_setup_modules(daemon);
@@ -628,6 +651,12 @@ daemon_fork(struct daemon* daemon)
 	if(daemon->use_response_ip &&
 		modstack_find(&daemon->mods, "respip") < 0)
 		fatal_exit("response-ip options require respip module");
+	/* RPZ response ip triggers don't work as expected without the respip
+	 * module.  To avoid run-time operational surprise we reject such
+	 * configuration. */
+	if(daemon->use_rpz &&
+		modstack_find(&daemon->mods, "respip") < 0)
+		fatal_exit("RPZ requires the respip module");
 
 	/* first create all the worker structures, so we can pass
 	 * them to the newly created threads. 
@@ -660,7 +689,12 @@ daemon_fork(struct daemon* daemon)
 
 	/* Start resolver service on main thread. */
 #ifdef HAVE_SYSTEMD
-	sd_notify(0, "READY=1");
+	ret = sd_notify(0, "READY=1");
+	if(ret <= 0 && getenv("NOTIFY_SOCKET"))
+		fatal_exit("sd_notify failed %s: %s. Make sure that unbound has "
+				"access/permission to use the socket presented by systemd.",
+				getenv("NOTIFY_SOCKET"),
+				(ret==0?"no $NOTIFY_SOCKET": strerror(-ret)));
 #endif
 	log_info("start of service (%s).", PACKAGE_STRING);
 	worker_work(daemon->workers[0]);
@@ -739,6 +773,7 @@ daemon_delete(struct daemon* daemon)
 		rrset_cache_delete(daemon->env->rrset_cache);
 		infra_delete(daemon->env->infra_cache);
 		edns_known_options_delete(daemon->env);
+		edns_strings_delete(daemon->env->edns_strings);
 		auth_zones_delete(daemon->env->auth_zones);
 	}
 	ub_randfree(daemon->rand);
@@ -749,6 +784,7 @@ daemon_delete(struct daemon* daemon)
 	free(daemon->pidfile);
 	free(daemon->env);
 #ifdef HAVE_SSL
+	listen_sslctx_delete_ticket_keys();
 	SSL_CTX_free((SSL_CTX*)daemon->listen_sslctx);
 	SSL_CTX_free((SSL_CTX*)daemon->connect_sslctx);
 #endif
@@ -769,7 +805,7 @@ daemon_delete(struct daemon* daemon)
 #  endif
 #  ifdef HAVE_OPENSSL_CONFIG
 	EVP_cleanup();
-#  if OPENSSL_VERSION_NUMBER < 0x10100000
+#  if (OPENSSL_VERSION_NUMBER < 0x10100000) && !defined(OPENSSL_NO_ENGINE) && defined(HAVE_ENGINE_CLEANUP)
 	ENGINE_cleanup();
 #  endif
 	CONF_modules_free();

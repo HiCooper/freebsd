@@ -3,7 +3,6 @@
  *
  * Copyright (c) 2017 Kyle J. Kneitinger <kyle@kneit.in>
  * Copyright (c) 2018 Kyle Evans <kevans@FreeBSD.org>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,6 +28,9 @@
 
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
+
+#include <sys/zfs_context.h>
+#include <libzfsbootenv.h>
 
 #include "be.h"
 #include "be_impl.h"
@@ -107,6 +109,7 @@ be_get_bootenv_props(libbe_handle_t *lbh, nvlist_t *dsnvl)
 	data.lbh = lbh;
 	data.list = dsnvl;
 	data.single_object = false;
+	data.bootonce = NULL;
 	return (be_proplist_update(&data));
 }
 
@@ -120,6 +123,7 @@ be_get_dataset_props(libbe_handle_t *lbh, const char *name, nvlist_t *props)
 	data.lbh = lbh;
 	data.list = props;
 	data.single_object = true;
+	data.bootonce = NULL;
 	if ((snap_hdl = zfs_open(lbh->lzh, name,
 	    ZFS_TYPE_FILESYSTEM | ZFS_TYPE_SNAPSHOT)) == NULL)
 		return (BE_ERR_ZFSOPEN);
@@ -139,6 +143,7 @@ be_get_dataset_snapshots(libbe_handle_t *lbh, const char *name, nvlist_t *props)
 	data.lbh = lbh;
 	data.list = props;
 	data.single_object = false;
+	data.bootonce = NULL;
 	if ((ds_hdl = zfs_open(lbh->lzh, name,
 	    ZFS_TYPE_FILESYSTEM)) == NULL)
 		return (BE_ERR_ZFSOPEN);
@@ -177,6 +182,10 @@ prop_list_builder_cb(zfs_handle_t *zfs_hdl, void *data_p)
 
 	dataset = zfs_get_name(zfs_hdl);
 	nvlist_add_string(props, "dataset", dataset);
+
+	if (data->bootonce != NULL &&
+	    strcmp(dataset, data->bootonce) == 0)
+		nvlist_add_boolean_value(props, "bootonce", true);
 
 	name = strrchr(dataset, '/') + 1;
 	nvlist_add_string(props, "name", name);
@@ -245,6 +254,9 @@ be_proplist_update(prop_data_t *data)
 	    ZFS_TYPE_FILESYSTEM)) == NULL)
 		return (BE_ERR_ZFSOPEN);
 
+	(void) lzbe_get_boot_device(zpool_get_name(data->lbh->active_phandle),
+	    &data->bootonce);
+
 	/* XXX TODO: some error checking here */
 	zfs_iter_filesystems(root_hdl, prop_list_builder_cb, data);
 
@@ -257,7 +269,8 @@ static int
 snapshot_proplist_update(zfs_handle_t *hdl, prop_data_t *data)
 {
 
-	return (zfs_iter_snapshots_sorted(hdl, prop_list_builder_cb, data));
+	return (zfs_iter_snapshots_sorted(hdl, prop_list_builder_cb, data,
+	    0, 0));
 }
 
 
@@ -292,7 +305,7 @@ be_prop_list_free(nvlist_t *be_list)
  * Usage
  */
 int
-be_exists(libbe_handle_t *lbh, char *be)
+be_exists(libbe_handle_t *lbh, const char *be)
 {
 	char buf[BE_MAXPATHLEN];
 

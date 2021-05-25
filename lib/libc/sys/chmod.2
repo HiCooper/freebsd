@@ -28,7 +28,7 @@
 .\"     @(#)chmod.2	8.1 (Berkeley) 6/4/93
 .\" $FreeBSD$
 .\"
-.Dd November 11, 2018
+.Dd September 23, 2020
 .Dt CHMOD 2
 .Os
 .Sh NAME
@@ -106,6 +106,13 @@ Only allow to change permissions of a file which is beneath of
 the topping directory.
 See the description of the
 .Dv O_BENEATH
+flag in the
+.Xr open 2
+manual page.
+.It Dv AT_RESOLVE_BENEATH
+Only walks paths below the topping directory.
+See the description of the
+.Dv O_RESOLVE_BENEATH
 flag in the
 .Xr open 2
 manual page.
@@ -244,6 +251,8 @@ argument
 points outside the process's allocated address space.
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to the file system.
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .It Bq Er EFTYPE
 The effective user ID is not the super-user, the mode includes the sticky bit
 .Dv ( S_ISVTX ) ,
@@ -265,6 +274,8 @@ refers to a socket, not to a file.
 The file resides on a read-only file system.
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to the file system.
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .El
 .Pp
 In addition to the

@@ -100,8 +100,10 @@ sysctl_hw_sndverbose(SYSCTL_HANDLER_ARGS)
 	}
 	return (error);
 }
-SYSCTL_PROC(_hw_snd, OID_AUTO, verbose, CTLTYPE_INT | CTLFLAG_RWTUN,
-            0, sizeof(int), sysctl_hw_sndverbose, "I", "verbosity level");
+SYSCTL_PROC(_hw_snd, OID_AUTO, verbose,
+    CTLTYPE_INT | CTLFLAG_RWTUN | CTLFLAG_NEEDGIANT, 0, sizeof(int),
+    sysctl_hw_sndverbose, "I",
+    "verbosity level");
 
 static int
 sndstat_open(struct cdev *i_dev, int flags, int mode, struct thread *td)
@@ -342,7 +344,7 @@ sndstat_prepare(struct sndstat_file *pf_self)
 
 	/* make sure buffer is reset */
 	sbuf_clear(s);
-	
+
 	if (snd_verbose > 0) {
 		sbuf_printf(s, "FreeBSD Audio Driver (%ubit %d/%s)\n",
 		    (u_int)sizeof(intpcm32_t) << 3, SND_DRV_VERSION,

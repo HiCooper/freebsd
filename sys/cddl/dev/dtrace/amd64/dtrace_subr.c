@@ -36,20 +36,24 @@
 #include <sys/types.h>
 #include <sys/kernel.h>
 #include <sys/malloc.h>
-#include <sys/kmem.h>
 #include <sys/smp.h>
 #include <sys/dtrace_impl.h>
 #include <sys/dtrace_bsd.h>
 #include <machine/clock.h>
 #include <machine/cpufunc.h>
 #include <machine/frame.h>
+#include <machine/md_var.h>
 #include <machine/psl.h>
 #include <machine/trap.h>
 #include <vm/pmap.h>
 
 extern void dtrace_getnanotime(struct timespec *tsp);
+extern int (*dtrace_invop_jump_addr)(struct trapframe *);
 
-int dtrace_invop(uintptr_t, struct trapframe *, uintptr_t);
+int	dtrace_invop(uintptr_t, struct trapframe *, uintptr_t);
+int	dtrace_invop_start(struct trapframe *frame);
+void	dtrace_invop_init(void);
+void	dtrace_invop_uninit(void);
 
 typedef struct dtrace_invop_hdlr {
 	int (*dtih_func)(uintptr_t, struct trapframe *, uintptr_t);
@@ -109,11 +113,25 @@ dtrace_invop_remove(int (*func)(uintptr_t, struct trapframe *, uintptr_t))
 	kmem_free(hdlr, 0);
 }
 
+void
+dtrace_invop_init(void)
+{
+
+	dtrace_invop_jump_addr = dtrace_invop_start;
+}
+
+void
+dtrace_invop_uninit(void)
+{
+
+	dtrace_invop_jump_addr = NULL;
+}
+
 /*ARGSUSED*/
 void
 dtrace_toxic_ranges(void (*func)(uintptr_t base, uintptr_t limit))
 {
-	(*func)(0, (uintptr_t) addr_PTmap);
+	(*func)(0, la57 ? (uintptr_t)addr_P5Tmap : (uintptr_t)addr_P4Tmap);
 }
 
 void

@@ -1015,7 +1015,7 @@ static void twoSwap(FICL_VM *pVM)
 
 static void emit(FICL_VM *pVM)
 {
-    char *cp = pVM->pad;
+    char cp[2];
     int i;
 
 #if FICL_ROBUST > 1
@@ -1927,6 +1927,18 @@ static void isGreater(FICL_VM *pVM)
     y = stackPop(pVM->pStack);
     x = stackPop(pVM->pStack);
     PUSHINT(FICL_BOOL(x.i > y.i));
+    return;
+}
+
+static void uIsGreater(FICL_VM *pVM)
+{
+    FICL_UNS u1, u2;
+#if FICL_ROBUST > 1
+    vmCheckStack(pVM, 2, 1);
+#endif
+    u2 = stackPopUNS(pVM->pStack);
+    u1 = stackPopUNS(pVM->pStack);
+    PUSHINT(FICL_BOOL(u1 > u2));
     return;
 }
 
@@ -4975,6 +4987,7 @@ void ficlCompileCore(FICL_SYSTEM *pSys)
     dictAppendWord(dp, "type",      type,           FW_DEFAULT);
     dictAppendWord(dp, "u.",        uDot,           FW_DEFAULT);
     dictAppendWord(dp, "u<",        uIsLess,        FW_DEFAULT);
+    dictAppendWord(dp, "u>",        uIsGreater,     FW_DEFAULT);
     dictAppendWord(dp, "um*",       umStar,         FW_DEFAULT);
     dictAppendWord(dp, "um/mod",    umSlashMod,     FW_DEFAULT);
     dictAppendWord(dp, "unloop",    unloopCo,       FW_COMPILE);

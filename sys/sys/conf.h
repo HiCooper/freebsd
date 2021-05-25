@@ -59,7 +59,7 @@ struct cdev {
 #define	SI_ETERNAL	0x0001	/* never destroyed */
 #define	SI_ALIAS	0x0002	/* carrier of alias name */
 #define	SI_NAMED	0x0004	/* make_dev{_alias} has been called */
-#define	SI_CHEAPCLONE	0x0008	/* can be removed_dev'ed when vnode reclaims */
+#define	SI_UNUSED1	0x0008	/* unused */
 #define	SI_CHILD	0x0010	/* child of another struct cdev **/
 #define	SI_DUMPDEV	0x0080	/* is kernel dumpdev */
 #define	SI_CLONELIST	0x0200	/* on a clone list */
@@ -146,6 +146,23 @@ typedef int dumper_hdr_t(struct dumperinfo *di, struct kerneldumpheader *kdh,
 #define	D_DISK	0x0002
 #define	D_TTY	0x0004
 #define	D_MEM	0x0008	/* /dev/(k)mem */
+
+/* Defined uid and gid values. */
+#define		UID_ROOT	0
+#define		UID_BIN		3
+#define		UID_UUCP	66
+#define		UID_NOBODY	65534
+
+#define		GID_WHEEL	0
+#define		GID_KMEM	2
+#define		GID_TTY		4
+#define		GID_OPERATOR	5
+#define		GID_BIN		7
+#define		GID_GAMES	13
+#define		GID_VIDEO	44
+#define		GID_DIALER	68
+#define		GID_NOGROUP	65533
+#define		GID_NOBODY	65534
 
 #ifdef _KERNEL
 
@@ -255,8 +272,7 @@ struct make_dev_args {
 void make_dev_args_init_impl(struct make_dev_args *_args, size_t _sz);
 #define	make_dev_args_init(a) \
     make_dev_args_init_impl((a), sizeof(struct make_dev_args))
-	
-int	count_dev(struct cdev *_dev);
+
 void	delist_dev(struct cdev *_dev);
 void	destroy_dev(struct cdev *_dev);
 int	destroy_dev_sched(struct cdev *dev);
@@ -310,22 +326,6 @@ void	devfs_clear_cdevpriv(void);
 ino_t	devfs_alloc_cdp_inode(void);
 void	devfs_free_cdp_inode(ino_t ino);
 
-#define		UID_ROOT	0
-#define		UID_BIN		3
-#define		UID_UUCP	66
-#define		UID_NOBODY	65534
-
-#define		GID_WHEEL	0
-#define		GID_KMEM	2
-#define		GID_TTY		4
-#define		GID_OPERATOR	5
-#define		GID_BIN		7
-#define		GID_GAMES	13
-#define		GID_VIDEO	44
-#define		GID_DIALER	68
-#define		GID_NOGROUP	65533
-#define		GID_NOBODY	65534
-
 typedef void (*dev_clone_fn)(void *arg, struct ucred *cred, char *name,
 	    int namelen, struct cdev **result);
 
@@ -366,12 +366,16 @@ int dumper_insert(const struct dumperinfo *di_template, const char *devname,
     const struct diocskerneldump_arg *kda);
 int dumper_remove(const char *devname, const struct diocskerneldump_arg *kda);
 
+/* For ddb(4)-time use only. */
+void dumper_ddb_insert(struct dumperinfo *);
+void dumper_ddb_remove(struct dumperinfo *);
+
 int dump_start(struct dumperinfo *di, struct kerneldumpheader *kdh);
 int dump_append(struct dumperinfo *, void *, vm_offset_t, size_t);
 int dump_write(struct dumperinfo *, void *, vm_offset_t, off_t, size_t);
 int dump_finish(struct dumperinfo *di, struct kerneldumpheader *kdh);
 void dump_init_header(const struct dumperinfo *di, struct kerneldumpheader *kdh,
-    char *magic, uint32_t archver, uint64_t dumplen);
+    const char *magic, uint32_t archver, uint64_t dumplen);
 
 #endif /* _KERNEL */
 

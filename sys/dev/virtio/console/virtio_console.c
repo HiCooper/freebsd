@@ -146,7 +146,6 @@ static struct virtio_feature_desc vtcon_feature_desc[] = {
 	{ VIRTIO_CONSOLE_F_SIZE,	"ConsoleSize"	},
 	{ VIRTIO_CONSOLE_F_MULTIPORT,	"MultiplePorts"	},
 	{ VIRTIO_CONSOLE_F_EMERG_WRITE,	"EmergencyWrite" },
-
 	{ 0, NULL }
 };
 
@@ -256,10 +255,17 @@ static driver_t vtcon_driver = {
 };
 static devclass_t vtcon_devclass;
 
+DRIVER_MODULE(virtio_console, virtio_mmio, vtcon_driver, vtcon_devclass,
+    vtcon_modevent, 0);
 DRIVER_MODULE(virtio_console, virtio_pci, vtcon_driver, vtcon_devclass,
     vtcon_modevent, 0);
 MODULE_VERSION(virtio_console, 1);
 MODULE_DEPEND(virtio_console, virtio, 1, 1, 1);
+
+VIRTIO_SIMPLE_PNPTABLE(virtio_console, VIRTIO_ID_CONSOLE,
+    "VirtIO Console Adapter");
+VIRTIO_SIMPLE_PNPINFO(virtio_mmio, virtio_console);
+VIRTIO_SIMPLE_PNPINFO(virtio_pci, virtio_console);
 
 static int
 vtcon_modevent(module_t mod, int type, void *unused)
@@ -305,13 +311,7 @@ vtcon_drain_all(void)
 static int
 vtcon_probe(device_t dev)
 {
-
-	if (virtio_get_device_type(dev) != VIRTIO_ID_CONSOLE)
-		return (ENXIO);
-
-	device_set_desc(dev, "VirtIO Console Adapter");
-
-	return (BUS_PROBE_DEFAULT);
+	return (VIRTIO_SIMPLE_PROBE(dev, virtio_console));
 }
 
 static int
@@ -510,7 +510,6 @@ vtcon_alloc_virtqueues(struct vtcon_softc *sc)
 		return (ENOMEM);
 
 	for (i = 0, idx = 0, portidx = 0; i < nvqs / 2; i++, idx += 2) {
-
 		if (i == 1) {
 			/* The control virtqueues are after the first port. */
 			VQ_ALLOC_INFO_INIT(&info[idx], 0,

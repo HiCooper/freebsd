@@ -3,8 +3,6 @@
 
 .include <src.opts.mk>
 
-PACKAGE=runtime-manuals
-
 #MISSING: dump.5 plot.5
 MAN=	acct.5 \
 	ar.5 \
@@ -48,6 +46,7 @@ MAN=	acct.5 \
 	nsmb.conf.5 \
 	nsswitch.conf.5 \
 	nullfs.5 \
+	os-release.5 \
 	passwd.5 \
 	pbm.5 \
 	periodic.conf.5 \
@@ -64,12 +63,14 @@ MAN=	acct.5 \
 	resolver.5 \
 	services.5 \
 	shells.5 \
+	smbfs.5 \
 	src.conf.5 \
 	stab.5 \
 	style.Makefile.5 \
 	style.mdoc.5 \
 	sysctl.conf.5 \
-	tmpfs.5
+	tmpfs.5 \
+	unionfs.5
 
 MLINKS=	dir.5 dirent.5
 MLINKS+=ext2fs.5 ext4fs.5
@@ -99,10 +100,6 @@ MAN+=	freebsd-update.conf.5
 
 .if ${MK_HESIOD} != "no"
 MAN+=	hesiod.conf.5 
-.endif
-
-.if ${MK_NAND} != "no"
-MAN+=	nandfs.5
 .endif
 
 .if ${MK_PF} != "no"

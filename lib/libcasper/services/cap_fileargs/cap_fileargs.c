@@ -185,6 +185,11 @@ fileargs_create_limit(int argc, const char * const *argv, int flags,
 		nvlist_add_number(limits, "mode", (uint64_t)mode);
 
 	for (i = 0; i < argc; i++) {
+		if (strlen(argv[i]) >= MAXPATHLEN) {
+			nvlist_destroy(limits);
+			errno = ENAMETOOLONG;
+			return (NULL);
+		}
 		nvlist_add_null(limits, argv[i]);
 	}
 
@@ -424,6 +429,39 @@ fileargs_free(fileargs_t *fa)
 	free(fa);
 }
 
+cap_channel_t *
+fileargs_unwrap(fileargs_t *fa, int *flags)
+{
+	cap_channel_t *chan;
+
+	if (fa == NULL)
+		return (NULL);
+
+	assert(fa->fa_magic == FILEARGS_MAGIC);
+
+	chan = fa->fa_chann;
+	if (flags != NULL) {
+		*flags = fa->fa_fdflags;
+	}
+
+	nvlist_destroy(fa->fa_cache);
+	explicit_bzero(&fa->fa_magic, sizeof(fa->fa_magic));
+	free(fa);
+
+	return (chan);
+}
+
+fileargs_t *
+fileargs_wrap(cap_channel_t *chan, int fdflags)
+{
+
+	if (chan == NULL) {
+		return (NULL);
+	}
+
+	return (fileargs_create(chan, fdflags));
+}
+
 /*
  * Service functions.
  */
@@ -462,7 +500,7 @@ open_file(const char *name)
 
 static void
 fileargs_add_cache(nvlist_t *nvlout, const nvlist_t *limits,
-    const char *curent_name)
+    const char *current_name)
 {
 	int type, i, fd;
 	void *cookie;
@@ -489,9 +527,9 @@ fileargs_add_cache(nvlist_t *nvlout, const nvlist_t *limits,
 			break;
 		}
 
-		if (type != NV_TYPE_NULL ||
-		    (curent_name != NULL && strcmp(fname, curent_name) == 0)) {
-			curent_name = NULL;
+		if (type != NV_TYPE_NULL || (current_name != NULL &&
+		    strcmp(fname, current_name) == 0)) {
+			current_name = NULL;
 			i--;
 			continue;
 		}
@@ -515,7 +553,7 @@ fileargs_add_cache(nvlist_t *nvlout, const nvlist_t *limits,
 			nvlist_add_binary(new, "stat", &sb, sizeof(sb));
 		}
 
-		nvlist_add_nvlist(nvlout, fname, new);
+		nvlist_move_nvlist(nvlout, fname, new);
 	}
 	cacheposition = cookie;
 	lastname = fname;

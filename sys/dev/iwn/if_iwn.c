@@ -194,7 +194,6 @@ static void	iwn_read_eeprom_enhinfo(struct iwn_softc *);
 static struct ieee80211_node *iwn_node_alloc(struct ieee80211vap *,
 		    const uint8_t mac[IEEE80211_ADDR_LEN]);
 static void	iwn_newassoc(struct ieee80211_node *, int);
-static int	iwn_media_change(struct ifnet *);
 static int	iwn_newstate(struct ieee80211vap *, enum ieee80211_state, int);
 static void	iwn_calib_timeout(void *);
 static void	iwn_rx_phy(struct iwn_softc *, struct iwn_rx_desc *);
@@ -1351,11 +1350,13 @@ iwn_vap_create(struct ieee80211com *ic, const char name[IFNAMSIZ], int unit,
 	ivp->iv_newstate = vap->iv_newstate;
 	vap->iv_newstate = iwn_newstate;
 	sc->ivap[IWN_RXON_BSS_CTX] = vap;
+	vap->iv_ampdu_rxmax = IEEE80211_HTCAP_MAXRXAMPDU_64K;
+	vap->iv_ampdu_density = IEEE80211_HTCAP_MPDUDENSITY_4; /* 4uS */
 
 	ieee80211_ratectl_init(vap);
 	/* Complete setup. */
-	ieee80211_vap_attach(vap, iwn_media_change, ieee80211_media_status,
-	    mac);
+	ieee80211_vap_attach(vap, ieee80211_media_change,
+	    ieee80211_media_status, mac);
 	ic->ic_opmode = opmode;
 	return vap;
 }
@@ -2882,16 +2883,6 @@ iwn_newassoc(struct ieee80211_node *ni, int isnew)
 }
 
 static int
-iwn_media_change(struct ifnet *ifp)
-{
-	int error;
-
-	error = ieee80211_media_change(ifp);
-	/* NB: only the fixed rate can change and that doesn't need a reset */
-	return (error == ENETRESET ? 0 : error);
-}
-
-static int
 iwn_newstate(struct ieee80211vap *vap, enum ieee80211_state nstate, int arg)
 {
 	struct iwn_vap *ivp = IWN_VAP(vap);
@@ -3031,6 +3022,7 @@ static void
 iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
     struct iwn_rx_data *data)
 {
+	struct epoch_tracker et;
 	struct iwn_ops *ops = &sc->ops;
 	struct ieee80211com *ic = &sc->sc_ic;
 	struct iwn_rx_ring *ring = &sc->rxq;
@@ -3190,6 +3182,7 @@ iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
 	}
 
 	IWN_UNLOCK(sc);
+	NET_EPOCH_ENTER(et);
 
 	/* Send the frame to the 802.11 layer. */
 	if (ni != NULL) {
@@ -3201,6 +3194,7 @@ iwn_rx_done(struct iwn_softc *sc, struct iwn_rx_desc *desc,
 	} else
 		(void)ieee80211_input_all(ic, m, rssi - nf, nf);
 
+	NET_EPOCH_EXIT(et);
 	IWN_LOCK(sc);
 
 	DPRINTF(sc, IWN_DEBUG_TRACE, "->%s: end\n",__func__);
@@ -7448,7 +7442,6 @@ static int
 iwn_ampdu_rx_start(struct ieee80211_node *ni, struct ieee80211_rx_ampdu *rap,
     int baparamset, int batimeout, int baseqctl)
 {
-#define MS(_v, _f)	(((_v) & _f) >> _f##_S)
 	struct iwn_softc *sc = ni->ni_ic->ic_softc;
 	struct iwn_ops *ops = &sc->ops;
 	struct iwn_node *wn = (void *)ni;
@@ -7459,8 +7452,8 @@ iwn_ampdu_rx_start(struct ieee80211_node *ni, struct ieee80211_rx_ampdu *rap,
 
 	DPRINTF(sc, IWN_DEBUG_TRACE, "->Doing %s\n", __func__);
 
-	tid = MS(le16toh(baparamset), IEEE80211_BAPS_TID);
-	ssn = MS(le16toh(baseqctl), IEEE80211_BASEQ_START);
+	tid = _IEEE80211_MASKSHIFT(le16toh(baparamset), IEEE80211_BAPS_TID);
+	ssn = _IEEE80211_MASKSHIFT(le16toh(baseqctl), IEEE80211_BASEQ_START);
 
 	if (wn->id == IWN_ID_UNDEFINED)
 		return (ENOENT);
@@ -7477,7 +7470,6 @@ iwn_ampdu_rx_start(struct ieee80211_node *ni, struct ieee80211_rx_ampdu *rap,
 	if (error != 0)
 		return error;
 	return sc->sc_ampdu_rx_start(ni, rap, baparamset, batimeout, baseqctl);
-#undef MS
 }
 
 /*

@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -184,12 +184,12 @@ typedef struct acpi_exception_info
 {
     char                *Name;
 
-#ifdef ACPI_HELP_APP
+#if defined (ACPI_HELP_APP) || defined (ACPI_ASL_COMPILER)
     char                *Description;
 #endif
 } ACPI_EXCEPTION_INFO;
 
-#ifdef ACPI_HELP_APP
+#if defined (ACPI_HELP_APP) || defined (ACPI_ASL_COMPILER)
 #define EXCEP_TXT(Name,Description)     {Name, Description}
 #else
 #define EXCEP_TXT(Name,Description)     {Name}

@@ -63,7 +63,7 @@ arm64_interrupt_enable(uint32_t pmc)
 	uint32_t reg;
 
 	reg = (1 << pmc);
-	WRITE_SPECIALREG(PMINTENSET_EL1, reg);
+	WRITE_SPECIALREG(pmintenset_el1, reg);
 
 	isb();
 }
@@ -77,7 +77,7 @@ arm64_interrupt_disable(uint32_t pmc)
 	uint32_t reg;
 
 	reg = (1 << pmc);
-	WRITE_SPECIALREG(PMINTENCLR_EL1, reg);
+	WRITE_SPECIALREG(pmintenclr_el1, reg);
 
 	isb();
 }
@@ -91,7 +91,7 @@ arm64_counter_enable(unsigned int pmc)
 	uint32_t reg;
 
 	reg = (1 << pmc);
-	WRITE_SPECIALREG(PMCNTENSET_EL0, reg);
+	WRITE_SPECIALREG(pmcntenset_el0, reg);
 
 	isb();
 }
@@ -105,7 +105,7 @@ arm64_counter_disable(unsigned int pmc)
 	uint32_t reg;
 
 	reg = (1 << pmc);
-	WRITE_SPECIALREG(PMCNTENCLR_EL0, reg);
+	WRITE_SPECIALREG(pmcntenclr_el0, reg);
 
 	isb();
 }
@@ -118,7 +118,7 @@ arm64_pmcr_read(void)
 {
 	uint32_t reg;
 
-	reg = READ_SPECIALREG(PMCR_EL0);
+	reg = READ_SPECIALREG(pmcr_el0);
 
 	return (reg);
 }
@@ -127,7 +127,7 @@ static void
 arm64_pmcr_write(uint32_t reg)
 {
 
-	WRITE_SPECIALREG(PMCR_EL0, reg);
+	WRITE_SPECIALREG(pmcr_el0, reg);
 
 	isb();
 }
@@ -141,11 +141,11 @@ arm64_pmcn_read(unsigned int pmc)
 
 	KASSERT(pmc < arm64_npmcs, ("%s: illegal PMC number %d", __func__, pmc));
 
-	WRITE_SPECIALREG(PMSELR_EL0, pmc);
+	WRITE_SPECIALREG(pmselr_el0, pmc);
 
 	isb();
 
-	return (READ_SPECIALREG(PMXEVCNTR_EL0));
+	return (READ_SPECIALREG(pmxevcntr_el0));
 }
 
 static void
@@ -154,8 +154,8 @@ arm64_pmcn_write(unsigned int pmc, uint32_t reg)
 
 	KASSERT(pmc < arm64_npmcs, ("%s: illegal PMC number %d", __func__, pmc));
 
-	WRITE_SPECIALREG(PMSELR_EL0, pmc);
-	WRITE_SPECIALREG(PMXEVCNTR_EL0, reg);
+	WRITE_SPECIALREG(pmselr_el0, pmc);
+	WRITE_SPECIALREG(pmxevcntr_el0, reg);
 
 	isb();
 }
@@ -273,8 +273,8 @@ arm64_start_pmc(int cpu, int ri)
 	/*
 	 * Configure the event selection.
 	 */
-	WRITE_SPECIALREG(PMSELR_EL0, ri);
-	WRITE_SPECIALREG(PMXEVTYPER_EL0, config);
+	WRITE_SPECIALREG(pmselr_el0, ri);
+	WRITE_SPECIALREG(pmxevtyper_el0, config);
 
 	isb();
 
@@ -347,10 +347,10 @@ arm64_intr(struct trapframe *tf)
 
 		/* Check if counter is overflowed */
 		reg = (1 << ri);
-		if ((READ_SPECIALREG(PMOVSCLR_EL0) & reg) == 0)
+		if ((READ_SPECIALREG(pmovsclr_el0) & reg) == 0)
 			continue;
 		/* Clear Overflow Flag */
-		WRITE_SPECIALREG(PMOVSCLR_EL0, reg);
+		WRITE_SPECIALREG(pmovsclr_el0, reg);
 
 		isb();
 
@@ -479,11 +479,12 @@ pmc_arm64_initialize()
 {
 	struct pmc_mdep *pmc_mdep;
 	struct pmc_classdep *pcd;
-	int idcode;
+	int idcode, impcode;
 	int reg;
 
 	reg = arm64_pmcr_read();
 	arm64_npmcs = (reg & PMCR_N_MASK) >> PMCR_N_SHIFT;
+	impcode = (reg & PMCR_IMP_MASK) >> PMCR_IMP_SHIFT;
 	idcode = (reg & PMCR_IDCODE_MASK) >> PMCR_IDCODE_SHIFT;
 
 	PMCDBG1(MDP, INI, 1, "arm64-init npmcs=%d", arm64_npmcs);
@@ -498,13 +499,24 @@ pmc_arm64_initialize()
 	/* Just one class */
 	pmc_mdep = pmc_mdep_alloc(1);
 
-	switch (idcode) {
-	case PMCR_IDCODE_CORTEX_A57:
-	case PMCR_IDCODE_CORTEX_A72:
-		pmc_mdep->pmd_cputype = PMC_CPU_ARMV8_CORTEX_A57;
+	switch(impcode) {
+	case PMCR_IMP_ARM:
+		switch (idcode) {
+		case PMCR_IDCODE_CORTEX_A76:
+		case PMCR_IDCODE_NEOVERSE_N1:
+			pmc_mdep->pmd_cputype = PMC_CPU_ARMV8_CORTEX_A76;
+			break;
+		case PMCR_IDCODE_CORTEX_A57:
+		case PMCR_IDCODE_CORTEX_A72:
+			pmc_mdep->pmd_cputype = PMC_CPU_ARMV8_CORTEX_A57;
+			break;
+		default:
+		case PMCR_IDCODE_CORTEX_A53:
+			pmc_mdep->pmd_cputype = PMC_CPU_ARMV8_CORTEX_A53;
+			break;
+		}
 		break;
 	default:
-	case PMCR_IDCODE_CORTEX_A53:
 		pmc_mdep->pmd_cputype = PMC_CPU_ARMV8_CORTEX_A53;
 		break;
 	}

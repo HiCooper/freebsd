@@ -174,9 +174,7 @@ mv_spi_attach(device_t dev)
 	device_add_child(dev, "spibus", -1);
 
 	/* Probe and attach the spibus when interrupts are available. */
-	config_intrhook_oneshot((ich_func_t)bus_generic_attach, dev);
-
-	return (0);
+	return (bus_delayed_attach_children(dev));
 }
 
 static int
@@ -340,7 +338,6 @@ mv_spi_transfer(device_t dev, device_t child, struct spi_command *cmd)
 	MV_SPI_WRITE(sc, MV_SPI_CONTROL, reg | MV_SPI_CTRL_CS_ACTIVE);
 
 	while ((resid = sc->sc_len - sc->sc_written) > 0) {
-
 		MV_SPI_WRITE(sc, MV_SPI_INTR_STAT, 0);
 
 		/*

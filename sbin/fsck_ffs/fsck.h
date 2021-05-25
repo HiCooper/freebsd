@@ -127,7 +127,7 @@ struct inostat {
  * Inode state information is contained on per cylinder group lists
  * which are described by the following structure.
  */
-struct inostatlist {
+extern struct inostatlist {
 	long	il_numalloced;	/* number of inodes allocated in this cg */
 	struct inostat *il_stat;/* inostat info for this cylinder group */
 } *inostathead;
@@ -271,13 +271,13 @@ struct dups {
 	struct dups *next;
 	ufs2_daddr_t dup;
 };
-struct dups *duplist;		/* head of dup list */
-struct dups *muldup;		/* end of unique duplicate dup block numbers */
+extern struct dups *duplist;		/* head of dup list */
+extern struct dups *muldup;		/* end of unique duplicate dup block numbers */
 
 /*
  * Inode cache data structures.
  */
-struct inoinfo {
+extern struct inoinfo {
 	struct	inoinfo *i_nexthash;	/* next entry in hash chain */
 	ino_t	i_number;		/* inode number of this entry */
 	ino_t	i_parent;		/* inode number of parent */
@@ -438,7 +438,7 @@ void		finalIOstats(void);
 int		findino(struct inodesc *);
 int		findname(struct inodesc *);
 void		flush(int fd, struct bufarea *bp);
-void		freeblk(ufs2_daddr_t blkno, long frags);
+int		freeblock(struct inodesc *);
 void		freeino(ino_t ino);
 void		freeinodebuf(void);
 void		fsutilinit(void);
@@ -465,7 +465,6 @@ int		pass1check(struct inodesc *);
 void		pass2(void);
 void		pass3(void);
 void		pass4(void);
-int		pass4check(struct inodesc *);
 void		pass5(void);
 void		pfatal(const char *fmt, ...) __printflike(1, 2);
 void		propagate(void);

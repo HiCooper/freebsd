@@ -49,10 +49,13 @@
 
 __NULLABILITY_PRAGMA_PUSH
 
+#ifdef _KERNEL
 extern int cold;		/* nonzero if we are doing a cold boot */
 extern int suspend_blocked;	/* block suspend due to pending shutdown */
 extern int rebooting;		/* kern_reboot() has been called. */
 extern const char *panicstr;	/* panic message */
+extern bool panicked;
+#define	KERNEL_PANICKED()	__predict_false(panicked)
 extern char version[];		/* system version */
 extern char compiler_version[];	/* compiler version */
 extern char copyright[];	/* system copyright */
@@ -71,6 +74,8 @@ extern int maxusers;		/* system tune hint */
 extern int ngroups_max;		/* max # of supplemental groups */
 extern int vm_guest;		/* Running as virtual machine guest? */
 
+extern u_long maxphys;		/* max raw I/O transfer size */
+
 /*
  * Detected virtual machine guest types. The intention is to expand
  * and/or add to the VM_GUEST_VM type if specific VM functionality is
@@ -81,6 +86,35 @@ enum VM_GUEST { VM_GUEST_NO = 0, VM_GUEST_VM, VM_GUEST_XEN, VM_GUEST_HV,
 		VM_GUEST_VMWARE, VM_GUEST_KVM, VM_GUEST_BHYVE, VM_GUEST_VBOX,
 		VM_GUEST_PARALLELS, VM_LAST };
 
+#ifdef	INVARIANTS		/* The option is always available */
+#define	VNASSERT(exp, vp, msg) do {					\
+	if (__predict_false(!(exp))) {					\
+		vn_printf(vp, "VNASSERT failed: %s not true at %s:%d (%s)\n",\
+		   #exp, __FILE__, __LINE__, __func__);	 		\
+		kassert_panic msg;					\
+	}								\
+} while (0)
+#define	VNPASS(exp, vp)	do {						\
+	const char *_exp = #exp;					\
+	VNASSERT(exp, vp, ("condition %s not met at %s:%d (%s)",	\
+	    _exp, __FILE__, __LINE__, __func__));			\
+} while (0)
+#define	__assert_unreachable() \
+	panic("executing segment marked as unreachable at %s:%d (%s)\n", \
+	    __FILE__, __LINE__, __func__)
+#else
+#define	VNASSERT(exp, vp, msg) do { \
+} while (0)
+#define	VNPASS(exp, vp) do { \
+} while (0)
+#define	__assert_unreachable()	__unreachable()
+#endif
+
+#ifndef CTASSERT	/* Allow lint to override */
+#define	CTASSERT(x)	_Static_assert(x, "compile-time assertion failed")
+#endif
+#endif /* KERNEL */
+
 /*
  * These functions need to be declared before the KASSERT macro is invoked in
  * !KASSERT_PANIC_OPTIONAL builds, so their declarations are sort of out of
@@ -90,42 +124,59 @@ enum VM_GUEST { VM_GUEST_NO = 0, VM_GUEST_VM, VM_GUEST_XEN, VM_GUEST_HV,
 void	panic(const char *, ...) __dead2 __printflike(1, 2);
 void	vpanic(const char *, __va_list) __dead2 __printflike(1, 0);
 
-#if defined(WITNESS) || defined(INVARIANT_SUPPORT)
-#ifdef KASSERT_PANIC_OPTIONAL
-void	kassert_panic(const char *fmt, ...)  __printflike(1, 2);
-#else
-#define kassert_panic	panic
-#endif
-#endif
 
-#ifdef	INVARIANTS		/* The option is always available */
+#if defined(_STANDALONE)
+struct ucred;
+/*
+ * Until we have more experience with KASSERTS that are called
+ * from the boot loader, they are off. The bootloader does this
+ * a little differently than the kernel (we just call printf atm).
+ * we avoid most of the common functions in the boot loader, so
+ * declare printf() here too.
+ */
+int	printf(const char *, ...) __printflike(1, 2);
+#  define kassert_panic printf
+#else /* !_STANDALONE */
+#  if defined(WITNESS) || defined(INVARIANT_SUPPORT)
+#    ifdef KASSERT_PANIC_OPTIONAL
+void	kassert_panic(const char *fmt, ...)  __printflike(1, 2);
+#    else
+#      define kassert_panic	panic
+#    endif /* KASSERT_PANIC_OPTIONAL */
+#  endif /* defined(WITNESS) || defined(INVARIANT_SUPPORT) */
+#endif /* _STANDALONE */
+
+#if defined(INVARIANTS) || defined(_STANDALONE)
 #define	KASSERT(exp,msg) do {						\
 	if (__predict_false(!(exp)))					\
 		kassert_panic msg;					\
 } while (0)
-#define	VNASSERT(exp, vp, msg) do {					\
-	if (__predict_false(!(exp))) {					\
-		vn_printf(vp, "VNASSERT failed\n");			\
-		kassert_panic msg;					\
-	}								\
-} while (0)
-#else
+#else /* !INVARIANTS && !_STANDALONE */
 #define	KASSERT(exp,msg) do { \
 } while (0)
+#endif /* INVARIANTS || _STANDALONE */
 
-#define	VNASSERT(exp, vp, msg) do { \
-} while (0)
-#endif
+/*
+ * Helpful macros for quickly coming up with assertions with informative
+ * panic messages.
+ */
+#define MPASS(ex)		MPASS4(ex, #ex, __FILE__, __LINE__)
+#define MPASS2(ex, what)	MPASS4(ex, what, __FILE__, __LINE__)
+#define MPASS3(ex, file, line)	MPASS4(ex, #ex, file, line)
+#define MPASS4(ex, what, file, line)					\
+	KASSERT((ex), ("Assertion %s failed at %s:%d", what, file, line))
 
-#ifndef CTASSERT	/* Allow lint to override */
-#define	CTASSERT(x)	_Static_assert(x, "compile-time assertion failed")
-#endif
-
-#if defined(_KERNEL)
+/*
+ * Align variables.
+ */
+#define	__read_mostly		__section(".data.read_mostly")
+#define	__read_frequently	__section(".data.read_frequently")
+#define	__exclusive_cache_line	__aligned(CACHE_LINE_SIZE) \
+				    __section(".data.exclusive_cache_line")
+#ifdef _KERNEL
 #include <sys/param.h>		/* MAXCPU */
 #include <sys/pcpu.h>		/* curthread */
 #include <sys/kpilite.h>
-#endif
 
 /*
  * Assert that a pointer can be loaded from memory atomically.
@@ -143,7 +194,7 @@ void	kassert_panic(const char *fmt, ...)  __printflike(1, 2);
  */
 #define	CRITICAL_ASSERT(td)						\
 	KASSERT((td)->td_critnest >= 1, ("Not in critical section"));
- 
+
 /*
  * If we have already panic'd and this is the thread that called
  * panic(), then don't block on any mutexes but silently succeed.
@@ -156,28 +207,7 @@ void	kassert_panic(const char *fmt, ...)  __printflike(1, 2);
 })
 #define	SCHEDULER_STOPPED() SCHEDULER_STOPPED_TD(curthread)
 
-/*
- * Align variables.
- */
-#define	__read_mostly		__section(".data.read_mostly")
-#define	__read_frequently	__section(".data.read_frequently")
-#define	__exclusive_cache_line	__aligned(CACHE_LINE_SIZE) \
-				    __section(".data.exclusive_cache_line")
-/*
- * XXX the hints declarations are even more misplaced than most declarations
- * in this file, since they are needed in one file (per arch) and only used
- * in two files.
- * XXX most of these variables should be const.
- */
 extern int osreldate;
-extern bool dynamic_kenv;
-extern struct mtx kenv_lock;
-extern char *kern_envp;
-extern char *md_envp;
-extern char static_env[];
-extern char static_hints[];	/* by config for now */
-
-extern char **kenvp;
 
 extern const void *zero_region;	/* address space maps to a zeroed page	*/
 
@@ -227,7 +257,6 @@ void	*phashinit_flags(int count, struct malloc_type *type, u_long *nentries,
     int flags);
 void	g_waitidle(void);
 
-void	cpu_boot(int);
 void	cpu_flush_dcache(void *, size_t);
 void	cpu_rootconf(void);
 void	critical_enter_KBI(void);
@@ -243,7 +272,6 @@ void	tablefull(const char *);
  */
 extern int (*lkpi_alloc_current)(struct thread *, int);
 int linux_alloc_current_noop(struct thread *, int);
-
 
 #if defined(KLD_MODULE) || defined(KTR_CRITICAL) || !defined(_KERNEL) || defined(GENOFFSET)
 #define critical_enter() critical_enter_KBI()
@@ -275,7 +303,6 @@ critical_exit(void)
 
 }
 #endif
-
 
 #ifdef  EARLY_PRINTF
 typedef void early_putc_t(int ch);
@@ -315,21 +342,36 @@ void	hexdump(const void *ptr, int length, const char *hdr, int flags);
 
 #define ovbcopy(f, t, l) bcopy((f), (t), (l))
 void	bcopy(const void * _Nonnull from, void * _Nonnull to, size_t len);
-#define bcopy(from, to, len) __builtin_memmove((to), (from), (len))
 void	bzero(void * _Nonnull buf, size_t len);
-#define bzero(buf, len) __builtin_memset((buf), 0, (len))
 void	explicit_bzero(void * _Nonnull, size_t);
 int	bcmp(const void *b1, const void *b2, size_t len);
-#define bcmp(b1, b2, len) __builtin_memcmp((b1), (b2), (len))
 
 void	*memset(void * _Nonnull buf, int c, size_t len);
-#define memset(buf, c, len) __builtin_memset((buf), (c), (len))
 void	*memcpy(void * _Nonnull to, const void * _Nonnull from, size_t len);
-#define memcpy(to, from, len) __builtin_memcpy((to), (from), (len))
 void	*memmove(void * _Nonnull dest, const void * _Nonnull src, size_t n);
-#define memmove(dest, src, n) __builtin_memmove((dest), (src), (n))
 int	memcmp(const void *b1, const void *b2, size_t len);
+
+#ifdef KCSAN
+void	*kcsan_memset(void *, int, size_t);
+void	*kcsan_memcpy(void *, const void *, size_t);
+void	*kcsan_memmove(void *, const void *, size_t);
+int	kcsan_memcmp(const void *, const void *, size_t);
+#define bcopy(from, to, len) kcsan_memmove((to), (from), (len))
+#define bzero(buf, len) kcsan_memset((buf), 0, (len))
+#define bcmp(b1, b2, len) kcsan_memcmp((b1), (b2), (len))
+#define memset(buf, c, len) kcsan_memset((buf), (c), (len))
+#define memcpy(to, from, len) kcsan_memcpy((to), (from), (len))
+#define memmove(dest, src, n) kcsan_memmove((dest), (src), (n))
+#define memcmp(b1, b2, len) kcsan_memcmp((b1), (b2), (len))
+#else
+#define bcopy(from, to, len) __builtin_memmove((to), (from), (len))
+#define bzero(buf, len) __builtin_memset((buf), 0, (len))
+#define bcmp(b1, b2, len) __builtin_memcmp((b1), (b2), (len))
+#define memset(buf, c, len) __builtin_memset((buf), (c), (len))
+#define memcpy(to, from, len) __builtin_memcpy((to), (from), (len))
+#define memmove(dest, src, n) __builtin_memmove((dest), (src), (n))
 #define memcmp(b1, b2, len) __builtin_memcmp((b1), (b2), (len))
+#endif
 
 void	*memset_early(void * _Nonnull buf, int c, size_t len);
 #define bzero_early(buf, len) memset_early((buf), 0, (len))
@@ -337,9 +379,17 @@ void	*memcpy_early(void * _Nonnull to, const void * _Nonnull from, size_t len);
 void	*memmove_early(void * _Nonnull dest, const void * _Nonnull src, size_t n);
 #define bcopy_early(from, to, len) memmove_early((to), (from), (len))
 
-int	copystr(const void * _Nonnull __restrict kfaddr,
-	    void * _Nonnull __restrict kdaddr, size_t len,
-	    size_t * __restrict lencopied);
+#define	copystr(src, dst, len, outlen)	({			\
+	size_t __r, __len, *__outlen;				\
+								\
+	__len = (len);						\
+	__outlen = (outlen);					\
+	__r = strlcpy((dst), (src), __len);			\
+	if (__outlen != NULL)					\
+		*__outlen = ((__r >= __len) ? __len : __r + 1);	\
+	((__r >= __len) ? ENAMETOOLONG : 0);			\
+})
+
 int	copyinstr(const void * __restrict udaddr,
 	    void * _Nonnull __restrict kaddr, size_t len,
 	    size_t * __restrict lencopied);
@@ -351,6 +401,15 @@ int	copyout(const void * _Nonnull __restrict kaddr,
 	    void * __restrict udaddr, size_t len);
 int	copyout_nofault(const void * _Nonnull __restrict kaddr,
 	    void * __restrict udaddr, size_t len);
+
+#ifdef KCSAN
+int	kcsan_copyin(const void *, void *, size_t);
+int	kcsan_copyinstr(const void *, void *, size_t, size_t *);
+int	kcsan_copyout(const void *, void *, size_t);
+#define	copyin(u, k, l) kcsan_copyin((u), (k), (l))
+#define	copyinstr(u, k, l, lc) kcsan_copyinstr((u), (k), (l), (lc))
+#define	copyout(k, u, l) kcsan_copyout((k), (u), (l))
+#endif
 
 int	fubyte(volatile const void *base);
 long	fuword(volatile const void *base);
@@ -407,6 +466,9 @@ int	getenv_string(const char *name, char *data, int size);
 int	getenv_int64(const char *name, int64_t *data);
 int	getenv_uint64(const char *name, uint64_t *data);
 int	getenv_quad(const char *name, quad_t *data);
+int	getenv_bool(const char *name, bool *data);
+bool	getenv_is_true(const char *name);
+bool	getenv_is_false(const char *name);
 int	kern_setenv(const char *name, const char *value);
 int	kern_unsetenv(const char *name);
 int	testenv(const char *name);
@@ -422,11 +484,6 @@ extern cpu_tick_f *cpu_ticks;
 uint64_t cpu_tickrate(void);
 uint64_t cputick2usec(uint64_t tick);
 
-#ifdef APM_FIXUP_CALLTODO
-struct timeval;
-void	adjust_timeout_calltodo(struct timeval *time_change);
-#endif /* APM_FIXUP_CALLTODO */
-
 #include <sys/libkern.h>
 
 /* Initialize the world */
@@ -440,19 +497,7 @@ void	usrinfoinit(void);
 void	kern_reboot(int) __dead2;
 void	shutdown_nice(int);
 
-/* Timeouts */
-typedef void timeout_t(void *);	/* timeout function type */
-#define CALLOUT_HANDLE_INITIALIZER(handle)	\
-	{ NULL }
-
-void	callout_handle_init(struct callout_handle *);
-struct	callout_handle timeout(timeout_t *, void *, int);
-void	untimeout(timeout_t *, void *, struct callout_handle);
-
 /* Stubs for obsolete functions that used to be for interrupt management */
-static __inline intrmask_t	splbio(void)		{ return 0; }
-static __inline intrmask_t	splcam(void)		{ return 0; }
-static __inline intrmask_t	splclock(void)		{ return 0; }
 static __inline intrmask_t	splhigh(void)		{ return 0; }
 static __inline intrmask_t	splimp(void)		{ return 0; }
 static __inline intrmask_t	splnet(void)		{ return 0; }
@@ -463,7 +508,7 @@ static __inline void		splx(intrmask_t ipl __unused)	{ return; }
  * Common `proc' functions are declared here so that proc.h can be included
  * less often.
  */
-int	_sleep(void * _Nonnull chan, struct lock_object *lock, int pri,
+int	_sleep(const void * _Nonnull chan, struct lock_object *lock, int pri,
 	   const char *wmesg, sbintime_t sbt, sbintime_t pr, int flags);
 #define	msleep(chan, mtx, pri, wmesg, timo)				\
 	_sleep((chan), &(mtx)->lock_object, (pri), (wmesg),		\
@@ -471,7 +516,7 @@ int	_sleep(void * _Nonnull chan, struct lock_object *lock, int pri,
 #define	msleep_sbt(chan, mtx, pri, wmesg, bt, pr, flags)		\
 	_sleep((chan), &(mtx)->lock_object, (pri), (wmesg), (bt), (pr),	\
 	    (flags))
-int	msleep_spin_sbt(void * _Nonnull chan, struct mtx *mtx,
+int	msleep_spin_sbt(const void * _Nonnull chan, struct mtx *mtx,
 	    const char *wmesg, sbintime_t sbt, sbintime_t pr, int flags);
 #define	msleep_spin(chan, mtx, wmesg, timo)				\
 	msleep_spin_sbt((chan), (mtx), (wmesg), tick_sbt * (timo),	\
@@ -487,8 +532,9 @@ int	pause_sbt(const char *wmesg, sbintime_t sbt, sbintime_t pr,
 	    0, C_HARDCLOCK)
 #define	tsleep_sbt(chan, pri, wmesg, bt, pr, flags)			\
 	_sleep((chan), NULL, (pri), (wmesg), (bt), (pr), (flags))
-void	wakeup(void * chan);
-void	wakeup_one(void * chan);
+void	wakeup(const void *chan);
+void	wakeup_one(const void *chan);
+void	wakeup_any(const void *chan);
 
 /*
  * Common `struct cdev *' stuff are declared here to avoid #include poisoning
@@ -509,12 +555,16 @@ int poll_no_poll(int events);
 void	DELAY(int usec);
 
 /* Root mount holdback API */
-struct root_hold_token;
+struct root_hold_token {
+	int				flags;
+	const char			*who;
+	TAILQ_ENTRY(root_hold_token)	list;
+};
 
 struct root_hold_token *root_mount_hold(const char *identifier);
+void root_mount_hold_token(const char *identifier, struct root_hold_token *h);
 void root_mount_rel(struct root_hold_token *h);
 int root_mounted(void);
-
 
 /*
  * Unit number allocation API. (kern/subr_unit.c)
@@ -570,12 +620,13 @@ void _gone_in_dev(struct device *dev, int major, const char *msg);
 #ifdef NO_OBSOLETE_CODE
 #define __gone_ok(m, msg)					 \
 	_Static_assert(m < P_OSREL_MAJOR(__FreeBSD_version)),	 \
-	    "Obsolete code" msg);
+	    "Obsolete code: " msg);
 #else
 #define	__gone_ok(m, msg)
 #endif
 #define gone_in(major, msg)		__gone_ok(major, msg) _gone_in(major, msg)
 #define gone_in_dev(dev, major, msg)	__gone_ok(major, msg) _gone_in_dev(dev, major, msg)
+#endif /* _KERNEL */
 
 __NULLABILITY_PRAGMA_POP
 

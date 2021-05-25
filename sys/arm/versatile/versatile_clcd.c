@@ -262,7 +262,7 @@ versatile_clcdc_attach(device_t dev)
 	sc->mode = CLCD_MODE_RGB565;
 	versatile_scm_reg_write_4(SCM_CLCD, reg);
  	dma_size = sc->width*sc->height*2;
- 
+
  	/*
 	 * Power on LCD
 	 */
@@ -538,7 +538,6 @@ clcdr_draw_cursor(scr_stat* scp, int off, int blink, int on, int flip)
 	/* our cursor consists of simply inverting the char under it */
 	for (i = 0; i < adp->va_info.vi_cheight; i++) {
 		for (j = 0; j < adp->va_info.vi_cwidth; j++) {
-
 			addr[2*j] ^= 0xff;
 			addr[2*j + 1] ^= 0xff;
 		}
@@ -920,22 +919,3 @@ versatilefb_putm(video_adapter_t *adp, int x, int y, uint8_t *pixel_image,
 
 	return (0);
 }
-
-/*
- * Define a stub keyboard driver in case one hasn't been
- * compiled into the kernel
- */
-#include <sys/kbio.h>
-#include <dev/kbd/kbdreg.h>
-
-static int dummy_kbd_configure(int flags);
-
-keyboard_switch_t bcmdummysw;
-
-static int
-dummy_kbd_configure(int flags)
-{
-
-	return (0);
-}
-KEYBOARD_DRIVER(bcmdummy, bcmdummysw, dummy_kbd_configure);

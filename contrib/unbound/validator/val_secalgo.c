@@ -54,6 +54,11 @@
 #error "Need crypto library to do digital signature cryptography"
 #endif
 
+/** fake DSA support for unit tests */
+int fake_dsa = 0;
+/** fake SHA1 support for unit tests */
+int fake_sha1 = 0;
+
 /* OpenSSL implementation */
 #ifdef HAVE_SSL
 #ifdef HAVE_OPENSSL_ERR_H
@@ -72,10 +77,9 @@
 #include <openssl/engine.h>
 #endif
 
-/** fake DSA support for unit tests */
-int fake_dsa = 0;
-/** fake SHA1 support for unit tests */
-int fake_sha1 = 0;
+#if defined(HAVE_OPENSSL_DSA_H) && defined(USE_DSA)
+#include <openssl/dsa.h>
+#endif
 
 /**
  * Output a libcrypto openssl error to the logfile.
@@ -326,8 +330,10 @@ setup_dsa_sig(unsigned char** sig, unsigned int* len)
 #ifdef HAVE_DSA_SIG_SET0
 	if(!DSA_SIG_set0(dsasig, R, S)) return 0;
 #else
+#  ifndef S_SPLINT_S
 	dsasig->r = R;
 	dsasig->s = S;
+#  endif /* S_SPLINT_S */
 #endif
 	*sig = NULL;
 	newlen = i2d_DSA_SIG(dsasig, sig);
@@ -984,6 +990,7 @@ static SECKEYPublicKey* nss_buf2ecdsa(unsigned char* key, size_t len, int algo)
 	return pk;
 }
 
+#if defined(USE_DSA) && defined(USE_SHA1)
 static SECKEYPublicKey* nss_buf2dsa(unsigned char* key, size_t len)
 {
 	SECKEYPublicKey* pk;
@@ -1044,6 +1051,7 @@ static SECKEYPublicKey* nss_buf2dsa(unsigned char* key, size_t len)
 	}
 	return pk;
 }
+#endif /* USE_DSA && USE_SHA1 */
 
 static SECKEYPublicKey* nss_buf2rsa(unsigned char* key, size_t len)
 {
@@ -1507,13 +1515,21 @@ dnskey_algo_id_is_supported(int id)
 {
 	/* uses libnettle */
 	switch(id) {
-#if defined(USE_DSA) && defined(USE_SHA1)
 	case LDNS_DSA:
 	case LDNS_DSA_NSEC3:
+#if defined(USE_DSA) && defined(USE_SHA1)
+		return 1;
+#else
+		if(fake_dsa || fake_sha1) return 1;
+		return 0;
 #endif
-#ifdef USE_SHA1
 	case LDNS_RSASHA1:
 	case LDNS_RSASHA1_NSEC3:
+#ifdef USE_SHA1
+		return 1;
+#else
+		if(fake_sha1) return 1;
+		return 0;
 #endif
 #ifdef USE_SHA2
 	case LDNS_RSASHA256:
@@ -1725,7 +1741,7 @@ _verify_nettle_ecdsa(sldns_buffer* buf, unsigned int digest_size, unsigned char*
 		{
 			uint8_t digest[SHA256_DIGEST_SIZE];
 			mpz_t x, y;
-			nettle_ecc_point_init(&pubkey, &nettle_secp_256r1);
+			nettle_ecc_point_init(&pubkey, nettle_get_secp_256r1());
 			nettle_mpz_init_set_str_256_u(x, SHA256_DIGEST_SIZE, key);
 			nettle_mpz_init_set_str_256_u(y, SHA256_DIGEST_SIZE, key+SHA256_DIGEST_SIZE);
 			nettle_mpz_set_str_256_u(signature.r, SHA256_DIGEST_SIZE, sigblock);
@@ -1736,13 +1752,14 @@ _verify_nettle_ecdsa(sldns_buffer* buf, unsigned int digest_size, unsigned char*
 			res &= nettle_ecdsa_verify (&pubkey, SHA256_DIGEST_SIZE, digest, &signature);
 			mpz_clear(x);
 			mpz_clear(y);
+			nettle_ecc_point_clear(&pubkey);
 			break;
 		}
 		case SHA384_DIGEST_SIZE:
 		{
 			uint8_t digest[SHA384_DIGEST_SIZE];
 			mpz_t x, y;
-			nettle_ecc_point_init(&pubkey, &nettle_secp_384r1);
+			nettle_ecc_point_init(&pubkey, nettle_get_secp_384r1());
 			nettle_mpz_init_set_str_256_u(x, SHA384_DIGEST_SIZE, key);
 			nettle_mpz_init_set_str_256_u(y, SHA384_DIGEST_SIZE, key+SHA384_DIGEST_SIZE);
 			nettle_mpz_set_str_256_u(signature.r, SHA384_DIGEST_SIZE, sigblock);
@@ -1817,6 +1834,15 @@ verify_canonrrset(sldns_buffer* buf, int algo, unsigned char* sigblock,
 		*reason = "null signature";
 		return sec_status_bogus;
 	}
+
+#ifndef USE_DSA
+	if((algo == LDNS_DSA || algo == LDNS_DSA_NSEC3) &&(fake_dsa||fake_sha1))
+		return sec_status_secure;
+#endif
+#ifndef USE_SHA1
+	if(fake_sha1 && (algo == LDNS_DSA || algo == LDNS_DSA_NSEC3 || algo == LDNS_RSASHA1 || algo == LDNS_RSASHA1_NSEC3))
+		return sec_status_secure;
+#endif
 
 	switch(algo) {
 #if defined(USE_DSA) && defined(USE_SHA1)

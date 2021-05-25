@@ -91,6 +91,7 @@ static struct vop_vector fdesc_vnodeops = {
 	.vop_reclaim =		fdesc_reclaim,
 	.vop_setattr =		fdesc_setattr,
 };
+VFS_VOP_VECTOR_REGISTER(fdesc_vnodeops);
 
 static void fdesc_insmntque_dtr(struct vnode *, void *);
 static void fdesc_remove_entry(struct fdescnode *);
@@ -181,7 +182,7 @@ loop:
 			vp = fd->fd_vnode;
 			VI_LOCK(vp);
 			mtx_unlock(&fdesc_hashmtx);
-			if (vget(vp, LK_EXCLUSIVE | LK_INTERLOCK, td))
+			if (vget(vp, LK_EXCLUSIVE | LK_INTERLOCK))
 				goto loop;
 			*vpp = vp;
 			return (0);
@@ -231,7 +232,7 @@ loop:
 			vp2 = fd2->fd_vnode;
 			VI_LOCK(vp2);
 			mtx_unlock(&fdesc_hashmtx);
-			error = vget(vp2, LK_EXCLUSIVE | LK_INTERLOCK, td);
+			error = vget(vp2, LK_EXCLUSIVE | LK_INTERLOCK);
 			/* Someone beat us, dec use count and wait for reclaim */
 			vgone(vp);
 			vput(vp);
@@ -270,7 +271,6 @@ fdesc_get_ino_alloc(struct mount *mp, void *arg, int lkflags,
 	fdrop(a->fp, a->td);
 	return (error);
 }
-
 
 /*
  * vp is the current namei directory
@@ -340,14 +340,14 @@ fdesc_lookup(struct vop_lookup_args *ap)
 		 * will be re-acquired.
 		 */
 		vhold(dvp);
-		VOP_UNLOCK(dvp, 0);
+		VOP_UNLOCK(dvp);
 		fdrop(fp, td);
 
 		/* Re-aquire the lock afterwards. */
 		vn_lock(dvp, LK_RETRY | LK_EXCLUSIVE);
 		vdrop(dvp);
 		fvp = dvp;
-		if ((dvp->v_iflag & VI_DOOMED) != 0)
+		if (VN_IS_DOOMED(dvp))
 			error = ENOENT;
 	} else {
 		/*
@@ -417,7 +417,7 @@ fdesc_pathconf(struct vop_pathconf_args *ap)
 		if (VTOFDESC(vp)->fd_type == Froot)
 			return (vop_stdpathconf(ap));
 		vref(vp);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		error = kern_fpathconf(curthread, VTOFDESC(vp)->fd_fd,
 		    ap->a_name, ap->a_retval);
 		vn_lock(vp, LK_SHARED | LK_RETRY);
@@ -515,7 +515,7 @@ fdesc_setattr(struct vop_setattr_args *ap)
 	if ((error = vn_start_write(vp, &mp, V_WAIT | PCATCH)) == 0) {
 		vn_lock(vp, LK_EXCLUSIVE | LK_RETRY);
 		error = VOP_SETATTR(vp, ap->a_vap, ap->a_cred);
-		VOP_UNLOCK(vp, 0);
+		VOP_UNLOCK(vp);
 		vn_finished_write(mp);
 	}
 	fdrop(fp, td);
@@ -629,7 +629,7 @@ fdesc_readlink(struct vop_readlink_args *va)
 		panic("fdesc_readlink: not fdescfs link");
 	fd_fd = ((struct fdescnode *)vn->v_data)->fd_fd;
 	lockflags = VOP_ISLOCKED(vn);
-	VOP_UNLOCK(vn, 0);
+	VOP_UNLOCK(vn);
 
 	td = curthread;
 	error = fget_cap(td, fd_fd, &cap_no_rights, &fp, NULL);
@@ -639,7 +639,7 @@ fdesc_readlink(struct vop_readlink_args *va)
 	switch (fp->f_type) {
 	case DTYPE_VNODE:
 		vp = fp->f_vnode;
-		error = vn_fullpath(td, vp, &fullpath, &freepath);
+		error = vn_fullpath(vp, &fullpath, &freepath);
 		break;
 	default:
 		fullpath = "anon_inode:[unknown]";

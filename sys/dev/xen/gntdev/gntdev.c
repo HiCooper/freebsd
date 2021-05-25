@@ -278,7 +278,7 @@ gref_list_dtor(struct cleanup_data_struct *cleanup_data)
 					continue;
 				gnttab_free_grant_reference(gref->gref_id);
 			}
-			vm_page_unwire(gref->page, PQ_NONE);
+			vm_page_unwire_noq(gref->page);
 			vm_page_free(gref->page);
 			gref->page = NULL;
 		}
@@ -462,7 +462,7 @@ gntdev_dealloc_gref(struct ioctl_gntdev_dealloc_gref *arg)
 	}
 	mtx_unlock(&cleanup_data.to_kill_grefs_mtx);
 	mtx_unlock(&priv_user->user_data_lock);
-	
+
 	taskqueue_enqueue(taskqueue_thread, &cleanup_task);
 	put_file_offset(priv_user, arg->count, arg->index);
 
@@ -573,10 +573,10 @@ notify_unmap_cleanup(struct gntdev_gmap *gmap)
 	int error, count;
 	vm_page_t m;
 	struct gnttab_unmap_grant_ref *unmap_ops;
-	
+
 	unmap_ops = malloc(sizeof(struct gnttab_unmap_grant_ref) * gmap->count,
 			M_GNTDEV, M_WAITOK);
-	
+
 	/* Enumerate freeable maps. */
 	count = 0;
 	for (i = 0; i < gmap->count; i++) {
@@ -588,7 +588,7 @@ notify_unmap_cleanup(struct gntdev_gmap *gmap)
 			count++;
 		}
 	}
-	
+
 	/* Perform notification. */
 	if (count > 0 && gmap->notify) {
 		vm_page_t page;
@@ -598,7 +598,7 @@ notify_unmap_cleanup(struct gntdev_gmap *gmap)
 		page = PHYS_TO_VM_PAGE(gmap->map->phys_base_addr + page_offset);
 		notify(gmap->notify, page);
 	}
-	
+
 	/* Free the pages. */
 	VM_OBJECT_WLOCK(gmap->map->mem);
 retry:
@@ -606,21 +606,21 @@ retry:
 		m = vm_page_lookup(gmap->map->mem, i);
 		if (m == NULL)
 			continue;
-		if (vm_page_sleep_if_busy(m, "pcmdum"))
+		if (vm_page_busy_acquire(m, VM_ALLOC_WAITFAIL) == 0)
 			goto retry;
 		cdev_pager_free_page(gmap->map->mem, m);
 	}
 	VM_OBJECT_WUNLOCK(gmap->map->mem);
-	
+
 	/* Perform unmap hypercall. */
 	error = HYPERVISOR_grant_table_op(GNTTABOP_unmap_grant_ref,
 	    unmap_ops, count);
-	
+
 	for (i = 0; i < gmap->count; i++) {
 		gmap->grant_map_ops[i].handle = -1;
 		gmap->grant_map_ops[i].host_addr = 0;
 	}
-	
+
 	if (gmap->map) {
 		error = xenmem_free(gntdev_dev, gmap->map->pseudo_phys_res_id,
 		    gmap->map->pseudo_phys_res);
@@ -630,9 +630,9 @@ retry:
 		free(gmap->map, M_GNTDEV);
 		gmap->map = NULL;
 	}
-	
+
 	free(unmap_ops, M_GNTDEV);
-	
+
 	return (error);
 }
 
@@ -721,13 +721,13 @@ gntdev_unmap_grant_ref(struct ioctl_gntdev_unmap_grant_ref *arg)
 	STAILQ_INSERT_TAIL(&cleanup_data.to_kill_gmaps, gmap, gmap_next.list);
 	mtx_unlock(&cleanup_data.to_kill_gmaps_mtx);
 	mtx_unlock(&priv_user->user_data_lock);
-	
+
 	if (gmap->map)
 		vm_object_deallocate(gmap->map->mem);
 
 	taskqueue_enqueue(taskqueue_thread, &cleanup_task);
 	put_file_offset(priv_user, arg->count, arg->index);
-	
+
 	return (0);
 }
 
@@ -806,7 +806,7 @@ gntdev_gmap_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 {
 	struct gntdev_gmap *gmap = object->handle;
 	vm_pindex_t pidx, ridx;
-	vm_page_t page, oldm;
+	vm_page_t page;
 	vm_ooffset_t relative_offset;
 
 	if (gmap->map == NULL)
@@ -826,20 +826,15 @@ gntdev_gmap_pg_fault(vm_object_t object, vm_ooffset_t offset, int prot,
 
 	KASSERT((page->flags & PG_FICTITIOUS) != 0,
 	    ("not fictitious %p", page));
-	KASSERT(page->wire_count == 1, ("wire_count not 1 %p", page));
-	KASSERT(vm_page_busied(page) == 0, ("page %p is busy", page));
+	KASSERT(vm_page_wired(page), ("page %p is not wired", page));
+	KASSERT(!vm_page_busied(page), ("page %p is busy", page));
 
-	if (*mres != NULL) {
-		oldm = *mres;
-		vm_page_lock(oldm);
-		vm_page_free(oldm);
-		vm_page_unlock(oldm);
-		*mres = NULL;
-	}
-
-	vm_page_insert(page, object, pidx);
-	page->valid = VM_PAGE_BITS_ALL;
-	vm_page_xbusy(page);
+	vm_page_busy_acquire(page, 0);
+	vm_page_valid(page);
+	if (*mres != NULL)
+		vm_page_replace(page, object, pidx, *mres);
+	else
+		vm_page_insert(page, object, pidx);
 	*mres = page;
 	return (VM_PAGER_OK);
 }
@@ -1073,7 +1068,8 @@ mmap_gref(struct per_user_data *priv_user, struct gntdev_gref *gref_start,
 	vm_object_t mem_obj;
 	struct gntdev_gref *gref;
 
-	mem_obj = vm_object_allocate(OBJT_PHYS, size);
+	mem_obj = vm_pager_allocate(OBJT_PHYS, NULL, size, VM_PROT_ALL, 0,
+	    curthread->td_ucred);
 	if (mem_obj == NULL)
 		return (ENOMEM);
 

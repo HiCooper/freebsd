@@ -34,9 +34,7 @@ __FBSDID("$FreeBSD$");
 #include "efx.h"
 #include "efx_impl.h"
 
-
 #if EFSYS_OPT_HUNTINGTON || EFSYS_OPT_MEDFORD || EFSYS_OPT_MEDFORD2
-
 
 static	__checkReturn	efx_rc_t
 efx_mcdi_init_rxq(
@@ -539,7 +537,6 @@ fail1:
 }
 #endif /* EFSYS_OPT_RX_SCALE */
 
-
 	__checkReturn	efx_rc_t
 ef10_rx_init(
 	__in		efx_nic_t *enp)
@@ -712,7 +709,6 @@ ef10_rx_scale_tbl_set(
 {
 	efx_rc_t rc;
 
-
 	if (rss_context == EFX_RSS_CONTEXT_DEFAULT) {
 		if (enp->en_rss_context_type == EFX_RX_SCALE_UNAVAILABLE) {
 			rc = ENOTSUP;
@@ -735,7 +731,6 @@ fail1:
 	return (rc);
 }
 #endif /* EFSYS_OPT_RX_SCALE */
-
 
 /*
  * EF10 RX pseudo-header
@@ -869,7 +864,7 @@ ef10_rx_qpush(
 	efx_dword_t dword;
 
 	/* Hardware has alignment restriction for WPTR */
-	wptr = P2ALIGN(added, EF10_RX_WPTR_ALIGN);
+	wptr = EFX_P2ALIGN(unsigned int, added, EF10_RX_WPTR_ALIGN);
 	if (pushed == wptr)
 		return;
 
@@ -957,8 +952,9 @@ ef10_rx_qps_packet_info(
 	*lengthp   = EFX_QWORD_FIELD(*qwordp, ES_DZ_PS_RX_PREFIX_ORIG_LEN);
 	buf_len    = EFX_QWORD_FIELD(*qwordp, ES_DZ_PS_RX_PREFIX_CAP_LEN);
 
-	buf_len = P2ROUNDUP(buf_len + EFX_RX_PACKED_STREAM_RX_PREFIX_SIZE,
-			    EFX_RX_PACKED_STREAM_ALIGNMENT);
+	buf_len = EFX_P2ROUNDUP(uint16_t,
+	    buf_len + EFX_RX_PACKED_STREAM_RX_PREFIX_SIZE,
+	    EFX_RX_PACKED_STREAM_ALIGNMENT);
 	*next_offsetp =
 	    current_offset + buf_len + EFX_RX_PACKED_STREAM_ALIGNMENT;
 
@@ -971,7 +967,6 @@ ef10_rx_qps_packet_info(
 
 	return (pkt_start);
 }
-
 
 #endif
 
@@ -1130,12 +1125,12 @@ ef10_rx_qcreate(
 			rc = ENOTSUP;
 			goto fail9;
 		}
-		if (!IS_P2ALIGNED(es_max_dma_len,
+		if (!EFX_IS_P2ALIGNED(uint32_t, es_max_dma_len,
 			    EFX_RX_ES_SUPER_BUFFER_BUF_ALIGNMENT)) {
 			rc = EINVAL;
 			goto fail10;
 		}
-		if (!IS_P2ALIGNED(es_buf_stride,
+		if (!EFX_IS_P2ALIGNED(uint32_t, es_buf_stride,
 			    EFX_RX_ES_SUPER_BUFFER_BUF_ALIGNMENT)) {
 			rc = EINVAL;
 			goto fail11;

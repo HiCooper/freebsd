@@ -31,6 +31,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/limits.h>
 #include <sys/sbuf.h>
 
 #ifdef _KERNEL
@@ -110,7 +111,6 @@ bhnd_nvram_val_printf(bhnd_nvram_val *value, const char *fmt, char *outp,
 
 	return (error);
 }
-
 
 /**
  * Format a string representation of the elements of @p value using @p fmt,
@@ -318,7 +318,7 @@ bhnd_nvram_val_vprintf(bhnd_nvram_val *value, const char *fmt, char *outp,
 
 			stop = false;
 			np = p+1;
-	
+
 			switch (*p) {
 			case '#':
 				alt_form = true;
@@ -546,7 +546,7 @@ bhnd_nvram_val_vprintf(bhnd_nvram_val *value, const char *fmt, char *outp,
 				size_t nremain = 0;
 				if (limit > nbytes)
 					nremain = limit - nbytes;
-	
+
 				if (nremain >= delim_len)
 					memcpy(outp + nbytes, delim, delim_len);
 

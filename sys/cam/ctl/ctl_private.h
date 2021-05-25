@@ -147,7 +147,6 @@ typedef enum {
 	CTL_LUN_RESERVED	= 0x002,
 	CTL_LUN_INVALID		= 0x004,
 	CTL_LUN_DISABLED	= 0x008,
-	CTL_LUN_MALLOCED	= 0x010,
 	CTL_LUN_STOPPED		= 0x020,
 	CTL_LUN_NO_MEDIA	= 0x040,
 	CTL_LUN_EJECTED		= 0x080,
@@ -331,6 +330,8 @@ static const struct ctl_page_index log_page_index_template[] = {
 	 CTL_PAGE_FLAG_ALL, NULL, NULL},
 	{SLS_SUPPORTED_PAGES_PAGE, SLS_SUPPORTED_SUBPAGES_SUBPAGE, 0, NULL,
 	 CTL_PAGE_FLAG_ALL, NULL, NULL},
+	{SLS_TEMPERATURE, 0, 0, NULL,
+	 CTL_PAGE_FLAG_DIRECT, ctl_temp_log_sense_handler, NULL},
 	{SLS_LOGICAL_BLOCK_PROVISIONING, 0, 0, NULL,
 	 CTL_PAGE_FLAG_DIRECT, ctl_lbp_log_sense_handler, NULL},
 	{SLS_STAT_AND_PERF, 0, 0, NULL,
@@ -351,6 +352,7 @@ struct ctl_log_pages {
 		struct scsi_log_idle_time it;
 		struct scsi_log_time_interval ti;
 	} stat_page;
+	struct scsi_log_temperature	temp_page[2];
 	struct scsi_log_informational_exceptions	ie_page;
 	struct ctl_page_index		index[CTL_NUM_LOG_PAGES];
 };
@@ -455,7 +457,6 @@ struct ctl_softc {
 	struct ctl_lun		**ctl_luns;
 	uint32_t		*ctl_port_mask;
 	STAILQ_HEAD(, ctl_lun)	lun_list;
-	STAILQ_HEAD(, ctl_be_lun)	pending_lun_queue;
 	uint32_t		num_frontends;
 	STAILQ_HEAD(, ctl_frontend)	fe_list;
 	uint32_t		num_ports;
@@ -467,7 +468,6 @@ struct ctl_softc {
 	uint32_t		cur_pool_id;
 	int			shutdown;
 	struct ctl_thread	threads[CTL_MAX_THREADS];
-	struct thread		*lun_thread;
 	struct thread		*thresh_thread;
 	TAILQ_HEAD(tpc_tokens, tpc_token)	tpc_tokens;
 	struct callout		tpc_timeout;
@@ -517,6 +517,7 @@ int ctl_get_event_status(struct ctl_scsiio *ctsio);
 int ctl_mechanism_status(struct ctl_scsiio *ctsio);
 int ctl_persistent_reserve_in(struct ctl_scsiio *ctsio);
 int ctl_persistent_reserve_out(struct ctl_scsiio *ctsio);
+int ctl_report_ident_info(struct ctl_scsiio *ctsio);
 int ctl_report_tagret_port_groups(struct ctl_scsiio *ctsio);
 int ctl_report_supported_opcodes(struct ctl_scsiio *ctsio);
 int ctl_report_supported_tmf(struct ctl_scsiio *ctsio);

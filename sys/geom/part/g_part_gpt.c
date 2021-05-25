@@ -32,6 +32,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/param.h>
 #include <sys/bio.h>
 #include <sys/diskmbr.h>
+#include <sys/gsb_crc32.h>
 #include <sys/endian.h>
 #include <sys/gpt.h>
 #include <sys/kernel.h>
@@ -53,8 +54,19 @@ __FBSDID("$FreeBSD$");
 
 FEATURE(geom_part_gpt, "GEOM partitioning class for GPT partitions support");
 
+SYSCTL_DECL(_kern_geom_part);
+static SYSCTL_NODE(_kern_geom_part, OID_AUTO, gpt,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GEOM_PART_GPT GUID Partition Table");
+
+static u_int allow_nesting = 0;
+SYSCTL_UINT(_kern_geom_part_gpt, OID_AUTO, allow_nesting,
+    CTLFLAG_RWTUN, &allow_nesting, 0, "Allow GPT to be nested inside other schemes");
+
 CTASSERT(offsetof(struct gpt_hdr, padding) == 92);
 CTASSERT(sizeof(struct gpt_ent) == 128);
+
+extern u_int geom_part_check_integrity;
 
 #define	EQUUID(a,b)	(memcmp(a, b, sizeof(struct uuid)) == 0)
 
@@ -158,6 +170,7 @@ static struct uuid gpt_uuid_apple_raid = GPT_ENT_TYPE_APPLE_RAID;
 static struct uuid gpt_uuid_apple_raid_offline = GPT_ENT_TYPE_APPLE_RAID_OFFLINE;
 static struct uuid gpt_uuid_apple_tv_recovery = GPT_ENT_TYPE_APPLE_TV_RECOVERY;
 static struct uuid gpt_uuid_apple_ufs = GPT_ENT_TYPE_APPLE_UFS;
+static struct uuid gpt_uuid_apple_zfs = GPT_ENT_TYPE_APPLE_ZFS;
 static struct uuid gpt_uuid_bios_boot = GPT_ENT_TYPE_BIOS_BOOT;
 static struct uuid gpt_uuid_chromeos_firmware = GPT_ENT_TYPE_CHROMEOS_FIRMWARE;
 static struct uuid gpt_uuid_chromeos_kernel = GPT_ENT_TYPE_CHROMEOS_KERNEL;
@@ -199,6 +212,14 @@ static struct uuid gpt_uuid_netbsd_raid = GPT_ENT_TYPE_NETBSD_RAID;
 static struct uuid gpt_uuid_netbsd_swap = GPT_ENT_TYPE_NETBSD_SWAP;
 static struct uuid gpt_uuid_openbsd_data = GPT_ENT_TYPE_OPENBSD_DATA;
 static struct uuid gpt_uuid_prep_boot = GPT_ENT_TYPE_PREP_BOOT;
+static struct uuid gpt_uuid_solaris_boot = GPT_ENT_TYPE_SOLARIS_BOOT;
+static struct uuid gpt_uuid_solaris_root = GPT_ENT_TYPE_SOLARIS_ROOT;
+static struct uuid gpt_uuid_solaris_swap = GPT_ENT_TYPE_SOLARIS_SWAP;
+static struct uuid gpt_uuid_solaris_backup = GPT_ENT_TYPE_SOLARIS_BACKUP;
+static struct uuid gpt_uuid_solaris_var = GPT_ENT_TYPE_SOLARIS_VAR;
+static struct uuid gpt_uuid_solaris_home = GPT_ENT_TYPE_SOLARIS_HOME;
+static struct uuid gpt_uuid_solaris_altsec = GPT_ENT_TYPE_SOLARIS_ALTSEC;
+static struct uuid gpt_uuid_solaris_reserved = GPT_ENT_TYPE_SOLARIS_RESERVED;
 static struct uuid gpt_uuid_unused = GPT_ENT_TYPE_UNUSED;
 static struct uuid gpt_uuid_vmfs = GPT_ENT_TYPE_VMFS;
 static struct uuid gpt_uuid_vmkdiag = GPT_ENT_TYPE_VMKDIAG;
@@ -219,6 +240,7 @@ static struct g_part_uuid_alias {
 	{ &gpt_uuid_apple_raid_offline,	G_PART_ALIAS_APPLE_RAID_OFFLINE, 0 },
 	{ &gpt_uuid_apple_tv_recovery,	G_PART_ALIAS_APPLE_TV_RECOVERY,	 0 },
 	{ &gpt_uuid_apple_ufs,		G_PART_ALIAS_APPLE_UFS,		 0 },
+	{ &gpt_uuid_apple_zfs,		G_PART_ALIAS_APPLE_ZFS,		 0 },
 	{ &gpt_uuid_bios_boot,		G_PART_ALIAS_BIOS_BOOT,		 0 },
 	{ &gpt_uuid_chromeos_firmware,	G_PART_ALIAS_CHROMEOS_FIRMWARE,	 0 },
 	{ &gpt_uuid_chromeos_kernel,	G_PART_ALIAS_CHROMEOS_KERNEL,	 0 },
@@ -260,6 +282,14 @@ static struct g_part_uuid_alias {
 	{ &gpt_uuid_netbsd_swap,	G_PART_ALIAS_NETBSD_SWAP,	 0 },
 	{ &gpt_uuid_openbsd_data,	G_PART_ALIAS_OPENBSD_DATA,	 0 },
 	{ &gpt_uuid_prep_boot,		G_PART_ALIAS_PREP_BOOT,		 0x41 },
+	{ &gpt_uuid_solaris_boot,	G_PART_ALIAS_SOLARIS_BOOT,	 0 },
+	{ &gpt_uuid_solaris_root,	G_PART_ALIAS_SOLARIS_ROOT,	 0 },
+	{ &gpt_uuid_solaris_swap,	G_PART_ALIAS_SOLARIS_SWAP,	 0 },
+	{ &gpt_uuid_solaris_backup,	G_PART_ALIAS_SOLARIS_BACKUP,	 0 },
+	{ &gpt_uuid_solaris_var,	G_PART_ALIAS_SOLARIS_VAR,	 0 },
+	{ &gpt_uuid_solaris_home,	G_PART_ALIAS_SOLARIS_HOME,	 0 },
+	{ &gpt_uuid_solaris_altsec,	G_PART_ALIAS_SOLARIS_ALTSEC,	 0 },
+	{ &gpt_uuid_solaris_reserved,	G_PART_ALIAS_SOLARIS_RESERVED,	 0 },
 	{ &gpt_uuid_vmfs,		G_PART_ALIAS_VMFS,		 0 },
 	{ &gpt_uuid_vmkdiag,		G_PART_ALIAS_VMKDIAG,		 0 },
 	{ &gpt_uuid_vmreserved,		G_PART_ALIAS_VMRESERVED,	 0 },
@@ -452,8 +482,9 @@ gpt_read_hdr(struct g_part_gpt_table *table, struct g_consumer *cp,
 	if (hdr->hdr_lba_self != table->lba[elt])
 		goto fail;
 	hdr->hdr_lba_alt = le64toh(buf->hdr_lba_alt);
-	if (hdr->hdr_lba_alt == hdr->hdr_lba_self ||
-	    hdr->hdr_lba_alt > last)
+	if (hdr->hdr_lba_alt == hdr->hdr_lba_self)
+		goto fail;
+	if (hdr->hdr_lba_alt > last && geom_part_check_integrity)
 		goto fail;
 
 	/* Check the managed area. */
@@ -521,8 +552,8 @@ gpt_read_tbl(struct g_part_gpt_table *table, struct g_consumer *cp,
 	tblsz = hdr->hdr_entries * hdr->hdr_entsz;
 	sectors = howmany(tblsz, pp->sectorsize);
 	buf = g_malloc(sectors * pp->sectorsize, M_WAITOK | M_ZERO);
-	for (idx = 0; idx < sectors; idx += MAXPHYS / pp->sectorsize) {
-		size = (sectors - idx > MAXPHYS / pp->sectorsize) ?  MAXPHYS:
+	for (idx = 0; idx < sectors; idx += maxphys / pp->sectorsize) {
+		size = (sectors - idx > maxphys / pp->sectorsize) ?  maxphys:
 		    (sectors - idx) * pp->sectorsize;
 		p = g_read_data(cp, (table->lba[elt] + idx) * pp->sectorsize,
 		    size, &error);
@@ -651,8 +682,8 @@ g_part_gpt_create(struct g_part_table *basetable, struct g_part_parms *gpp)
 	struct g_part_gpt_table *table;
 	size_t tblsz;
 
-	/* We don't nest, which means that our depth should be 0. */
-	if (basetable->gpt_depth != 0)
+	/* Our depth should be 0 unless nesting was explicitly enabled. */
+	if (!allow_nesting && basetable->gpt_depth != 0)
 		return (ENXIO);
 
 	table = (struct g_part_gpt_table *)basetable;
@@ -712,14 +743,14 @@ g_part_gpt_dumpconf(struct g_part_table *table, struct g_part_entry *baseentry,
 	entry = (struct g_part_gpt_entry *)baseentry;
 	if (indent == NULL) {
 		/* conftxt: libdisk compatibility */
-		sbuf_printf(sb, " xs GPT xt ");
+		sbuf_cat(sb, " xs GPT xt ");
 		sbuf_printf_uuid(sb, &entry->ent.ent_type);
 	} else if (entry != NULL) {
 		/* confxml: partition entry information */
 		sbuf_printf(sb, "%s<label>", indent);
 		g_gpt_printf_utf16(sb, entry->ent.ent_name,
 		    sizeof(entry->ent.ent_name) >> 1);
-		sbuf_printf(sb, "</label>\n");
+		sbuf_cat(sb, "</label>\n");
 		if (entry->ent.ent_attr & GPT_ENT_ATTR_BOOTME)
 			sbuf_printf(sb, "%s<attrib>bootme</attrib>\n", indent);
 		if (entry->ent.ent_attr & GPT_ENT_ATTR_BOOTONCE) {
@@ -732,16 +763,16 @@ g_part_gpt_dumpconf(struct g_part_table *table, struct g_part_entry *baseentry,
 		}
 		sbuf_printf(sb, "%s<rawtype>", indent);
 		sbuf_printf_uuid(sb, &entry->ent.ent_type);
-		sbuf_printf(sb, "</rawtype>\n");
+		sbuf_cat(sb, "</rawtype>\n");
 		sbuf_printf(sb, "%s<rawuuid>", indent);
 		sbuf_printf_uuid(sb, &entry->ent.ent_uuid);
-		sbuf_printf(sb, "</rawuuid>\n");
+		sbuf_cat(sb, "</rawuuid>\n");
 		sbuf_printf(sb, "%s<efimedia>", indent);
 		sbuf_printf(sb, "HD(%d,GPT,", entry->base.gpe_index);
 		sbuf_printf_uuid(sb, &entry->ent.ent_uuid);
 		sbuf_printf(sb, ",%#jx,%#jx)", (intmax_t)entry->base.gpe_start,
 		    (intmax_t)(entry->base.gpe_end - entry->base.gpe_start + 1));
-		sbuf_printf(sb, "</efimedia>\n");
+		sbuf_cat(sb, "</efimedia>\n");
 	} else {
 		/* confxml: scheme information */
 	}
@@ -814,8 +845,8 @@ g_part_gpt_probe(struct g_part_table *table, struct g_consumer *cp)
 	u_char *buf;
 	int error, index, pri, res;
 
-	/* We don't nest, which means that our depth should be 0. */
-	if (table->gpt_depth != 0)
+	/* Our depth should be 0 unless nesting was explicitly enabled. */
+	if (!allow_nesting && table->gpt_depth != 0)
 		return (ENXIO);
 
 	pp = cp->provider;
@@ -1206,11 +1237,11 @@ g_part_gpt_write(struct g_part_table *basetable, struct g_consumer *cp)
 	crc = crc32(buf, table->hdr->hdr_size);
 	le32enc(buf + 16, crc);
 
-	for (index = 0; index < tblsz; index += MAXPHYS / pp->sectorsize) {
+	for (index = 0; index < tblsz; index += maxphys / pp->sectorsize) {
 		error = g_write_data(cp,
 		    (table->lba[GPT_ELT_PRITBL] + index) * pp->sectorsize,
 		    buf + (index + 1) * pp->sectorsize,
-		    (tblsz - index > MAXPHYS / pp->sectorsize) ? MAXPHYS:
+		    (tblsz - index > maxphys / pp->sectorsize) ? maxphys :
 		    (tblsz - index) * pp->sectorsize);
 		if (error)
 			goto out;
@@ -1228,11 +1259,11 @@ g_part_gpt_write(struct g_part_table *basetable, struct g_consumer *cp)
 	crc = crc32(buf, table->hdr->hdr_size);
 	le32enc(buf + 16, crc);
 
-	for (index = 0; index < tblsz; index += MAXPHYS / pp->sectorsize) {
+	for (index = 0; index < tblsz; index += maxphys / pp->sectorsize) {
 		error = g_write_data(cp,
 		    (table->lba[GPT_ELT_SECTBL] + index) * pp->sectorsize,
 		    buf + (index + 1) * pp->sectorsize,
-		    (tblsz - index > MAXPHYS / pp->sectorsize) ? MAXPHYS:
+		    (tblsz - index > maxphys / pp->sectorsize) ? maxphys :
 		    (tblsz - index) * pp->sectorsize);
 		if (error)
 			goto out;

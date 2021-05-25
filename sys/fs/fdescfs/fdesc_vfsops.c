@@ -110,7 +110,7 @@ fdesc_mount(struct mount *mp)
 	rvp->v_type = VDIR;
 	rvp->v_vflag |= VV_ROOT;
 	fmp->f_root = rvp;
-	VOP_UNLOCK(rvp, 0);
+	VOP_UNLOCK(rvp);
 	/* XXX -- don't mark as local to work around fts() problems */
 	/*mp->mnt_flag |= MNT_LOCAL;*/
 	vfs_getnewfsid(mp);
@@ -163,7 +163,7 @@ fdesc_root(struct mount *mp, int flags, struct vnode **vpp)
 	 * Return locked reference to root.
 	 */
 	vp = VFSTOFDESC(mp)->f_root;
-	vget(vp, LK_EXCLUSIVE | LK_RETRY, curthread);
+	vget(vp, LK_EXCLUSIVE | LK_RETRY);
 	*vpp = vp;
 	return (0);
 }

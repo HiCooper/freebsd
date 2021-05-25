@@ -41,6 +41,8 @@
 #include "config.h"
 #include "sldns/rrdef.h"
 #include "sldns/str2wire.h"
+#include "sldns/sbuffer.h"
+#include "sldns/wire2str.h"
 #include "services/cache/infra.h"
 #include "util/storage/slabhash.h"
 #include "util/storage/lookup3.h"
@@ -242,6 +244,7 @@ infra_create(struct config_file* cfg)
 		return NULL;
 	}
 	infra->host_ttl = cfg->host_ttl;
+	infra->infra_keep_probing = cfg->infra_keep_probing;
 	infra_dp_ratelimit = cfg->ratelimit;
 	infra->domain_rates = slabhash_create(cfg->ratelimit_slabs,
 		INFRA_HOST_STARTSIZE, cfg->ratelimit_size,
@@ -295,6 +298,7 @@ infra_adjust(struct infra_cache* infra, struct config_file* cfg)
 	if(!infra)
 		return infra_create(cfg);
 	infra->host_ttl = cfg->host_ttl;
+	infra->infra_keep_probing = cfg->infra_keep_probing;
 	infra_dp_ratelimit = cfg->ratelimit;
 	infra_ip_ratelimit = cfg->ip_ratelimit;
 	maxmem = cfg->infra_cache_numhosts * (sizeof(struct infra_key)+
@@ -443,6 +447,7 @@ infra_host(struct infra_cache* infra, struct sockaddr_storage* addr,
 	if(e && ((struct infra_data*)e->data)->ttl < timenow) {
 		/* it expired, try to reuse existing entry */
 		int old = ((struct infra_data*)e->data)->rtt.rto;
+		time_t tprobe = ((struct infra_data*)e->data)->probedelay;
 		uint8_t tA = ((struct infra_data*)e->data)->timeout_A;
 		uint8_t tAAAA = ((struct infra_data*)e->data)->timeout_AAAA;
 		uint8_t tother = ((struct infra_data*)e->data)->timeout_other;
@@ -458,6 +463,7 @@ infra_host(struct infra_cache* infra, struct sockaddr_storage* addr,
 			if(old >= USEFUL_SERVER_TOP_TIMEOUT) {
 				((struct infra_data*)e->data)->rtt.rto
 					= USEFUL_SERVER_TOP_TIMEOUT;
+				((struct infra_data*)e->data)->probedelay = tprobe;
 				((struct infra_data*)e->data)->timeout_A = tA;
 				((struct infra_data*)e->data)->timeout_AAAA = tAAAA;
 				((struct infra_data*)e->data)->timeout_other = tother;
@@ -480,7 +486,8 @@ infra_host(struct infra_cache* infra, struct sockaddr_storage* addr,
 	*edns_vs = data->edns_version;
 	*edns_lame_known = data->edns_lame_known;
 	*to = rtt_timeout(&data->rtt);
-	if(*to >= PROBE_MAXRTO && rtt_notimeout(&data->rtt)*4 <= *to) {
+	if(*to >= PROBE_MAXRTO && (infra->infra_keep_probing ||
+		rtt_notimeout(&data->rtt)*4 <= *to)) {
 		/* delay other queries, this is the probe query */
 		if(!wr) {
 			lock_rw_unlock(&e->lock);
@@ -564,18 +571,27 @@ infra_rtt_update(struct infra_cache* infra, struct sockaddr_storage* addr,
 	struct lruhash_entry* e = infra_lookup_nottl(infra, addr, addrlen,
 		nm, nmlen, 1);
 	struct infra_data* data;
-	int needtoinsert = 0;
+	int needtoinsert = 0, expired = 0;
 	int rto = 1;
+	time_t oldprobedelay = 0;
 	if(!e) {
 		if(!(e = new_entry(infra, addr, addrlen, nm, nmlen, timenow)))
 			return 0;
 		needtoinsert = 1;
 	} else if(((struct infra_data*)e->data)->ttl < timenow) {
+		oldprobedelay = ((struct infra_data*)e->data)->probedelay;
 		data_entry_init(infra, e, timenow);
+		expired = 1;
 	}
 	/* have an entry, update the rtt */
 	data = (struct infra_data*)e->data;
 	if(roundtrip == -1) {
+		if(needtoinsert || expired) {
+			/* timeout on entry that has expired before the timer
+			 * keep old timeout from the function caller */
+			data->rtt.rto = orig_rtt;
+			data->probedelay = oldprobedelay;
+		}
 		rtt_lost(&data->rtt, orig_rtt);
 		if(qtype == LDNS_RR_TYPE_A) {
 			if(data->timeout_A < TIMEOUT_COUNT_MAX)
@@ -679,7 +695,12 @@ infra_get_lame_rtt(struct infra_cache* infra,
 		return 0;
 	host = (struct infra_data*)e->data;
 	*rtt = rtt_unclamped(&host->rtt);
-	if(host->rtt.rto >= PROBE_MAXRTO && timenow < host->probedelay
+	if(host->rtt.rto >= PROBE_MAXRTO && timenow >= host->probedelay
+		&& infra->infra_keep_probing) {
+		/* single probe, keep probing */
+		if(*rtt >= USEFUL_SERVER_TOP_TIMEOUT)
+			*rtt = USEFUL_SERVER_TOP_TIMEOUT-1000;
+	} else if(host->rtt.rto >= PROBE_MAXRTO && timenow < host->probedelay
 		&& rtt_notimeout(&host->rtt)*4 <= host->rtt.rto) {
 		/* single probe for this domain, and we are not probing */
 		/* unless the query type allows a probe to happen */
@@ -702,7 +723,8 @@ infra_get_lame_rtt(struct infra_cache* infra,
 		/* see if this can be a re-probe of an unresponsive server */
 		/* minus 1000 because that is outside of the RTTBAND, so
 		 * blacklisted servers stay blacklisted if this is chosen */
-		if(host->rtt.rto >= USEFUL_SERVER_TOP_TIMEOUT) {
+		if(host->rtt.rto >= USEFUL_SERVER_TOP_TIMEOUT ||
+			infra->infra_keep_probing) {
 			lock_rw_unlock(&e->lock);
 			*rtt = USEFUL_SERVER_TOP_TIMEOUT-1000;
 			*lame = 0;
@@ -907,7 +929,8 @@ int infra_rate_max(void* data, time_t now)
 }
 
 int infra_ratelimit_inc(struct infra_cache* infra, uint8_t* name,
-	size_t namelen, time_t timenow)
+	size_t namelen, time_t timenow, struct query_info* qinfo,
+	struct comm_reply* replylist)
 {
 	int lim, max;
 	struct lruhash_entry* entry;
@@ -930,9 +953,19 @@ int infra_ratelimit_inc(struct infra_cache* infra, uint8_t* name,
 		lock_rw_unlock(&entry->lock);
 
 		if(premax < lim && max >= lim) {
-			char buf[257];
+			char buf[257], qnm[257], ts[12], cs[12], ip[128];
 			dname_str(name, buf);
-			verbose(VERB_OPS, "ratelimit exceeded %s %d", buf, lim);
+			dname_str(qinfo->qname, qnm);
+			sldns_wire2str_type_buf(qinfo->qtype, ts, sizeof(ts));
+			sldns_wire2str_class_buf(qinfo->qclass, cs, sizeof(cs));
+			ip[0]=0;
+			if(replylist) {
+				addr_to_str((struct sockaddr_storage *)&replylist->addr,
+					replylist->addrlen, ip, sizeof(ip));
+				verbose(VERB_OPS, "ratelimit exceeded %s %d query %s %s %s from %s", buf, lim, qnm, cs, ts, ip);
+			} else {
+				verbose(VERB_OPS, "ratelimit exceeded %s %d query %s %s %s", buf, lim, qnm, cs, ts);
+			}
 		}
 		return (max < lim);
 	}
@@ -991,7 +1024,7 @@ infra_get_mem(struct infra_cache* infra)
 }
 
 int infra_ip_ratelimit_inc(struct infra_cache* infra,
-  struct comm_reply* repinfo, time_t timenow)
+  struct comm_reply* repinfo, time_t timenow, struct sldns_buffer* buffer)
 {
 	int max;
 	struct lruhash_entry* entry;
@@ -1010,11 +1043,28 @@ int infra_ip_ratelimit_inc(struct infra_cache* infra,
 		lock_rw_unlock(&entry->lock);
 
 		if(premax < infra_ip_ratelimit && max >= infra_ip_ratelimit) {
-			char client_ip[128];
+			char client_ip[128], qnm[LDNS_MAX_DOMAINLEN+1+12+12];
 			addr_to_str((struct sockaddr_storage *)&repinfo->addr,
 				repinfo->addrlen, client_ip, sizeof(client_ip));
-			verbose(VERB_OPS, "ip_ratelimit exceeded %s %d",
-				client_ip, infra_ip_ratelimit);
+			qnm[0]=0;
+			if(sldns_buffer_limit(buffer)>LDNS_HEADER_SIZE &&
+				LDNS_QDCOUNT(sldns_buffer_begin(buffer))!=0) {
+				(void)sldns_wire2str_rrquestion_buf(
+					sldns_buffer_at(buffer, LDNS_HEADER_SIZE),
+					sldns_buffer_limit(buffer)-LDNS_HEADER_SIZE,
+					qnm, sizeof(qnm));
+				if(strlen(qnm)>0 && qnm[strlen(qnm)-1]=='\n')
+					qnm[strlen(qnm)-1] = 0; /*remove newline*/
+				if(strchr(qnm, '\t'))
+					*strchr(qnm, '\t') = ' ';
+				if(strchr(qnm, '\t'))
+					*strchr(qnm, '\t') = ' ';
+				verbose(VERB_OPS, "ip_ratelimit exceeded %s %d %s",
+					client_ip, infra_ip_ratelimit, qnm);
+			} else {
+				verbose(VERB_OPS, "ip_ratelimit exceeded %s %d (no query name)",
+					client_ip, infra_ip_ratelimit);
+			}
 		}
 		return (max <= infra_ip_ratelimit);
 	}

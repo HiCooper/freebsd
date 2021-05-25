@@ -294,7 +294,7 @@ ofw_pcibus_child_deleted(device_t dev, device_t child)
 {
 	struct ofw_pcibus_devinfo *dinfo;
 
-	dinfo = device_get_ivars(dev);
+	dinfo = device_get_ivars(child);
 	ofw_bus_gen_destroy_devinfo(&dinfo->opd_obdinfo);
 	pci_child_deleted(dev, child);
 }
@@ -312,7 +312,7 @@ ofw_pcibus_child_pnpinfo_str_method(device_t cbdev, device_t child, char *buf,
 
 	return (0);
 }
-	
+
 static int
 ofw_pcibus_assign_interrupt(device_t dev, device_t child)
 {
@@ -324,12 +324,12 @@ ofw_pcibus_assign_interrupt(device_t dev, device_t child)
 
 	if (node == -1) {
 		/* Non-firmware enumerated child, use standard routing */
-	
+
 		intr[0] = pci_get_intpin(child);
 		return (PCIB_ROUTE_INTERRUPT(device_get_parent(dev), child, 
 		    intr[0]));
 	}
-	
+
 	/*
 	 * Try to determine the node's interrupt parent so we know which
 	 * PIC to use.
@@ -343,7 +343,7 @@ ofw_pcibus_assign_interrupt(device_t dev, device_t child)
 	if (iparent != -1)
 		OF_getencprop(OF_node_from_xref(iparent), "#interrupt-cells",
 		    &icells, sizeof(icells));
-	
+
 	/*
 	 * Any AAPL,interrupts property gets priority and is
 	 * fully specified (i.e. does not need routing)
@@ -362,7 +362,7 @@ ofw_pcibus_assign_interrupt(device_t dev, device_t child)
 		/* No property: our best guess is the intpin. */
 		intr[0] = pci_get_intpin(child);
 	}
-	
+
 	/*
 	 * If we got intr from a property, it may or may not be an intpin.
 	 * For on-board devices, it frequently is not, and is completely out
@@ -385,39 +385,13 @@ ofw_pcibus_get_devinfo(device_t bus, device_t dev)
 	return (&dinfo->opd_obdinfo);
 }
 
-static int
-ofw_pcibus_parse_associativity(device_t dev, int *domain)
-{
-	phandle_t node;
-	cell_t associativity[5];
-	int res;
-
-	if ((node = ofw_bus_get_node(dev)) == -1) {
-		if (bootverbose)
-			device_printf(dev, "no ofw node found\n");
-		return (ENXIO);
-	}
-	res = OF_getproplen(node, "ibm,associativity");
-	if (res <= 0)
-		return (ENXIO);
-	OF_getencprop(node, "ibm,associativity",
-		associativity, res);
-
-	*domain = associativity[3] - 1;
-	if (bootverbose)
-		device_printf(dev, "domain(%d)\n", *domain);
-	return (0);
-}
-
 int
 ofw_pcibus_get_cpus(device_t dev, device_t child, enum cpu_sets op, size_t setsize,
     cpuset_t *cpuset)
 {
 	int d, error;
 
-	error = ofw_pcibus_parse_associativity(child, &d);
-	if (error)
-		return (bus_generic_get_cpus(dev, child, op, setsize, cpuset));
+	d = platform_node_numa_domain(ofw_bus_get_node(dev));
 
 	switch (op) {
 	case LOCAL_CPUS:
@@ -450,12 +424,7 @@ ofw_pcibus_get_cpus(device_t dev, device_t child, enum cpu_sets op, size_t setsi
 int
 ofw_pcibus_get_domain(device_t dev, device_t child, int *domain)
 {
-	int d, error;
+	*domain = platform_node_numa_domain(ofw_bus_get_node(child));
 
-	error = ofw_pcibus_parse_associativity(child, &d);
-	/* No ofw node; go up a level */
-	if (error)
-		return (bus_generic_get_domain(dev, child, domain));
-	*domain = d;
 	return (0);
 }

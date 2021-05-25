@@ -235,14 +235,17 @@ parse_pnp_list(const char *desc, char **new_desc, pnp_list *list)
 	const char *walker, *ep;
 	const char *colon, *semi;
 	struct pnp_elt *elt;
-	char *nd;
 	char type[8], key[32];
 	int off;
+	size_t new_desc_size;
+	FILE *fp;
 
 	walker = desc;
 	ep = desc + strlen(desc);
 	off = 0;
-	nd = *new_desc = malloc(strlen(desc) + 1);
+	fp = open_memstream(new_desc, &new_desc_size);
+	if (fp == NULL)
+		err(1, "Could not open new memory stream");
 	if (verbose > 1)
 		printf("Converting %s into a list\n", desc);
 	while (walker < ep) {
@@ -336,42 +339,44 @@ parse_pnp_list(const char *desc, char **new_desc, pnp_list *list)
 			off = elt->pe_offset + sizeof(void *);
 		}
 		if (elt->pe_kind & TYPE_PAIRED) {
-			char *word, *ctx;
+			char *word, *ctx, newtype;
 
 			for (word = strtok_r(key, "/", &ctx);
 			     word; word = strtok_r(NULL, "/", &ctx)) {
-				sprintf(nd, "%c:%s;", elt->pe_kind & TYPE_FLAGGED ? 'J' : 'I',
-				    word);
-				nd += strlen(nd);
+				newtype = elt->pe_kind & TYPE_FLAGGED ? 'J' : 'I';
+				fprintf(fp, "%c:%s;", newtype, word);
 			}
-			
 		}
 		else {
+			char newtype;
+
 			if (elt->pe_kind & TYPE_FLAGGED)
-				*nd++ = 'J';
+				newtype = 'J';
 			else if (elt->pe_kind & TYPE_GE)
-				*nd++ = 'G';
+				newtype = 'G';
 			else if (elt->pe_kind & TYPE_LE)
-				*nd++ = 'L';
+				newtype = 'L';
 			else if (elt->pe_kind & TYPE_MASK)
-				*nd++ = 'M';
+				newtype = 'M';
 			else if (elt->pe_kind & TYPE_INT)
-				*nd++ = 'I';
+				newtype = 'I';
 			else if (elt->pe_kind == TYPE_D)
-				*nd++ = 'D';
+				newtype = 'D';
 			else if (elt->pe_kind == TYPE_Z || elt->pe_kind == TYPE_E)
-				*nd++ = 'Z';
+				newtype = 'Z';
 			else if (elt->pe_kind == TYPE_T)
-				*nd++ = 'T';
+				newtype = 'T';
 			else
 				errx(1, "Impossible type %x\n", elt->pe_kind);
-			*nd++ = ':';
-			strcpy(nd, key);
-			nd += strlen(nd);
-			*nd++ = ';';
+			fprintf(fp, "%c:%s;", newtype, key);
 		}
 	}
-	*nd++ = '\0';
+	if (ferror(fp) != 0) {
+		fclose(fp);
+		errx(1, "Exhausted space converting description %s", desc);
+	}
+	if (fclose(fp) != 0)
+		errx(1, "Failed to close memory stream");
 	return (0);
 err:
 	errx(1, "Parse error of description string %s", desc);
@@ -549,9 +554,9 @@ read_kld(char *filename, char *kldname)
 {
 	struct mod_metadata md;
 	struct elf_file ef;
-	void **p, **orgp;
+	void **p;
 	int error, eftype;
-	long start, finish, entries;
+	long start, finish, entries, i;
 	char cval[MAXMODNAME + 1];
 
 	if (verbose || dflag)
@@ -575,18 +580,53 @@ read_kld(char *filename, char *kldname)
 		    &entries));
 		check(EF_SEG_READ_ENTRY_REL(&ef, start, sizeof(*p) * entries,
 		    (void *)&p));
-		orgp = p;
-		while(entries--) {
-			check(EF_SEG_READ_REL(&ef, (Elf_Off)*p, sizeof(md),
+		/*
+		 * Do a first pass to find MDT_MODULE.  It is required to be
+		 * ordered first in the output linker.hints stream because it
+		 * serves as an implicit record boundary between distinct klds
+		 * in the stream.  Other MDTs only make sense in the context of
+		 * a specific MDT_MODULE.
+		 *
+		 * Some compilers (e.g., GCC 6.4.0 xtoolchain) or binutils
+		 * (e.g., GNU binutils 2.32 objcopy/ld.bfd) can reorder
+		 * MODULE_METADATA set entries relative to the source ordering.
+		 * This is permitted by the C standard; memory layout of
+		 * file-scope objects is left implementation-defined.  There is
+		 * no requirement that source code ordering is retained.
+		 *
+		 * Handle that here by taking two passes to ensure MDT_MODULE
+		 * records are emitted to linker.hints before other MDT records
+		 * in the same kld.
+		 */
+		for (i = 0; i < entries; i++) {
+			check(EF_SEG_READ_REL(&ef, (Elf_Off)p[i], sizeof(md),
 			    &md));
-			p++;
 			check(EF_SEG_READ_STRING(&ef, (Elf_Off)md.md_cval,
 			    sizeof(cval), cval));
-			parse_entry(&md, cval, &ef, kldname);
+			if (md.md_type == MDT_MODULE) {
+				parse_entry(&md, cval, &ef, kldname);
+				break;
+			}
+		}
+		if (error != 0) {
+			warnc(error, "error while reading %s", filename);
+			break;
+		}
+
+		/*
+		 * Second pass for all !MDT_MODULE entries.
+		 */
+		for (i = 0; i < entries; i++) {
+			check(EF_SEG_READ_REL(&ef, (Elf_Off)p[i], sizeof(md),
+			    &md));
+			check(EF_SEG_READ_STRING(&ef, (Elf_Off)md.md_cval,
+			    sizeof(cval), cval));
+			if (md.md_type != MDT_MODULE)
+				parse_entry(&md, cval, &ef, kldname);
 		}
 		if (error != 0)
 			warnc(error, "error while reading %s", filename);
-		free(orgp);
+		free(p);
 	} while(0);
 	EF_CLOSE(&ef);
 	return (error);

@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -662,8 +662,8 @@ AcpiPsParseAml (
             }
 
             /*
-             * If the transfer to the new method method call worked
-             *, a new walk state was created -- get it
+             * If the transfer to the new method method call worked,
+             * a new walk state was created -- get it
              */
             WalkState = AcpiDsGetCurrentWalkState (Thread);
             continue;

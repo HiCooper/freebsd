@@ -151,10 +151,9 @@ qla_add_sysctls(qla_host_t *ha)
         device_t dev = ha->pci_dev;
 
         SYSCTL_ADD_PROC(device_get_sysctl_ctx(dev),
-                SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
-                OID_AUTO, "stats", CTLTYPE_INT | CTLFLAG_RD,
-                (void *)ha, 0,
-                qla_sysctl_get_stats, "I", "Statistics");
+            SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
+            OID_AUTO, "stats", CTLTYPE_INT | CTLFLAG_RD | CTLFLAG_NEEDGIANT,
+	    (void *)ha, 0, qla_sysctl_get_stats, "I", "Statistics");
 
 	SYSCTL_ADD_STRING(device_get_sysctl_ctx(dev),
 		SYSCTL_CHILDREN(device_get_sysctl_tree(dev)),
@@ -226,7 +225,7 @@ qla_watchdog(void *arg)
 			taskqueue_enqueue(ha->tx_tq, &ha->tx_task);
 		}
 	}
-	ha->watchdog_ticks = ha->watchdog_ticks++ % 1000;
+	ha->watchdog_ticks = (ha->watchdog_ticks + 1) % 1000;
 	callout_reset(&ha->tx_callout, QLA_WATCHDOG_CALLOUT_TICKS,
 		qla_watchdog, ha);
 }
@@ -379,7 +378,7 @@ qla_pci_attach(device_t dev)
 
 	ha->flags.qla_watchdog_active = 1;
 	ha->flags.qla_watchdog_pause = 1;
-	
+
 	callout_init(&ha->tx_callout, 1);
 
 	/* create ioctl device interface */
@@ -463,7 +462,6 @@ qla_sysctl_get_stats(SYSCTL_HANDLER_ARGS)
 	QL_DPRINT2((ha->pci_dev, "%s: called ret %d\n", __func__, ret));
 	return (err);
 }
-
 
 /*
  * Name:	qla_release
@@ -640,7 +638,7 @@ qla_alloc_parent_dma_tag(qla_host_t *ha)
         }
 
         ha->flags.parent_tag = 1;
-	
+
 	return (0);
 }
 
@@ -672,6 +670,7 @@ qla_init_ifnet(device_t dev, qla_host_t *ha)
 
 	if_initname(ifp, device_get_name(dev), device_get_unit(dev));
 
+	ifp->if_mtu = ETHERMTU;
 	ifp->if_baudrate = IF_Gbps(10);
 	ifp->if_init = qla_init;
 	ifp->if_softc = ha;
@@ -763,32 +762,26 @@ qla_init(void *arg)
 	QL_DPRINT2((ha->pci_dev, "%s: exit\n", __func__));
 }
 
+static u_int
+qla_copy_maddr(void *arg, struct sockaddr_dl *sdl, u_int mcnt)
+{
+	uint8_t *mta = arg;
+
+	if (mcnt == Q8_MAX_NUM_MULTICAST_ADDRS)
+		return (0);
+	bcopy(LLADDR(sdl), &mta[mcnt * Q8_MAC_ADDR_LEN], Q8_MAC_ADDR_LEN);
+
+	return (1);
+}
+
 static void
 qla_set_multi(qla_host_t *ha, uint32_t add_multi)
 {
 	uint8_t mta[Q8_MAX_NUM_MULTICAST_ADDRS * Q8_MAC_ADDR_LEN];
-	struct ifmultiaddr *ifma;
-	int mcnt = 0;
 	struct ifnet *ifp = ha->ifp;
+	int mcnt;
 
-	if_maddr_rlock(ifp);
-
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-
-		if (mcnt == Q8_MAX_NUM_MULTICAST_ADDRS)
-			break;
-
-		bcopy(LLADDR((struct sockaddr_dl *) ifma->ifma_addr),
-			&mta[mcnt * Q8_MAC_ADDR_LEN], Q8_MAC_ADDR_LEN);
-
-		mcnt++;
-	}
-
-	if_maddr_runlock(ifp);
-
+	mcnt = if_foreach_llmaddr(ifp, qla_copy_maddr, mta);
 	qla_hw_set_multi(ha, mta, mcnt, add_multi);
 
 	return;
@@ -975,7 +968,7 @@ qla_media_status(struct ifnet *ifp, struct ifmediareq *ifmr)
 
 	ifmr->ifm_status = IFM_AVALID;
 	ifmr->ifm_active = IFM_ETHER;
-	
+
 	qla_update_link_state(ha);
 	if (ha->hw.flags.link_up) {
 		ifmr->ifm_status |= IFM_ACTIVE;
@@ -1067,7 +1060,6 @@ qla_send(qla_host_t *ha, struct mbuf **m_headp)
 			BUS_DMA_NOWAIT);
 
 	if (ret == EFBIG) {
-
 		struct mbuf *m;
 
 		QL_DPRINT8((ha->pci_dev, "%s: EFBIG [%d]\n", __func__,
@@ -1087,7 +1079,6 @@ qla_send(qla_host_t *ha, struct mbuf **m_headp)
 
 		if ((ret = bus_dmamap_load_mbuf_sg(ha->tx_tag, map, m_head,
 					segs, &nsegs, BUS_DMA_NOWAIT))) {
-
 			ha->err_tx_dmamap_load++;
 
 			device_printf(ha->pci_dev,
@@ -1197,7 +1188,6 @@ qla_clear_tx_buf(qla_host_t *ha, qla_tx_buf_t *txb)
 	QL_DPRINT2((ha->pci_dev, "%s: enter\n", __func__));
 
 	if (txb->m_head) {
-
 		bus_dmamap_unload(ha->tx_tag, txb->map);
 		bus_dmamap_destroy(ha->tx_tag, txb->map);
 
@@ -1225,7 +1215,6 @@ qla_free_xmt_bufs(qla_host_t *ha)
 	return;
 }
 
-
 static int
 qla_alloc_rcv_bufs(qla_host_t *ha)
 {
@@ -1244,7 +1233,6 @@ qla_alloc_rcv_bufs(qla_host_t *ha)
 			NULL,    /* lockfunc */
 			NULL,    /* lockfuncarg */
 			&ha->rx_tag)) {
-
 		device_printf(ha->pci_dev, "%s: rx_tag alloc failed\n",
 			__func__);
 
@@ -1264,7 +1252,6 @@ qla_alloc_rcv_bufs(qla_host_t *ha)
 	}
 
 	for (i = 0; i < NUM_RX_DESCRIPTORS; i++) {
-
 		rxb = &ha->rx_buf[i];
 
 		ret = bus_dmamap_create(ha->rx_tag, BUS_DMA_NOWAIT, &rxb->map);
@@ -1304,9 +1291,7 @@ qla_alloc_rcv_bufs(qla_host_t *ha)
 		}
 	}
 
-
 	for (i = 0; i < NUM_RX_JUMBO_DESCRIPTORS; i++) {
-
 		rxb = &ha->rx_jbuf[i];
 
 		ret = bus_dmamap_create(ha->rx_tag, BUS_DMA_NOWAIT, &rxb->map);
@@ -1413,7 +1398,6 @@ qla_get_mbuf(qla_host_t *ha, qla_rx_buf_t *rxb, struct mbuf *nmp,
 	ifp = ha->ifp;
 
 	if (mp == NULL) {
-
 		if (!jumbo) {
 			mp = m_getcl(M_NOWAIT, MT_DATA, M_PKTHDR);
 
@@ -1446,7 +1430,6 @@ qla_get_mbuf(qla_host_t *ha, qla_rx_buf_t *rxb, struct mbuf *nmp,
 		mp->m_data = mp->m_ext.ext_buf;
 		mp->m_next = NULL;
 	}
-
 
 	offset = (uint32_t)((unsigned long long)mp->m_data & 0x7ULL);
 	if (offset) {
@@ -1486,4 +1469,3 @@ qla_tx_done(void *context, int pending)
 	qla_hw_tx_done(ha);
 	qla_start(ha->ifp);
 }
-

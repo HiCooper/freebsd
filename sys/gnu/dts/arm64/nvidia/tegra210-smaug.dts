@@ -1592,7 +1592,7 @@
 			reg = <0x1a>;
 			interrupt-parent = <&gpio>;
 			interrupts = <TEGRA_GPIO(E, 6) IRQ_TYPE_LEVEL_LOW>;
-			clocks = <&tegra_car TEGRA210_CLK_CLK_OUT_2>;
+			clocks = <&tegra_pmc TEGRA_PMC_CLK_OUT_2>;
 			clock-names = "mclk";
 
 			nuvoton,jkdet-enable;
@@ -1653,6 +1653,11 @@
 
 	padctl@7009f000 {
 		status = "okay";
+
+		avdd-pll-utmip-supply = <&pp1800>;
+		avdd-pll-uerefe-supply = <&pp1050_avdd>;
+		dvdd-pex-pll-supply = <&avddio_1v05>;
+		hvdd-pex-pll-e-supply = <&pp1800>;
 
 		pads {
 			usb2 {
@@ -1750,6 +1755,13 @@
 
 		cpu@3 {
 			enable-method = "psci";
+		};
+
+		idle-states {
+			cpu-sleep {
+				arm,psci-suspend-param = <0x00010007>;
+				status = "okay";
+			};
 		};
 	};
 

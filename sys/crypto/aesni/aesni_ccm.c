@@ -58,7 +58,7 @@
 static inline __m128i
 xor_and_encrypt(__m128i a, __m128i b, const unsigned char *k, int nr)
 {
-	__m128 retval = _mm_xor_si128(a, b);
+	__m128i retval = _mm_xor_si128(a, b);
 
 	retval = AESNI_ENC(retval, k, nr);
 	return (retval);
@@ -155,7 +155,7 @@ cbc_mac_start(const unsigned char *auth_data, size_t auth_len,
 		 * already partially filled, by auth_amt, so we need
 		 * to handle that.  The last block needs to be zero padded.
 		 */
-		copy_amt = MIN(auth_len - auth_amt,
+		copy_amt = MIN(auth_len,
 		    sizeof(staging_block) - auth_amt);
 		byte_ptr = (uint8_t*)&staging_block;
 		bcopy(auth_ptr, &byte_ptr[auth_amt], copy_amt);

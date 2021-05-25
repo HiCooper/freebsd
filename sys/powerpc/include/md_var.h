@@ -41,6 +41,10 @@ extern	int	szsigcode32;
 #ifdef __powerpc64__
 extern	char	sigcode64[], sigcode64_elfv2[];
 extern	int	szsigcode64, szsigcode64_elfv2;
+
+struct	dumperinfo;
+int	minidumpsys(struct dumperinfo *);
+int	is_dumpable(vm_paddr_t);
 #endif
 
 extern	long	Maxmem;

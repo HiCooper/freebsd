@@ -172,12 +172,6 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		struct ccb_pathinq	*cpi = &ccb->cpi;
 		device_t		dev = ctrlr->dev;
 
-		/*
-		 * NVMe may have multiple LUNs on the same path. Current generation
-		 * of NVMe devives support only a single name space. Multiple name
-		 * space drives are coming, but it's unclear how we should report
-		 * them up the stack.
-		 */
 		cpi->version_num = 1;
 		cpi->hba_inquiry = 0;
 		cpi->target_sprt = 0;
@@ -203,6 +197,12 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		cpi->xport_specific.nvme.slot = pci_get_slot(dev);
 		cpi->xport_specific.nvme.function = pci_get_function(dev);
 		cpi->xport_specific.nvme.extra = 0;
+		strncpy(cpi->xport_specific.nvme.dev_name, device_get_nameunit(dev),
+		    sizeof(cpi->xport_specific.nvme.dev_name));
+		cpi->hba_vendor = pci_get_vendor(dev);
+		cpi->hba_device = pci_get_device(dev);
+		cpi->hba_subvendor = pci_get_subvendor(dev);
+		cpi->hba_subdevice = pci_get_subdevice(dev);
 		cpi->ccb_h.status = CAM_REQ_CMP;
 		break;
 	}
@@ -212,7 +212,7 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 		struct ccb_trans_settings_nvme	*nvmep;
 		struct ccb_trans_settings_nvme	*nvmex;
 		device_t dev;
-		uint32_t status, caps;
+		uint32_t status, caps, flags;
 
 		dev = ctrlr->dev;
 		cts = &ccb->cts;
@@ -221,12 +221,16 @@ nvme_sim_action(struct cam_sim *sim, union ccb *ccb)
 
 		status = pcie_read_config(dev, PCIER_LINK_STA, 2);
 		caps = pcie_read_config(dev, PCIER_LINK_CAP, 2);
-		nvmex->valid = CTS_NVME_VALID_SPEC | CTS_NVME_VALID_LINK;
+		flags = pcie_read_config(dev, PCIER_FLAGS, 2);
 		nvmex->spec = nvme_mmio_read_4(ctrlr, vs);
-		nvmex->speed = status & PCIEM_LINK_STA_SPEED;
-		nvmex->lanes = (status & PCIEM_LINK_STA_WIDTH) >> 4;
-		nvmex->max_speed = caps & PCIEM_LINK_CAP_MAX_SPEED;
-		nvmex->max_lanes = (caps & PCIEM_LINK_CAP_MAX_WIDTH) >> 4;
+		nvmex->valid = CTS_NVME_VALID_SPEC;
+		if ((flags & PCIEM_FLAGS_TYPE) == PCIEM_TYPE_ENDPOINT) {
+			nvmex->valid |= CTS_NVME_VALID_LINK;
+			nvmex->speed = status & PCIEM_LINK_STA_SPEED;
+			nvmex->lanes = (status & PCIEM_LINK_STA_WIDTH) >> 4;
+			nvmex->max_speed = caps & PCIEM_LINK_CAP_MAX_SPEED;
+			nvmex->max_lanes = (caps & PCIEM_LINK_CAP_MAX_WIDTH) >> 4;
+		}
 
 		/* XXX these should be something else maybe ? */
 		nvmep->valid = 1;
@@ -315,7 +319,7 @@ err1:
 }
 
 static void *
-nvme_sim_new_ns(struct nvme_namespace *ns, void *sc_arg)
+nvme_sim_ns_change(struct nvme_namespace *ns, void *sc_arg)
 {
 	struct nvme_sim_softc *sc = sc_arg;
 	union ccb *ccb;
@@ -326,16 +330,20 @@ nvme_sim_new_ns(struct nvme_namespace *ns, void *sc_arg)
 		return (NULL);
 	}
 
+	/*
+	 * We map the NVMe namespace idea onto the CAM unit LUN. For
+	 * each new namespace, we create a new CAM path for it. We then
+	 * rescan the path to get it to enumerate.
+	 */
 	if (xpt_create_path(&ccb->ccb_h.path, /*periph*/NULL,
 	    cam_sim_path(sc->s_sim), 0, ns->id) != CAM_REQ_CMP) {
 		printf("unable to create path for rescan\n");
 		xpt_free_ccb(ccb);
 		return (NULL);
 	}
-
 	xpt_rescan(ccb);
 
-	return (ns);
+	return (sc_arg);
 }
 
 static void
@@ -358,7 +366,7 @@ nvme_sim_init(void)
 	if (nvme_use_nvd)
 		return;
 
-	consumer_cookie = nvme_register_consumer(nvme_sim_new_ns,
+	consumer_cookie = nvme_register_consumer(nvme_sim_ns_change,
 	    nvme_sim_new_controller, NULL, nvme_sim_controller_fail);
 }
 

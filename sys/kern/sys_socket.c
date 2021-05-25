@@ -77,7 +77,7 @@ __FBSDID("$FreeBSD$");
 #include <vm/vm_extern.h>
 #include <vm/vm_map.h>
 
-static SYSCTL_NODE(_kern_ipc, OID_AUTO, aio, CTLFLAG_RD, NULL,
+static SYSCTL_NODE(_kern_ipc, OID_AUTO, aio, CTLFLAG_RD | CTLFLAG_MPSAFE, NULL,
     "socket AIO stats");
 
 static int empty_results;
@@ -207,21 +207,34 @@ soo_ioctl(struct file *fp, u_long cmd, void *data, struct ucred *active_cred,
 
 	case FIONREAD:
 		/* Unlocked read. */
-		*(int *)data = sbavail(&so->so_rcv);
+		if (SOLISTENING(so)) {
+			error = EINVAL;
+		} else {
+			*(int *)data = sbavail(&so->so_rcv);
+		}
 		break;
 
 	case FIONWRITE:
 		/* Unlocked read. */
-		*(int *)data = sbavail(&so->so_snd);
+		if (SOLISTENING(so)) {
+			error = EINVAL;
+		} else {
+			*(int *)data = sbavail(&so->so_snd);
+		}
 		break;
 
 	case FIONSPACE:
 		/* Unlocked read. */
-		if ((so->so_snd.sb_hiwat < sbused(&so->so_snd)) ||
-		    (so->so_snd.sb_mbmax < so->so_snd.sb_mbcnt))
-			*(int *)data = 0;
-		else
-			*(int *)data = sbspace(&so->so_snd);
+		if (SOLISTENING(so)) {
+			error = EINVAL;
+		} else {
+			if ((so->so_snd.sb_hiwat < sbused(&so->so_snd)) ||
+			    (so->so_snd.sb_mbmax < so->so_snd.sb_mbcnt)) {
+				*(int *)data = 0;
+			} else {
+				*(int *)data = sbspace(&so->so_snd);
+			}
+		}
 		break;
 
 	case FIOSETOWN:
@@ -242,7 +255,11 @@ soo_ioctl(struct file *fp, u_long cmd, void *data, struct ucred *active_cred,
 
 	case SIOCATMARK:
 		/* Unlocked read. */
-		*(int *)data = (so->so_rcv.sb_state & SBS_RCVATMARK) != 0;
+		if (SOLISTENING(so)) {
+			error = EINVAL;
+		} else {
+			*(int *)data = (so->so_rcv.sb_state & SBS_RCVATMARK) != 0;
+		}
 		break;
 	default:
 		/*
@@ -287,9 +304,7 @@ soo_stat(struct file *fp, struct stat *ub, struct ucred *active_cred,
     struct thread *td)
 {
 	struct socket *so = fp->f_data;
-#ifdef MAC
 	int error;
-#endif
 
 	bzero((caddr_t)ub, sizeof (*ub));
 	ub->st_mode = S_IFSOCK;
@@ -298,6 +313,7 @@ soo_stat(struct file *fp, struct stat *ub, struct ucred *active_cred,
 	if (error)
 		return (error);
 #endif
+	SOCK_LOCK(so);
 	if (!SOLISTENING(so)) {
 		struct sockbuf *sb;
 
@@ -311,7 +327,7 @@ soo_stat(struct file *fp, struct stat *ub, struct ucred *active_cred,
 			ub->st_mode |= S_IRUSR | S_IRGRP | S_IROTH;
 		ub->st_size = sbavail(sb) - sb->sb_ctl;
 		SOCKBUF_UNLOCK(sb);
-	
+
 		sb = &so->so_snd;
 		SOCKBUF_LOCK(sb);
 		if ((sb->sb_state & SBS_CANTSENDMORE) == 0)
@@ -320,7 +336,9 @@ soo_stat(struct file *fp, struct stat *ub, struct ucred *active_cred,
 	}
 	ub->st_uid = so->so_cred->cr_uid;
 	ub->st_gid = so->so_cred->cr_gid;
-	return (*so->so_proto->pr_usrreqs->pru_sense)(so, ub);
+	error = so->so_proto->pr_usrreqs->pru_sense(so, ub);
+	SOCK_UNLOCK(so);
+	return (error);
 }
 
 /*

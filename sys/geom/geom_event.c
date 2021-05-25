@@ -131,7 +131,6 @@ g_attr_changed_event(void *arg, int flag)
 
 	g_topology_assert();
 	if (flag != EV_CANCEL && g_shutdown == 0) {
-
 		/*
 		 * Tell all consumers of the change.
 		 */
@@ -170,7 +169,7 @@ g_orphan_provider(struct g_provider *pp, int error)
 	KASSERT(error != 0,
 	    ("g_orphan_provider(%p(%s), 0) error must be non-zero\n",
 	     pp, pp->name));
-	
+
 	pp->error = error;
 	mtx_lock(&g_eventlock);
 	KASSERT(!(pp->flags & G_PF_ORPHAN),
@@ -241,10 +240,7 @@ one_event(void)
 
 	g_topology_assert();
 	mtx_lock(&g_eventlock);
-	TAILQ_FOREACH(pp, &g_doorstep, orphan) {
-		if (pp->nstart == pp->nend)
-			break;
-	}
+	pp = TAILQ_FIRST(&g_doorstep);
 	if (pp != NULL) {
 		G_VALID_PROVIDER(pp);
 		TAILQ_REMOVE(&g_doorstep, pp, orphan);
@@ -299,7 +295,7 @@ g_run_events()
 		} else {
 			g_topology_unlock();
 			msleep(&g_wait_event, &g_eventlock, PRIBIO | PDROP,
-			    "-", TAILQ_EMPTY(&g_doorstep) ? 0 : hz / 10);
+			    "-", 0);
 		}
 	}
 	/* NOTREACHED */
@@ -378,6 +374,9 @@ g_post_event_x(g_event_t *func, void *arg, int flag, int wuflag, struct g_event 
 	if (epp != NULL)
 		*epp = ep;
 	curthread->td_pflags |= TDP_GEOM;
+	thread_lock(curthread);
+	curthread->td_flags |= TDF_ASTPENDING;
+	thread_unlock(curthread);
 	return (0);
 }
 

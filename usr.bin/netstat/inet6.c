@@ -1055,6 +1055,16 @@ icmp6_stats(u_long off, const char *name, int af1 __unused, int proto __unused)
 	    "{N:/bad router advertisement message%s}\n");
 	p(icp6s_badredirect, "\t{:bad-redirect/%ju} "
 	    "{N:/bad redirect message%s}\n");
+	p(icp6s_overflowdefrtr, "\t{:default-routers-overflows/%ju} "
+	    "{N:/default routers overflow%s}\n");
+	p(icp6s_overflowprfx, "\t{:prefixes-overflows/%ju} "
+	    "{N:/prefix overflow%s}\n");
+	p(icp6s_overflownndp, "\t{:neighbour-entries-overflows/%ju} "
+	    "{N:/neighbour entries overflow%s}\n");
+	p(icp6s_overflowredirect, "\t{:redirect-overflows/%ju} "
+	    "{N:/redirect overflow%s}\n");
+	p(icp6s_invlhlim, "\t{:dropped-invalid-hop-limit/%ju} "
+	    "{N:/message%s with invalid hop limit}\n");
 	xo_close_container("errors");
 	p(icp6s_pmtuchg, "\t{:path-mtu-changes/%ju} {N:/path MTU change%s}\n");
 #undef p
@@ -1310,7 +1320,7 @@ inet6print(const char *container, struct in6_addr *in6, int port,
  */
 
 char *
-inet6name(struct in6_addr *in6p)
+inet6name(struct in6_addr *ia6)
 {
 	struct sockaddr_in6 sin6;
 	char hbuf[NI_MAXHOST], *cp;
@@ -1319,7 +1329,7 @@ inet6name(struct in6_addr *in6p)
 	static int first = 1;
 	int flags, error;
 
-	if (IN6_IS_ADDR_UNSPECIFIED(in6p)) {
+	if (IN6_IS_ADDR_UNSPECIFIED(ia6)) {
 		strcpy(line, "*");
 		return (line);
 	}
@@ -1332,9 +1342,9 @@ inet6name(struct in6_addr *in6p)
 			domain[0] = 0;
 	}
 	memset(&sin6, 0, sizeof(sin6));
-	memcpy(&sin6.sin6_addr, in6p, sizeof(*in6p));
+	memcpy(&sin6.sin6_addr, ia6, sizeof(*ia6));
 	sin6.sin6_family = AF_INET6;
-	/* XXX: in6p.s6_addr[2] can contain scopeid. */
+	/* XXX: ia6.s6_addr[2] can contain scopeid. */
 	in6_fillscopeid(&sin6);
 	flags = (numeric_addr) ? NI_NUMERICHOST : 0;
 	error = getnameinfo((struct sockaddr *)&sin6, sizeof(sin6), hbuf,

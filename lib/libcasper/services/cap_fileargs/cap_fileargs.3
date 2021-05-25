@@ -24,7 +24,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd April 17, 2019
+.Dd May 5, 2020
 .Dt CAP_FILEARGS 3
 .Os
 .Sh NAME
@@ -247,7 +247,7 @@ for (i = 0; i < argc; i++) {
 	fd = fileargs_open(fa, argv[i]);
 	if (fd < 0)
 		err(1, "unable to open file %s", argv[i]);
-	printf("File %s opened in capability mode\n", argv[i]);
+	printf("File %s opened in capability mode\en", argv[i]);
 	close(fd);
 }
 
@@ -263,6 +263,11 @@ fileargs_free(fa);
 .Xr getopt 3 ,
 .Xr capsicum 4 ,
 .Xr nv 9
+.Sh HISTORY
+The
+.Nm cap_fileargs
+service first appeared in
+.Fx 10.3 .
 .Sh BUGS
 The
 .Lb cap_fileargs

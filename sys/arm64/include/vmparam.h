@@ -156,8 +156,8 @@
 #define	VM_MIN_KERNEL_ADDRESS	(0xffff000000000000UL)
 #define	VM_MAX_KERNEL_ADDRESS	(0xffff008000000000UL)
 
-/* 2 TiB maximum for the direct map region */
-#define	DMAP_MIN_ADDRESS	(0xfffffd0000000000UL)
+/* 95 TiB maximum for the direct map region */
+#define	DMAP_MIN_ADDRESS	(0xffffa00000000000UL)
 #define	DMAP_MAX_ADDRESS	(0xffffff0000000000UL)
 
 #define	DMAP_MIN_PHYSADDR	(dmap_phys_base)
@@ -234,7 +234,6 @@
 extern vm_paddr_t dmap_phys_base;
 extern vm_paddr_t dmap_phys_max;
 extern vm_offset_t dmap_max_addr;
-extern u_int tsb_kernel_ldd_phys;
 extern vm_offset_t vm_max_kernel_address;
 extern vm_offset_t init_pt_va;
 
@@ -243,5 +242,15 @@ extern vm_offset_t init_pt_va;
 #define	ZERO_REGION_SIZE	(64 * 1024)	/* 64KB */
 
 #define	DEVMAP_MAX_VADDR	VM_MAX_KERNEL_ADDRESS
+
+/*
+ * The pmap can create non-transparent large page mappings.
+ */
+#define	PMAP_HAS_LARGEPAGES	1
+
+/*
+ * Need a page dump array for minidump.
+ */
+#define MINIDUMP_PAGE_TRACKING	1
 
 #endif /* !_MACHINE_VMPARAM_H_ */

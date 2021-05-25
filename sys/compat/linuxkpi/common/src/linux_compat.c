@@ -86,12 +86,14 @@ __FBSDID("$FreeBSD$");
 #include <linux/compat.h>
 #include <linux/poll.h>
 #include <linux/smp.h>
+#include <linux/wait_bit.h>
 
 #if defined(__i386__) || defined(__amd64__)
 #include <asm/smp.h>
 #endif
 
-SYSCTL_NODE(_compat, OID_AUTO, linuxkpi, CTLFLAG_RW, 0, "LinuxKPI parameters");
+SYSCTL_NODE(_compat, OID_AUTO, linuxkpi, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "LinuxKPI parameters");
 
 int linuxkpi_debug;
 SYSCTL_INT(_compat_linuxkpi, OID_AUTO, debug, CTLFLAG_RWTUN,
@@ -117,6 +119,9 @@ struct list_head pci_devices;
 spinlock_t pci_lock;
 
 unsigned long linux_timer_hz_mask;
+
+wait_queue_head_t linux_bit_waitq;
+wait_queue_head_t linux_var_waitq;
 
 int
 panic_cmp(struct rb_node *one, struct rb_node *two)
@@ -201,7 +206,6 @@ kobject_add_complete(struct kobject *kobj, struct kobject *parent)
 		}
 		if (error)
 			sysfs_remove_dir(kobj);
-
 	}
 	return (error);
 }
@@ -418,22 +422,15 @@ linux_kq_unlock(void *arg)
 }
 
 static void
-linux_kq_lock_owned(void *arg)
+linux_kq_assert_lock(void *arg, int what)
 {
 #ifdef INVARIANTS
 	spinlock_t *s = arg;
 
-	mtx_assert(&s->m, MA_OWNED);
-#endif
-}
-
-static void
-linux_kq_lock_unowned(void *arg)
-{
-#ifdef INVARIANTS
-	spinlock_t *s = arg;
-
-	mtx_assert(&s->m, MA_NOTOWNED);
+	if (what == LA_LOCKED)
+		mtx_assert(&s->m, MA_OWNED);
+	else
+		mtx_assert(&s->m, MA_NOTOWNED);
 #endif
 }
 
@@ -453,8 +450,7 @@ linux_file_alloc(void)
 	/* setup fields needed by kqueue support */
 	spin_lock_init(&filp->f_kqlock);
 	knlist_init(&filp->f_selinfo.si_note, &filp->f_kqlock,
-	    linux_kq_lock, linux_kq_unlock,
-	    linux_kq_lock_owned, linux_kq_lock_unowned);
+	    linux_kq_lock, linux_kq_unlock, linux_kq_assert_lock);
 
 	return (filp);
 }
@@ -508,15 +504,10 @@ linux_cdev_pager_fault(vm_object_t vm_obj, vm_ooffset_t offset, int prot,
 			page = vm_page_getfake(paddr, vm_obj->memattr);
 			VM_OBJECT_WLOCK(vm_obj);
 
-			vm_page_replace_checked(page, vm_obj,
-			    (*mres)->pindex, *mres);
-
-			vm_page_lock(*mres);
-			vm_page_free(*mres);
-			vm_page_unlock(*mres);
+			vm_page_replace(page, vm_obj, (*mres)->pindex, *mres);
 			*mres = page;
 		}
-		page->valid = VM_PAGE_BITS_ALL;
+		vm_page_valid(page);
 		return (VM_PAGER_OK);
 	}
 	return (VM_PAGER_FAIL);
@@ -529,14 +520,14 @@ linux_cdev_pager_populate(vm_object_t vm_obj, vm_pindex_t pidx, int fault_type,
 	struct vm_area_struct *vmap;
 	int err;
 
-	linux_set_current(curthread);
-
 	/* get VM area structure */
 	vmap = linux_cdev_handle_find(vm_obj->handle);
 	MPASS(vmap != NULL);
 	MPASS(vmap->vm_private_data == vm_obj->handle);
 
 	VM_OBJECT_WUNLOCK(vm_obj);
+
+	linux_set_current(curthread);
 
 	down_write(&vmap->vm_mm->mmap_sem);
 	if (unlikely(vmap->vm_ops == NULL)) {
@@ -1011,7 +1002,6 @@ linux_poll_wakeup_state(atomic_t *v, const uint8_t *pstate)
 
 	return (c);
 }
-
 
 static int
 linux_poll_wakeup_callback(wait_queue_t *wq, unsigned int wq_state, int flags, void *key)
@@ -1494,6 +1484,7 @@ static int
 linux_file_close(struct file *file, struct thread *td)
 {
 	struct linux_file *filp;
+	int (*release)(struct inode *, struct linux_file *);
 	const struct file_operations *fop;
 	struct linux_cdev *ldev;
 	int error;
@@ -1503,13 +1494,21 @@ linux_file_close(struct file *file, struct thread *td)
 	KASSERT(file_count(filp) == 0,
 	    ("File refcount(%d) is not zero", file_count(filp)));
 
+	if (td == NULL)
+		td = curthread;
+
 	error = 0;
 	filp->f_flags = file->f_flag;
 	linux_set_current(td);
 	linux_poll_wait_dequeue(filp);
 	linux_get_fop(filp, &fop, &ldev);
-	if (fop->release != NULL)
-		error = -OPW(file, td, fop->release(filp->f_vnode, filp));
+	/*
+	 * Always use the real release function, if any, to avoid
+	 * leaking device resources:
+	 */
+	release = filp->f_op->release;
+	if (release != NULL)
+		error = -OPW(file, td, release(filp->f_vnode, filp));
 	funsetown(&filp->f_sigio);
 	if (filp->f_vnode != NULL)
 		vdrop(filp->f_vnode);
@@ -1528,7 +1527,9 @@ linux_file_ioctl(struct file *fp, u_long cmd, void *data, struct ucred *cred,
 	struct linux_file *filp;
 	const struct file_operations *fop;
 	struct linux_cdev *ldev;
-	int error;
+	struct fiodgname_arg *fgn;
+	const char *p;
+	int error, i;
 
 	error = 0;
 	filp = (struct linux_file *)fp->f_data;
@@ -1555,6 +1556,23 @@ linux_file_ioctl(struct file *fp, u_long cmd, void *data, struct ucred *cred,
 		break;
 	case FIOGETOWN:
 		*(int *)data = fgetown(&filp->f_sigio);
+		break;
+	case FIODGNAME:
+#ifdef	COMPAT_FREEBSD32
+	case FIODGNAME_32:
+#endif
+		if (filp->f_cdev == NULL || filp->f_cdev->cdev == NULL) {
+			error = ENXIO;
+			break;
+		}
+		fgn = data;
+		p = devtoname(filp->f_cdev->cdev);
+		i = strlen(p) + 1;
+		if (i > fgn->len) {
+			error = EINVAL;
+			break;
+		}
+		error = copyout(p, fiodgname_buf_get_ptr(fgn, cmd), i);
 		break;
 	default:
 		error = linux_file_ioctl_sub(fp, filp, fop, cmd, data, td);
@@ -1667,8 +1685,8 @@ linux_file_stat(struct file *fp, struct stat *sb, struct ucred *active_cred,
 	vp = filp->f_vnode;
 
 	vn_lock(vp, LK_SHARED | LK_RETRY);
-	error = vn_stat(vp, sb, td->td_ucred, NOCRED, td);
-	VOP_UNLOCK(vp, 0);
+	error = VOP_STAT(vp, sb, td->td_ucred, NOCRED, td);
+	VOP_UNLOCK(vp);
 
 	return (error);
 }
@@ -1807,7 +1825,6 @@ iounmap(void *addr)
 	kfree(vmmap);
 }
 
-
 void *
 vmap(struct page **pages, unsigned int count, unsigned long flags, int prot)
 {
@@ -1879,14 +1896,19 @@ linux_timer_callback_wrapper(void *context)
 	timer->function(timer->data);
 }
 
-void
+int
 mod_timer(struct timer_list *timer, int expires)
 {
+	int ret;
 
 	timer->expires = expires;
-	callout_reset(&timer->callout,
+	ret = callout_reset(&timer->callout,
 	    linux_timer_jiffies_until(expires),
 	    &linux_timer_callback_wrapper, timer);
+
+	MPASS(ret == 0 || ret == 1);
+
+	return (ret == 1);
 }
 
 void
@@ -1916,9 +1938,47 @@ del_timer(struct timer_list *timer)
 	return (1);
 }
 
+int
+del_timer_sync(struct timer_list *timer)
+{
+
+	if (callout_drain(&(timer)->callout) == -1)
+		return (0);
+	return (1);
+}
+
+/* greatest common divisor, Euclid equation */
+static uint64_t
+lkpi_gcd_64(uint64_t a, uint64_t b)
+{
+	uint64_t an;
+	uint64_t bn;
+
+	while (b != 0) {
+		an = b;
+		bn = a % b;
+		a = an;
+		b = bn;
+	}
+	return (a);
+}
+
+uint64_t lkpi_nsec2hz_rem;
+uint64_t lkpi_nsec2hz_div = 1000000000ULL;
+uint64_t lkpi_nsec2hz_max;
+
+uint64_t lkpi_usec2hz_rem;
+uint64_t lkpi_usec2hz_div = 1000000ULL;
+uint64_t lkpi_usec2hz_max;
+
+uint64_t lkpi_msec2hz_rem;
+uint64_t lkpi_msec2hz_div = 1000ULL;
+uint64_t lkpi_msec2hz_max;
+
 static void
 linux_timer_init(void *arg)
 {
+	uint64_t gcd;
 
 	/*
 	 * Compute an internal HZ value which can divide 2**32 to
@@ -1929,6 +1989,27 @@ linux_timer_init(void *arg)
 	while (linux_timer_hz_mask < (unsigned long)hz)
 		linux_timer_hz_mask *= 2;
 	linux_timer_hz_mask--;
+
+	/* compute some internal constants */
+
+	lkpi_nsec2hz_rem = hz;
+	lkpi_usec2hz_rem = hz;
+	lkpi_msec2hz_rem = hz;
+
+	gcd = lkpi_gcd_64(lkpi_nsec2hz_rem, lkpi_nsec2hz_div);
+	lkpi_nsec2hz_rem /= gcd;
+	lkpi_nsec2hz_div /= gcd;
+	lkpi_nsec2hz_max = -1ULL / lkpi_nsec2hz_rem;
+
+	gcd = lkpi_gcd_64(lkpi_usec2hz_rem, lkpi_usec2hz_div);
+	lkpi_usec2hz_rem /= gcd;
+	lkpi_usec2hz_div /= gcd;
+	lkpi_usec2hz_max = -1ULL / lkpi_usec2hz_rem;
+
+	gcd = lkpi_gcd_64(lkpi_msec2hz_rem, lkpi_msec2hz_div);
+	lkpi_msec2hz_rem /= gcd;
+	lkpi_msec2hz_div /= gcd;
+	lkpi_msec2hz_max = -1ULL / lkpi_msec2hz_rem;
 }
 SYSINIT(linux_timer, SI_SUB_DRIVERS, SI_ORDER_FIRST, linux_timer_init, NULL);
 
@@ -2424,8 +2505,8 @@ linux_compat_init(void *arg)
 	kobject_init(&linux_root_device.kobj, &linux_dev_ktype);
 	kobject_set_name(&linux_root_device.kobj, "device");
 	linux_root_device.kobj.oidp = SYSCTL_ADD_NODE(NULL,
-	    SYSCTL_CHILDREN(rootoid), OID_AUTO, "device", CTLFLAG_RD, NULL,
-	    "device");
+	    SYSCTL_CHILDREN(rootoid), OID_AUTO, "device",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "device");
 	linux_root_device.bsddev = root_bus;
 	linux_class_misc.name = "misc";
 	class_register(&linux_class_misc);
@@ -2435,6 +2516,8 @@ linux_compat_init(void *arg)
 	mtx_init(&vmmaplock, "IO Map lock", NULL, MTX_DEF);
 	for (i = 0; i < VMMAP_HASH_SIZE; i++)
 		LIST_INIT(&vmmaphead[i]);
+	init_waitqueue_head(&linux_bit_waitq);
+	init_waitqueue_head(&linux_var_waitq);
 }
 SYSINIT(linux_compat, SI_SUB_DRIVERS, SI_ORDER_SECOND, linux_compat_init, NULL);
 

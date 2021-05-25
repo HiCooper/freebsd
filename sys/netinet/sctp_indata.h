@@ -48,7 +48,6 @@ sctp_build_readq_entry(struct sctp_tcb *stcb,
     uint32_t mid, uint8_t flags,
     struct mbuf *dm);
 
-
 #define sctp_build_readq_entry_mac(_ctl, in_it, context, net, tsn, ppid, sid, flags, dm, tfsn, mid) do { \
 	if (_ctl) { \
 		atomic_add_int(&((net)->ref_count), 1); \
@@ -61,7 +60,6 @@ sctp_build_readq_entry(struct sctp_tcb *stcb,
 		(_ctl)->sinfo_ppid = ppid; \
 		(_ctl)->sinfo_context = context; \
 		(_ctl)->fsn_included = 0xffffffff; \
-		(_ctl)->top_fsn = 0xffffffff; \
 		(_ctl)->sinfo_tsn = tsn; \
 		(_ctl)->sinfo_cumtsn = tsn; \
 		(_ctl)->sinfo_assoc_id = sctp_get_associd((in_it)); \
@@ -69,10 +67,11 @@ sctp_build_readq_entry(struct sctp_tcb *stcb,
 		(_ctl)->data = dm; \
 		(_ctl)->stcb = (in_it); \
 		(_ctl)->port_from = (in_it)->rport; \
+		if ((in_it)->asoc.state & SCTP_STATE_ABOUT_TO_BE_FREED) { \
+			(_ctl)->do_not_ref_stcb = 1; \
+		}\
 	} \
 } while (0)
-
-
 
 struct mbuf *
 sctp_build_ctl_nchunk(struct sctp_inpcb *inp,

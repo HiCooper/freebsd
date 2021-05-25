@@ -99,19 +99,17 @@ bus_dma_dflt_lock(void *arg, bus_dma_lock_op_t op)
 int
 bus_dma_run_filter(struct bus_dma_tag_common *tc, bus_addr_t paddr)
 {
-	int retval;
 
-	retval = 0;
-	do {
-		if (((paddr > tc->lowaddr && paddr <= tc->highaddr) ||
-		    ((paddr & (tc->alignment - 1)) != 0)) &&
+	while (tc != NULL) {
+		if ((paddr > tc->lowaddr && paddr <= tc->highaddr) &&
 		    (tc->filter == NULL ||
 		    (*tc->filter)(tc->filterarg, paddr) != 0))
-			retval = 1;
+			return (1);
 
 		tc = tc->parent;		
-	} while (retval == 0 && tc != NULL);
-	return (retval);
+	}
+
+	return (0);
 }
 
 int
@@ -167,6 +165,7 @@ common_bus_dma_tag_create(struct bus_dma_tag_common *parent,
 		common->impl = parent->impl;
 		common->lowaddr = MIN(parent->lowaddr, common->lowaddr);
 		common->highaddr = MAX(parent->highaddr, common->highaddr);
+		common->alignment = MAX(parent->alignment, common->alignment);
 		if (common->boundary == 0)
 			common->boundary = parent->boundary;
 		else if (parent->boundary != 0) {
@@ -212,6 +211,29 @@ bus_dma_tag_create(bus_dma_tag_t parent, bus_size_t alignment,
 		    nsegments, maxsegsz, flags, lockfunc, lockfuncarg, dmat);
 	}
 	return (error);
+}
+
+void
+bus_dma_template_clone(bus_dma_template_t *t, bus_dma_tag_t dmat)
+{
+	struct bus_dma_tag_common *common;
+
+	if (t == NULL || dmat == NULL)
+		return;
+
+	common = (struct bus_dma_tag_common *)dmat;
+
+	t->parent = (bus_dma_tag_t)common->parent;
+	t->alignment = common->alignment;
+	t->boundary = common->boundary;
+	t->lowaddr = common->lowaddr;
+	t->highaddr = common->highaddr;
+	t->maxsize = common->maxsize;
+	t->nsegments = common->nsegments;
+	t->maxsegsize = common->maxsegsz;
+	t->flags = common->flags;
+	t->lockfunc = common->lockfunc;
+	t->lockfuncarg = common->lockfuncarg;
 }
 
 int

@@ -1216,7 +1216,7 @@ agp_i830_install_gatt_init(struct agp_i810_softc *sc)
 	pgtblctl = bus_read_4(sc->sc_res[0], AGP_I810_PGTBL_CTL);
 	pgtblctl |= 1;
 	bus_write_4(sc->sc_res[0], AGP_I810_PGTBL_CTL, pgtblctl);
-	
+
 	sc->gatt->ag_physical = pgtblctl & ~1;
 }
 
@@ -1412,7 +1412,7 @@ agp_i810_set_aperture(device_t dev, u_int32_t aperture)
 		miscc |= AGP_I810_MISCC_WINSIZE_32;
 	else
 		miscc |= AGP_I810_MISCC_WINSIZE_64;
-	
+
 	pci_write_config(sc->bdev, AGP_I810_MISCC, miscc, 2);
 	return (0);
 }
@@ -1795,9 +1795,7 @@ agp_i810_free_memory(device_t dev, struct agp_memory *mem)
 			 */
 			VM_OBJECT_WLOCK(mem->am_obj);
 			m = vm_page_lookup(mem->am_obj, 0);
-			vm_page_lock(m);
 			vm_page_unwire(m, PQ_INACTIVE);
-			vm_page_unlock(m);
 			VM_OBJECT_WUNLOCK(mem->am_obj);
 		} else {
 			contigfree(sc->argb_cursor, mem->am_size, M_AGP);
@@ -1917,7 +1915,6 @@ static device_method_t agp_i810_methods[] = {
 	DEVMETHOD(agp_bind_memory,	agp_i810_bind_memory),
 	DEVMETHOD(agp_unbind_memory,	agp_i810_unbind_memory),
 	DEVMETHOD(agp_chipset_flush,	agp_intel_gtt_chipset_flush),
-
 	{ 0, 0 }
 };
 
@@ -1956,7 +1953,7 @@ agp_intel_gtt_insert_pages(device_t dev, u_int first_entry, u_int num_entries,
 	sc = device_get_softc(dev);
 	for (i = 0; i < num_entries; i++) {
 		MPASS(pages[i]->valid == VM_PAGE_BITS_ALL);
-		MPASS(pages[i]->wire_count > 0);
+		MPASS(pages[i]->ref_count > 0);
 		sc->match->driver->install_gtt_pte(dev, first_entry + i,
 		    VM_PAGE_TO_PHYS(pages[i]), flags);
 	}

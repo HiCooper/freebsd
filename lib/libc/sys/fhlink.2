@@ -25,7 +25,7 @@
 .\"
 .\" $FreeBSD$
 .\"
-.Dd November 29, 2018
+.Dd September 23, 2020
 .Dt FHLINK 2
 .Os
 .Sh NAME
@@ -113,6 +113,13 @@ See the description of the
 flag in the
 .Xr open 2
 manual page.
+.It Dv AT_RESOLVE_BENEATH
+Only walks paths below the topping directory.
+See the description of the
+.Dv O_RESOLVE_BENEATH
+flag in the
+.Xr open 2
+manual page.
 .El
 .Pp
 If
@@ -171,7 +178,7 @@ The link count of the file pointed at by
 .Fa fhp
 would exceed 32767.
 .It Bq Er EACCES
-A component of 
+A component of
 .Fa to
 prefix denies search permission.
 .It Bq Er EACCES
@@ -219,6 +226,8 @@ containing the directory has been exhausted.
 .It Bq Er EIO
 An I/O error occurred while reading from or writing to
 the file system to make the directory entry.
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .It Bq Er EROFS
 The requested link requires writing in a directory on a read-only file
 system.
@@ -263,6 +272,6 @@ is not
 nor a file descriptor associated with a directory.
 .El
 .Sh SEE ALSO
-.Xr fhstat 2 ,
-.Xr fhreadlink 2 ,
 .Xr fhopen 2 ,
+.Xr fhreadlink 2 ,
+.Xr fhstat 2

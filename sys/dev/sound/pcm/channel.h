@@ -325,7 +325,6 @@ uint32_t snd_afmt2str(uint32_t, char *, size_t);
 
 #define AFMTSTR_LEN	16
 
-
 extern int chn_latency;
 extern int chn_latency_profile;
 extern int report_soft_formats;
@@ -395,7 +394,6 @@ extern int report_soft_matrix;
 				"\037PASSTHROUGH"			\
 				"\040EXCLUSIVE"
 
-
 #define CHN_F_RESET		(CHN_F_BUSY | CHN_F_DEAD |		\
 				 CHN_F_VIRTUAL | CHN_F_HAS_VCHAN |	\
 				 CHN_F_VCHAN_DYNAMIC |			\
@@ -413,7 +411,7 @@ extern int report_soft_matrix;
 
 #define CHN_LATENCY_MIN		0
 #define CHN_LATENCY_MAX		10
-#define CHN_LATENCY_DEFAULT	5
+#define	CHN_LATENCY_DEFAULT	2	/* 21.3ms total buffering */
 #define CHN_POLICY_MIN		CHN_LATENCY_MIN
 #define CHN_POLICY_MAX		CHN_LATENCY_MAX
 #define CHN_POLICY_DEFAULT	CHN_LATENCY_DEFAULT

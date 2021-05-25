@@ -211,6 +211,18 @@ if_clone_create(char *name, size_t len, caddr_t params)
 	return (if_clone_createif(ifc, name, len, params));
 }
 
+void
+if_clone_addif(struct if_clone *ifc, struct ifnet *ifp)
+{
+
+	if ((ifc->ifc_flags & IFC_NOGROUP) == 0)
+		if_addgroup(ifp, ifc->ifc_name);
+
+	IF_CLONE_LOCK(ifc);
+	IFC_IFLIST_INSERT(ifc, ifp);
+	IF_CLONE_UNLOCK(ifc);
+}
+
 /*
  * Create a clone network interface.
  */
@@ -227,18 +239,13 @@ if_clone_createif(struct if_clone *ifc, char *name, size_t len, caddr_t params)
 		err = ifc_simple_create(ifc, name, len, params);
 	else
 		err = (*ifc->ifc_create)(ifc, name, len, params);
-	
+
 	if (!err) {
 		ifp = ifunit(name);
 		if (ifp == NULL)
 			panic("%s: lookup failed for %s", __func__, name);
 
-		if ((ifc->ifc_flags & IFC_NOGROUP) == 0)
-			if_addgroup(ifp, ifc->ifc_name);
-
-		IF_CLONE_LOCK(ifc);
-		IFC_IFLIST_INSERT(ifc, ifp);
-		IF_CLONE_UNLOCK(ifc);
+		if_clone_addif(ifc, ifp);
 	}
 
 	return (err);
@@ -564,7 +571,7 @@ if_clone_addgroup(struct ifnet *ifp, struct if_clone *ifc)
 
 /*
  * A utility function to extract unit numbers from interface names of
- * the form name###.
+ * the form name###[.###].
  *
  * Returns 0 on success and an error on failure.
  */
@@ -575,7 +582,9 @@ ifc_name2unit(const char *name, int *unit)
 	int		cutoff = INT_MAX / 10;
 	int		cutlim = INT_MAX % 10;
 
-	for (cp = name; *cp != '\0' && (*cp < '0' || *cp > '9'); cp++);
+	if ((cp = strrchr(name, '.')) == NULL)
+		cp = name;
+	for (; *cp != '\0' && (*cp < '0' || *cp > '9'); cp++);
 	if (*cp == '\0') {
 		*unit = -1;
 	} else if (cp[0] == '0' && cp[1] != '\0') {
@@ -662,7 +671,7 @@ ifc_simple_match(struct if_clone *ifc, const char *name)
 {
 	const char *cp;
 	int i;
-	
+
 	/* Match the name */
 	for (cp = name, i = 0; i < strlen(ifc->ifc_name); i++, cp++) {
 		if (ifc->ifc_name[i] != *cp)
@@ -714,7 +723,6 @@ ifc_simple_create(struct if_clone *ifc, char *name, size_t len, caddr_t params)
 			 */
 			panic("if_clone_create(): interface name too long");
 		}
-
 	}
 
 	return (0);

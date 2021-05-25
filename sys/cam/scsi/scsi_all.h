@@ -264,7 +264,9 @@ struct scsi_mode_hdr_10
 	u_int8_t datalen[2];
 	u_int8_t medium_type;
 	u_int8_t dev_specific;
-	u_int8_t reserved[2];
+	u_int8_t flags;
+#define	SMH_LONGLBA	0x01
+	u_int8_t reserved;
 	u_int8_t block_descr_len[2];
 };
 
@@ -274,6 +276,20 @@ struct scsi_mode_block_descr
 	u_int8_t num_blocks[3];
 	u_int8_t reserved;
 	u_int8_t block_len[3];
+};
+
+struct scsi_mode_block_descr_dshort
+{
+	u_int8_t num_blocks[4];
+	u_int8_t reserved;
+	u_int8_t block_len[3];
+};
+
+struct scsi_mode_block_descr_dlong
+{
+	u_int8_t num_blocks[8];
+	u_int8_t reserved[4];
+	u_int8_t block_len[4];
 };
 
 struct scsi_per_res_in
@@ -568,6 +584,7 @@ struct scsi_log_sense
 #define	SLS_ERROR_NONMEDIUM_PAGE	0x06
 #define	SLS_ERROR_LASTN_PAGE		0x07
 #define	SLS_LOGICAL_BLOCK_PROVISIONING	0x0c
+#define	SLS_TEMPERATURE			0x0d
 #define	SLS_SELF_TEST_PAGE		0x10
 #define	SLS_SOLID_STATE_MEDIA		0x11
 #define	SLS_STAT_AND_PERF		0x19
@@ -680,6 +697,14 @@ struct scsi_log_informational_exceptions {
 #define	SLP_IE_GEN			0x0000
 	uint8_t	ie_asc;
 	uint8_t	ie_ascq;
+	uint8_t	temperature;
+};
+
+struct scsi_log_temperature {
+	struct scsi_log_param_header hdr;
+#define	SLP_TEMPERATURE			0x0000
+#define	SLP_REFTEMPERATURE		0x0001
+	uint8_t	reserved;
 	uint8_t	temperature;
 };
 
@@ -894,7 +919,6 @@ struct scsi_reserve_10 {
 	uint8_t control;
 };
 
-
 struct scsi_release
 {
 	u_int8_t opcode;
@@ -1073,7 +1097,6 @@ struct scsi_write_attribute
 	u_int8_t reserved3;
 	u_int8_t control;
 };
-
 
 struct scsi_read_attribute_values
 {
@@ -1391,7 +1414,6 @@ struct scsi_write_verify_16
 	uint8_t	control;
 };
 
-
 struct scsi_start_stop_unit
 {
 	u_int8_t opcode;
@@ -1457,6 +1479,32 @@ struct scsi_maintenance_in
 	uint8_t  length[4];
 	uint8_t  reserved1;
 	uint8_t  control;
+};
+
+struct scsi_report_ident_info
+{
+	uint8_t  opcode;
+	uint8_t  service_action;
+	uint8_t  reserved[4];
+	uint8_t  length[4];
+	uint8_t  type;
+#define RII_LUII		0x00
+#define RII_LUTII		0x04
+#define RII_IIS			0xfc
+	uint8_t  control;
+};
+
+struct scsi_report_ident_info_data
+{
+	uint8_t  reserved[2];
+	uint8_t  length[2];
+};
+
+struct scsi_report_ident_info_descr
+{
+	uint8_t  type;
+	uint8_t  reserved;
+	uint8_t  length[2];
 };
 
 struct scsi_report_supported_opcodes
@@ -2028,7 +2076,6 @@ struct ata_pass_32 {
 	uint8_t auxiliary[4];
 };
 
-
 #define	SC_SCSI_1 0x01
 #define	SC_SCSI_2 0x03
 
@@ -2117,7 +2164,7 @@ struct ata_pass_32 {
 #define	CHANGE_ALIASES				0x0B
 #define	SET_PRIORITY				0x0E
 #define	SET_TIMESTAMP				0x0F
-#define	MANGAEMENT_PROTOCOL_OUT			0x10
+#define	MANAGEMENT_PROTOCOL_OUT			0x10
 
 /*
  * Device Types
@@ -2318,7 +2365,6 @@ struct scsi_vpd_supported_pages
 	u_int8_t length;
 	u_int8_t page_list[0];
 };
-
 
 struct scsi_vpd_unit_serial_number
 {
@@ -2620,7 +2666,6 @@ struct scsi_vpd_scsi_ports
  */
 #define SVPD_ATA_INFORMATION		0x89
 
-
 struct scsi_vpd_tpc_descriptor
 {
 	uint8_t desc_type[2];
@@ -2763,6 +2808,19 @@ struct scsi_vpd_tpc
 };
 
 /*
+ * SCSI Feature Sets VPD Page
+ */
+struct scsi_vpd_sfs
+{
+	uint8_t device;
+	uint8_t page_code;
+#define	SVPD_SCSI_SFS			0x92
+	uint8_t page_length[2];
+	uint8_t reserved[4];
+	uint8_t codes[];
+};
+
+/*
  * Block Device Characteristics VPD Page based on
  * T10/1799-D Revision 31
  */
@@ -2803,11 +2861,15 @@ struct scsi_vpd_block_device_characteristics
 	uint8_t flags;
 #define	SVPD_VBULS		0x01
 #define	SVPD_FUAB		0x02
+#define	SVPD_BOCS		0x04
+#define	SVPD_RBWZ		0x08
 #define	SVPD_ZBC_NR		0x00	/* Not Reported */
 #define	SVPD_HAW_ZBC		0x10	/* Host Aware */
 #define	SVPD_DM_ZBC		0x20	/* Drive Managed */
 #define	SVPD_ZBC_MASK		0x30	/* Zoned mask */
-	uint8_t reserved[55];
+	uint8_t reserved[3];
+	uint8_t depopulation_time[4];
+	uint8_t reserved2[48];
 };
 
 #define SBDC_IS_PRESENT(bdc, length, field)				   \
@@ -2844,7 +2906,7 @@ struct scsi_vpd_logical_block_prov
 };
 
 /*
- * Block Limits VDP Page based on SBC-4 Revision 2
+ * Block Limits VDP Page based on SBC-4 Revision 17
  */
 struct scsi_vpd_block_limits
 {
@@ -2854,7 +2916,8 @@ struct scsi_vpd_block_limits
 	u_int8_t page_length[2];
 #define SVPD_BL_PL_BASIC	0x10
 #define SVPD_BL_PL_TP		0x3C
-	u_int8_t reserved1;
+	u_int8_t flags;
+#define	SVPD_BL_WSNZ		0x01
 	u_int8_t max_cmp_write_len;
 	u_int8_t opt_txfer_len_grain[2];
 	u_int8_t max_txfer_len[4];
@@ -3166,7 +3229,6 @@ typedef enum {
 	SSD_ELEM_MAX
 } scsi_sense_elem_type;
 
-
 struct scsi_sense_data
 {
 	uint8_t error_code;
@@ -3342,7 +3404,6 @@ struct scsi_sense_sks_field
 	uint8_t	field[2];
 };
 
-
 /* 
  * This is used for the Hardware Error (0x04), Medium Error (0x03) and
  * Recovered Error (0x01) sense keys.
@@ -3412,7 +3473,7 @@ struct scsi_sense_fru
  *
  * Maximum descriptors allowed: 1 (as of SPC-4)
  */
- 
+
 struct scsi_sense_stream
 {
 	uint8_t	desc_type;
@@ -3579,7 +3640,9 @@ struct scsi_mode_header_10
 	u_int8_t data_length[2];/* Sense data length */
 	u_int8_t medium_type;
 	u_int8_t dev_spec;
-	u_int8_t unused[2];
+	u_int8_t flags;
+#define	SMH_LONGLBA	0x01
+	u_int8_t unused;
 	u_int8_t blk_desc_len[2];
 };
 
@@ -3599,7 +3662,6 @@ struct scsi_mode_page_header_sp
 	uint8_t page_length[2];
 };
 
-
 struct scsi_mode_blk_desc
 {
 	u_int8_t density;
@@ -3610,7 +3672,6 @@ struct scsi_mode_blk_desc
 
 #define	SCSI_DEFAULT_DENSITY	0x00	/* use 'default' density */
 #define	SCSI_SAME_DENSITY	0x7f	/* use 'same' density- >= SCSI-2 only */
-
 
 /*
  * Status Byte
@@ -3916,7 +3977,6 @@ int	scsi_parse_transportid(char *transportid_str,
 			       struct malloc_type *type, int flags,
 #endif
 			       char *error_str, int error_str_len);
-
 
 int scsi_attrib_volcoh_sbuf(struct sbuf *sb,
 			    struct scsi_mam_attribute_header *hdr,
@@ -4279,17 +4339,6 @@ int scsi_get_asc(struct scsi_sense_data *sense, u_int sense_len,
 		 int show_errors);
 int scsi_get_ascq(struct scsi_sense_data *sense, u_int sense_len,
 		  int show_errors);
-static __inline void scsi_ulto2b(u_int32_t val, u_int8_t *bytes);
-static __inline void scsi_ulto3b(u_int32_t val, u_int8_t *bytes);
-static __inline void scsi_ulto4b(u_int32_t val, u_int8_t *bytes);
-static __inline void scsi_u64to8b(u_int64_t val, u_int8_t *bytes);
-static __inline uint32_t scsi_2btoul(const uint8_t *bytes);
-static __inline uint32_t scsi_3btoul(const uint8_t *bytes);
-static __inline int32_t scsi_3btol(const uint8_t *bytes);
-static __inline uint32_t scsi_4btoul(const uint8_t *bytes);
-static __inline uint64_t scsi_8btou64(const uint8_t *bytes);
-static __inline void *find_mode_page_6(struct scsi_mode_header_6 *mode_header);
-static __inline void *find_mode_page_10(struct scsi_mode_header_10 *mode_header);
 
 static __inline void
 scsi_ulto2b(u_int32_t val, u_int8_t *bytes)
@@ -4357,7 +4406,7 @@ static __inline int32_t
 scsi_3btol(const uint8_t *bytes)
 {
 	uint32_t rc = scsi_3btoul(bytes);
- 
+
 	if (rc & 0x00800000)
 		rc |= 0xff000000;
 
@@ -4380,7 +4429,7 @@ static __inline uint64_t
 scsi_8btou64(const uint8_t *bytes)
 {
         uint64_t rv;
- 
+
 	rv = (((uint64_t)bytes[0]) << 56) |
 	     (((uint64_t)bytes[1]) << 48) |
 	     (((uint64_t)bytes[2]) << 40) |

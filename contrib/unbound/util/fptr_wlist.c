@@ -81,6 +81,9 @@
 #ifdef WITH_PYTHONMODULE
 #include "pythonmod/pythonmod.h"
 #endif
+#ifdef WITH_DYNLIBMODULE
+#include "dynlibmod/dynlibmod.h"
+#endif
 #ifdef USE_CACHEDB
 #include "cachedb/cachedb.h"
 #endif
@@ -89,6 +92,12 @@
 #endif
 #ifdef CLIENT_SUBNET
 #include "edns-subnet/subnetmod.h"
+#endif
+#ifdef USE_IPSET
+#include "ipset/ipset.h"
+#endif
+#ifdef USE_DNSTAP
+#include "dnstap/dtstream.h"
 #endif
 
 int 
@@ -127,6 +136,11 @@ fptr_whitelist_comm_timer(void (*fptr)(void*))
 #endif
 	else if(fptr == &auth_xfer_timer) return 1;
 	else if(fptr == &auth_xfer_probe_timer_callback) return 1;
+	else if(fptr == &auth_xfer_transfer_timer_callback) return 1;
+	else if(fptr == &mesh_serve_expired_callback) return 1;
+#ifdef USE_DNSTAP
+	else if(fptr == &mq_wakeup_cb) return 1;
+#endif
 	return 0;
 }
 
@@ -163,6 +177,15 @@ fptr_whitelist_event(void (*fptr)(int, short, void *))
 	else if(fptr == &tube_handle_signal) return 1;
 	else if(fptr == &comm_base_handle_slow_accept) return 1;
 	else if(fptr == &comm_point_http_handle_callback) return 1;
+#ifdef USE_DNSTAP
+	else if(fptr == &dtio_output_cb) return 1;
+	else if(fptr == &dtio_cmd_cb) return 1;
+	else if(fptr == &dtio_reconnect_timeout_cb) return 1;
+	else if(fptr == &dtio_stop_timer_cb) return 1;
+	else if(fptr == &dtio_stop_ev_cb) return 1;
+	else if(fptr == &dtio_tap_callback) return 1;
+	else if(fptr == &dtio_mainfdcallback) return 1;
+#endif
 #ifdef UB_ON_WINDOWS
 	else if(fptr == &worker_win_stop_cb) return 1;
 #endif
@@ -206,6 +229,8 @@ fptr_whitelist_rbtree_cmp(int (*fptr) (const void *, const void *))
 	else if(fptr == &fwd_cmp) return 1;
 	else if(fptr == &pending_cmp) return 1;
 	else if(fptr == &serviced_cmp) return 1;
+	else if(fptr == &reuse_cmp) return 1;
+	else if(fptr == &reuse_id_cmp) return 1;
 	else if(fptr == &name_tree_compare) return 1;
 	else if(fptr == &order_lock_cmp) return 1;
 	else if(fptr == &codeline_cmp) return 1;
@@ -303,6 +328,9 @@ fptr_whitelist_hash_markdelfunc(lruhash_markdelfunc_type fptr)
 {
 	if(fptr == NULL) return 1;
 	else if(fptr == &rrset_markdel) return 1;
+#ifdef CLIENT_SUBNET
+	else if(fptr == &subnet_markdel) return 1;
+#endif
 	return 0;
 }
 
@@ -354,8 +382,8 @@ fptr_whitelist_modenv_kill_sub(void (*fptr)(struct module_qstate* newq))
 }
 
 int 
-fptr_whitelist_modenv_detect_cycle(int (*fptr)(        
-	struct module_qstate* qstate, struct query_info* qinfo,         
+fptr_whitelist_modenv_detect_cycle(int (*fptr)(
+	struct module_qstate* qstate, struct query_info* qinfo,
 	uint16_t flags, int prime, int valrec))
 {
 	if(fptr == &mesh_detect_cycle) return 1;
@@ -372,6 +400,9 @@ fptr_whitelist_mod_init(int (*fptr)(struct module_env* env, int id))
 #ifdef WITH_PYTHONMODULE
 	else if(fptr == &pythonmod_init) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+	else if(fptr == &dynlibmod_init) return 1;
+#endif
 #ifdef USE_CACHEDB
 	else if(fptr == &cachedb_init) return 1;
 #endif
@@ -380,6 +411,9 @@ fptr_whitelist_mod_init(int (*fptr)(struct module_env* env, int id))
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_init) return 1;
+#endif
+#ifdef USE_IPSET
+	else if(fptr == &ipset_init) return 1;
 #endif
 	return 0;
 }
@@ -394,6 +428,9 @@ fptr_whitelist_mod_deinit(void (*fptr)(struct module_env* env, int id))
 #ifdef WITH_PYTHONMODULE
 	else if(fptr == &pythonmod_deinit) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+	else if(fptr == &dynlibmod_deinit) return 1;
+#endif
 #ifdef USE_CACHEDB
 	else if(fptr == &cachedb_deinit) return 1;
 #endif
@@ -402,6 +439,9 @@ fptr_whitelist_mod_deinit(void (*fptr)(struct module_env* env, int id))
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_deinit) return 1;
+#endif
+#ifdef USE_IPSET
+	else if(fptr == &ipset_deinit) return 1;
 #endif
 	return 0;
 }
@@ -417,6 +457,9 @@ fptr_whitelist_mod_operate(void (*fptr)(struct module_qstate* qstate,
 #ifdef WITH_PYTHONMODULE
 	else if(fptr == &pythonmod_operate) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+	else if(fptr == &dynlibmod_operate) return 1;
+#endif
 #ifdef USE_CACHEDB
 	else if(fptr == &cachedb_operate) return 1;
 #endif
@@ -425,6 +468,9 @@ fptr_whitelist_mod_operate(void (*fptr)(struct module_qstate* qstate,
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_operate) return 1;
+#endif
+#ifdef USE_IPSET
+	else if(fptr == &ipset_operate) return 1;
 #endif
 	return 0;
 }
@@ -440,6 +486,9 @@ fptr_whitelist_mod_inform_super(void (*fptr)(
 #ifdef WITH_PYTHONMODULE
 	else if(fptr == &pythonmod_inform_super) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+	else if(fptr == &dynlibmod_inform_super) return 1;
+#endif
 #ifdef USE_CACHEDB
 	else if(fptr == &cachedb_inform_super) return 1;
 #endif
@@ -448,6 +497,9 @@ fptr_whitelist_mod_inform_super(void (*fptr)(
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_inform_super) return 1;
+#endif
+#ifdef USE_IPSET
+	else if(fptr == &ipset_inform_super) return 1;
 #endif
 	return 0;
 }
@@ -463,6 +515,9 @@ fptr_whitelist_mod_clear(void (*fptr)(struct module_qstate* qstate,
 #ifdef WITH_PYTHONMODULE
 	else if(fptr == &pythonmod_clear) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+	else if(fptr == &dynlibmod_clear) return 1;
+#endif
 #ifdef USE_CACHEDB
 	else if(fptr == &cachedb_clear) return 1;
 #endif
@@ -471,6 +526,9 @@ fptr_whitelist_mod_clear(void (*fptr)(struct module_qstate* qstate,
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_clear) return 1;
+#endif
+#ifdef USE_IPSET
+	else if(fptr == &ipset_clear) return 1;
 #endif
 	return 0;
 }
@@ -485,6 +543,9 @@ fptr_whitelist_mod_get_mem(size_t (*fptr)(struct module_env* env, int id))
 #ifdef WITH_PYTHONMODULE
 	else if(fptr == &pythonmod_get_mem) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+	else if(fptr == &dynlibmod_get_mem) return 1;
+#endif
 #ifdef USE_CACHEDB
 	else if(fptr == &cachedb_get_mem) return 1;
 #endif
@@ -493,6 +554,9 @@ fptr_whitelist_mod_get_mem(size_t (*fptr)(struct module_env* env, int id))
 #endif
 #ifdef CLIENT_SUBNET
 	else if(fptr == &subnetmod_get_mem) return 1;
+#endif
+#ifdef USE_IPSET
+	else if(fptr == &ipset_get_mem) return 1;
 #endif
 	return 0;
 }
@@ -540,17 +604,29 @@ int fptr_whitelist_inplace_cb_reply_generic(inplace_cb_reply_func_type* fptr,
 #ifdef WITH_PYTHONMODULE
 		if(fptr == &python_inplace_cb_reply_generic) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+		if(fptr == &dynlib_inplace_cb_reply_generic) return 1;
+#endif
 	} else if(type == inplace_cb_reply_cache) {
 #ifdef WITH_PYTHONMODULE
 		if(fptr == &python_inplace_cb_reply_generic) return 1;
+#endif
+#ifdef WITH_DYNLIBMODULE
+		if(fptr == &dynlib_inplace_cb_reply_generic) return 1;
 #endif
 	} else if(type == inplace_cb_reply_local) {
 #ifdef WITH_PYTHONMODULE
 		if(fptr == &python_inplace_cb_reply_generic) return 1;
 #endif
+#ifdef WITH_DYNLIBMODULE
+		if(fptr == &dynlib_inplace_cb_reply_generic) return 1;
+#endif
 	} else if(type == inplace_cb_reply_servfail) {
 #ifdef WITH_PYTHONMODULE
 		if(fptr == &python_inplace_cb_reply_generic) return 1;
+#endif
+#ifdef WITH_DYNLIBMODULE
+		if(fptr == &dynlib_inplace_cb_reply_generic) return 1;
 #endif
 	}
 	return 0;
@@ -561,9 +637,16 @@ int fptr_whitelist_inplace_cb_query(inplace_cb_query_func_type* fptr)
 #ifdef CLIENT_SUBNET
 	if(fptr == &ecs_whitelist_check)
 		return 1;
-#else
-	(void)fptr;
 #endif
+#ifdef WITH_PYTHONMODULE
+        if(fptr == &python_inplace_cb_query_generic)
+                return 1;
+#endif
+#ifdef WITH_DYNLIBMODULE
+        if(fptr == &dynlib_inplace_cb_query_generic)
+                return 1;
+#endif
+	(void)fptr;
 	return 0;
 }
 
@@ -575,6 +658,10 @@ int fptr_whitelist_inplace_cb_edns_back_parsed(
 		return 1;
 #else
 	(void)fptr;
+#endif
+#ifdef WITH_DYNLIBMODULE
+    if(fptr == &dynlib_inplace_cb_edns_back_parsed)
+            return 1;
 #endif
 	return 0;
 }
@@ -588,5 +675,16 @@ int fptr_whitelist_inplace_cb_query_response(
 #else
 	(void)fptr;
 #endif
+#ifdef WITH_DYNLIBMODULE
+    if(fptr == &dynlib_inplace_cb_query_response)
+            return 1;
+#endif
+	return 0;
+}
+
+int fptr_whitelist_serve_expired_lookup(serve_expired_lookup_func_type* fptr)
+{
+	if(fptr == &mesh_serve_expired_lookup)
+		return 1;
 	return 0;
 }

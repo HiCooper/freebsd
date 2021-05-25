@@ -13,20 +13,29 @@
 # A PARTICULAR PURPOSE.
 # $FreeBSD$
 
+.include <src.opts.mk>
+
 TRACEROUTE_DISTDIR?= ${SRCTOP}/contrib/traceroute
 .PATH: ${TRACEROUTE_DISTDIR}
 
+PACKAGE=	runtime
 PROG=	traceroute6
 MAN=	traceroute6.8
 SRCS=	as.c traceroute6.c
 BINOWN=	root
 BINMODE= 4555
 
-CFLAGS+= -DIPSEC -DUSE_RFC2292BIS -DHAVE_POLL
+CFLAGS+= -DIPSEC -DHAVE_POLL
 CFLAGS+= -I${.CURDIR} -I${TRACEROUTE_DISTDIR} -I.
 
-WARNS?=	3
+.if ${MK_CASPER} != "no"
+LIBADD+=	casper
+LIBADD+=	cap_dns
+CFLAGS+=	-DWITH_CASPER
+.endif
 
-LIBADD=	ipsec
+LIBADD+=	ipsec
 
 .include <bsd.prog.mk>
+
+CWARNFLAGS+= -Wno-cast-align

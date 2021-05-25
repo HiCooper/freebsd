@@ -6,7 +6,7 @@ CFLAGS+=-I${LDRSRC}
 
 SRCS+=	boot.c commands.c console.c devopen.c interp.c 
 SRCS+=	interp_backslash.c interp_parse.c ls.c misc.c 
-SRCS+=	module.c
+SRCS+=	module.c nvstore.c
 
 .if ${MACHINE} == "i386" || ${MACHINE_CPUARCH} == "amd64"
 SRCS+=	load_elf32.c load_elf32_obj.c reloc_elf32.c
@@ -19,18 +19,19 @@ SRCS+=	load_elf32.c reloc_elf32.c
 SRCS+=	load_elf32.c reloc_elf32.c
 SRCS+=	load_elf64.c reloc_elf64.c
 SRCS+=	metadata.c
-.elif ${MACHINE_CPUARCH} == "sparc64"
-SRCS+=	load_elf64.c reloc_elf64.c
-SRCS+=	metadata.c
 .elif ${MACHINE_ARCH:Mmips64*} != ""
 SRCS+= load_elf64.c reloc_elf64.c
 SRCS+=	metadata.c
 .elif ${MACHINE} == "mips"
 SRCS+=	load_elf32.c reloc_elf32.c
 SRCS+=	metadata.c
+.elif ${MACHINE_CPUARCH} == "riscv"
+SRCS+=	load_elf64.c reloc_elf64.c
+SRCS+=	metadata.c
 .endif
 
 .if ${LOADER_DISK_SUPPORT:Uyes} == "yes"
+CFLAGS.part.c+= -DHAVE_MEMCPY -I${SRCTOP}/sys/contrib/zlib
 SRCS+=	disk.c part.c vdisk.c
 .endif
 
@@ -62,6 +63,7 @@ SRCS+=	interp_lua.c
 .include "${BOOTSRC}/lua.mk"
 LDR_INTERP=	${LIBLUA}
 LDR_INTERP32=	${LIBLUA32}
+CFLAGS.interp_lua.c= -DLUA_PATH=\"${LUAPATH}\" -I${FLUASRC}/modules
 .elif ${LOADER_INTERP} == "4th"
 SRCS+=	interp_forth.c
 .include "${BOOTSRC}/ficl.mk"
@@ -75,6 +77,9 @@ SRCS+=	interp_simple.c
 
 .if ${MK_LOADER_VERIEXEC} != "no"
 CFLAGS+= -DLOADER_VERIEXEC -I${SRCTOP}/lib/libsecureboot/h
+.if ${MK_LOADER_VERIEXEC_VECTX} != "no"
+CFLAGS+= -DLOADER_VERIEXEC_VECTX
+.endif
 .endif
 
 .if ${MK_LOADER_VERIEXEC_PASS_MANIFEST} != "no"
@@ -98,9 +103,6 @@ CFLAGS+=	-DLOADER_EXT2FS_SUPPORT
 .endif
 .if ${LOADER_MSDOS_SUPPORT:Uno} == "yes"
 CFLAGS+=	-DLOADER_MSDOS_SUPPORT
-.endif
-.if ${LOADER_NANDFS_SUPPORT:U${MK_NAND}} == "yes"
-CFLAGS+=	-DLOADER_NANDFS_SUPPORT
 .endif
 .if ${LOADER_UFS_SUPPORT:Uyes} == "yes"
 CFLAGS+=	-DLOADER_UFS_SUPPORT
@@ -137,6 +139,7 @@ CFLAGS+= -DLOADER_MBR_SUPPORT
 CFLAGS+=	-DLOADER_ZFS_SUPPORT
 CFLAGS+=	-I${ZFSSRC}
 CFLAGS+=	-I${SYSDIR}/cddl/boot/zfs
+CFLAGS+=	-I${SYSDIR}/cddl/contrib/opensolaris/uts/common
 SRCS+=		zfs_cmd.c
 .endif
 

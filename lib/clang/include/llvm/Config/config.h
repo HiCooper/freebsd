@@ -2,6 +2,9 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
+// Include this header only under the llvm source tree.
+// This is a private header.
+
 /* Exported configuration */
 #include "llvm/Config/llvm-config.h"
 
@@ -9,7 +12,7 @@
 #define BUG_REPORT_URL "https://bugs.freebsd.org/submit/"
 
 /* Define to 1 to enable backtraces, and to 0 otherwise. */
-#define ENABLE_BACKTRACES 0
+#define ENABLE_BACKTRACES 1
 
 /* Define to 1 to enable crash overrides, and to 0 otherwise. */
 #define ENABLE_CRASH_OVERRIDES 1
@@ -75,9 +78,7 @@
 /* #undef HAVE_FFI_H */
 
 /* Define to 1 if you have the `futimens' function. */
-#if __FreeBSD__ >= 11
 #define HAVE_FUTIMENS 1
-#endif
 
 /* Define to 1 if you have the `futimes' function. */
 #define HAVE_FUTIMES 1
@@ -107,10 +108,10 @@
 #define HAVE_LIBPTHREAD 1
 
 /* Define to 1 if you have the `pthread_getname_np' function. */
-/* #undef HAVE_PTHREAD_GETNAME_NP */
+#define HAVE_PTHREAD_GETNAME_NP 1
 
 /* Define to 1 if you have the `pthread_setname_np' function. */
-/* #undef HAVE_PTHREAD_SETNAME_NP */
+#define HAVE_PTHREAD_SETNAME_NP 1
 
 /* Define to 1 if you have the `z' library (-lz). */
 #define HAVE_LIBZ 1
@@ -129,9 +130,6 @@
 
 /* Define to 1 if you have the `mallinfo' function. */
 /* #undef HAVE_MALLINFO */
-
-/* Define to 1 if you have the <malloc.h> header file. */
-/* #undef HAVE_MALLOC_H */
 
 /* Define to 1 if you have the <malloc/malloc.h> header file. */
 /* #undef HAVE_MALLOC_MALLOC_H */
@@ -160,20 +158,11 @@
 /* Have pthread_rwlock_init */
 #define HAVE_PTHREAD_RWLOCK_INIT 1
 
-/* Define to 1 if you have the `realpath' function. */
-#define HAVE_REALPATH 1
-
 /* Define to 1 if you have the `sbrk' function. */
 #define HAVE_SBRK 1
 
 /* Define to 1 if you have the `setenv' function. */
 #define HAVE_SETENV 1
-
-/* Define to 1 if you have the `sched_getaffinity' function. */
-/* #undef HAVE_SCHED_GETAFFINITY */
-
-/* Define to 1 if you have the `CPU_COUNT' macro. */
-/* #undef HAVE_CPU_COUNT */
 
 /* Define to 1 if you have the `setrlimit' function. */
 #define HAVE_SETRLIMIT 1
@@ -330,16 +319,19 @@
 #define PACKAGE_NAME "LLVM"
 
 /* Define to the full name and version of this package. */
-#define PACKAGE_STRING "LLVM 8.0.0"
+#define PACKAGE_STRING "LLVM 11.0.0"
 
 /* Define to the version of this package. */
-#define PACKAGE_VERSION "8.0.0"
+#define PACKAGE_VERSION "11.0.0"
 
 /* Define to the vendor of this package. */
 /* #undef PACKAGE_VENDOR */
 
 /* Define as the return type of signal handlers (`int' or `void'). */
 #define RETSIGTYPE void
+
+/* Define if std::is_trivially_copyable is supported */
+#define HAVE_STD_IS_TRIVIALLY_COPYABLE 1
 
 /* Define to a function implementing stricmp */
 /* #undef stricmp */
@@ -352,5 +344,8 @@
 
 /* Define to the default GlobalISel coverage file prefix */
 /* #undef LLVM_GISEL_COV_PREFIX */
+
+/* Whether Timers signpost passes in Xcode Instruments */
+#define LLVM_SUPPORT_XCODE_SIGNPOSTS 0
 
 #endif

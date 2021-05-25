@@ -39,7 +39,6 @@ void os_get_time(struct bmic_host_wellness_time *host_wellness_time)
 	getnanotime(&ts);
 	clock_ts_to_ct(&ts, &ct);
 
-
 	/* Fill the time In BCD Format */
 	host_wellness_time->hour= (uint8_t)bin2bcd(ct.hour);
 	host_wellness_time->min = (uint8_t)bin2bcd(ct.min);
@@ -61,7 +60,6 @@ void os_wellness_periodic(void *data)
 	struct pqisrc_softstate *softs = (struct pqisrc_softstate *)data;
 	int ret = 0;
 
-
 	/* update time to FW */
 	if (!pqisrc_ctrl_offline(softs)){
 		if( (ret = pqisrc_write_current_time_to_host_wellness(softs)) != 0 )
@@ -69,8 +67,8 @@ void os_wellness_periodic(void *data)
 	}
 
 	/* reschedule ourselves */
-	softs->os_specific.wellness_periodic = timeout(os_wellness_periodic, 
-					softs, OS_HOST_WELLNESS_TIMEOUT * hz);
+	callout_schedule(&softs->os_specific.wellness_periodic,
+	    OS_HOST_WELLNESS_TIMEOUT * hz);
 }
 
 /*
@@ -81,8 +79,7 @@ void os_stop_heartbeat_timer(pqisrc_softstate_t *softs)
 	DBG_FUNC("IN\n");
 
 	/* Kill the heart beat event */
-	untimeout(os_start_heartbeat_timer, softs, 
-			softs->os_specific.heartbeat_timeout_id);
+	callout_stop(&softs->os_specific.heartbeat_timeout_id);
 
 	DBG_FUNC("OUT\n");
 }
@@ -97,9 +94,9 @@ void os_start_heartbeat_timer(void *data)
 
 	pqisrc_heartbeat_timer_handler(softs);
 	if (!pqisrc_ctrl_offline(softs)) {
-		softs->os_specific.heartbeat_timeout_id =
-		timeout(os_start_heartbeat_timer, softs,
-		OS_FW_HEARTBEAT_TIMER_INTERVAL * hz);
+		callout_reset(&softs->os_specific.heartbeat_timeout_id,
+			      OS_FW_HEARTBEAT_TIMER_INTERVAL * hz,
+			      os_start_heartbeat_timer, softs);
 	}
 
        DBG_FUNC("OUT\n");
@@ -161,7 +158,6 @@ void inline os_sema_unlock(struct sema *sema)
 {
 	sema_wait(sema);
 }
-
 
 /*
  * string copy wrapper function

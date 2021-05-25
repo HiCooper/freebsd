@@ -11,7 +11,7 @@
         private
             bsdstat
             ..
-            event
+            event1
             ..
             gmock
                 internal
@@ -37,9 +37,21 @@
         aout
         ..
         clang
-            8.0.0
+            11.0.0
                 include
+                    cuda_wrappers
+                    ..
+                    fuzzer
+                    ..
+                    openmp_wrappers
+                    ..
+                    ppc_wrappers
+                    ..
+                    profile
+                    ..
                     sanitizer
+                    ..
+                    xray
                     ..
                 ..
                 lib
@@ -55,6 +67,8 @@
         dtrace
         ..
         engines
+        ..
+        flua
         ..
         i18n
         ..
@@ -194,12 +208,20 @@
             uk_UA.KOI8-U
             ..
         ..
+        certs
+            blacklisted tags=package=caroot
+            ..
+            trusted tags=package=caroot
+            ..
+        ..
         dict
         ..
         doc
             IPv6
             ..
             atf
+            ..
+            kyua
             ..
             legal
             ..
@@ -259,6 +281,8 @@
             ..
             find_interface
             ..
+            flua
+            ..
             hast
             ..
             hostapd
@@ -295,6 +319,8 @@
                     ..
                 ..
             ..
+            kyua
+            ..
             libusb20
             ..
             libvgl
@@ -302,8 +328,6 @@
             mdoc
             ..
             netgraph
-            ..
-            pc-sysinstall
             ..
             perfmon
             ..
@@ -349,6 +373,8 @@
             ..
         ..
         firmware
+        ..
+        flua
         ..
         games
             fortune
@@ -432,6 +458,12 @@
                 ..
                 trusted tags=package=runtime
                 ..
+            ..
+        ..
+        kyua
+            misc
+            ..
+            store
             ..
         ..
         locale
@@ -827,6 +859,8 @@
             ..
             man3
             ..
+            man3lua
+            ..
             man4
                 aarch64
                 ..
@@ -837,8 +871,6 @@
                 i386
                 ..
                 powerpc
-                ..
-                sparc64
                 ..
             ..
             man5
@@ -853,8 +885,6 @@
                 i386
                 ..
                 powerpc
-                ..
-                sparc64
                 ..
             ..
             man9
@@ -1166,20 +1196,10 @@
                 ..
                 man3
                 ..
-            ..
-        ..
-        pc-sysinstall
-            backend
-            ..
-            backend-partmanager
-            ..
-            backend-query
-            ..
-            conf
-                license
+                man5
                 ..
-            ..
-            doc
+                man7
+                ..
             ..
         ..
         security
@@ -1237,15 +1257,25 @@
             ..
             Australia
             ..
+            Brazil
+            ..
+            Canada
+            ..
+            Chile
+            ..
             Etc
             ..
             Europe
             ..
             Indian
             ..
+            Mexico
+            ..
             Pacific
             ..
             SystemV
+            ..
+            US
             ..
         ..
     ..

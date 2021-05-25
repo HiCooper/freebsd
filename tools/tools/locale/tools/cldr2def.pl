@@ -1,4 +1,31 @@
 #!/usr/local/bin/perl -wC
+
+# SPDX-License-Identifier: BSD-2-Clause-FreeBSD
+#
+# Copyright 2009 Edwin Groothuis <edwin@FreeBSD.org>
+# Copyright 2015 John Marino <draco@marino.st>
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions
+# are met:
+# 1. Redistributions of source code must retain the above copyright
+#    notice, this list of conditions and the following disclaimer.
+# 2. Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND
+# ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+# ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+# OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+# SUCH DAMAGE.
+#
 # $FreeBSD$
 
 use strict;
@@ -22,6 +49,8 @@ my $DEFENCODING = "UTF-8";
 my $UNIDIR = undef;
 my $ETCDIR = undef;
 my $TYPE = undef;
+
+my $CLDR_VERSION = undef;
 
 my $result = GetOptions (
 		"unidir=s"	=> \$UNIDIR,
@@ -433,6 +462,11 @@ sub transform_ctypes {
 		foreach my $enc (sort keys(%{$languages{$l}{$f}{data}{$c}})) {
 			next if ($enc eq $DEFENCODING);
 			$filename = "$UNIDIR/posix/$file.$DEFENCODING.src";
+			if ($file eq 'ja_JP') {
+				# Override $filename for ja_JP because
+				# its CTYPE is not compatible with UTF-8.
+				$filename = "$UNIDIR/posix/$file.eucJP.src";
+			}
 			if (! -f $filename) {
 				print STDERR "Cannot open $filename\n";
 				next;
@@ -468,6 +502,12 @@ EOF
 
 
 sub transform_collation {
+	# Read the CLDR version
+	open(FIN, "$UNIDIR/cldr-version") or die "Cannot open cldr-version";
+	read FIN, $CLDR_VERSION, -s FIN;
+	close(FIN);
+	$CLDR_VERSION =~ s/\s*$//;
+
 	foreach my $l (sort keys(%languages)) {
 	foreach my $f (sort keys(%{$languages{$l}})) {
 	foreach my $c (sort keys(%{$languages{$l}{$f}{data}})) {
@@ -829,8 +869,11 @@ sub make_makefile {
 	my $SRCOUT4 = "";
 	my $MAPLOC;
 	if ($TYPE eq "colldef") {
+		# In future, we might want to try to put the CLDR version into
+		# the .src files with some new syntax, instead of the makefile.
 		$SRCOUT = "localedef \${LOCALEDEF_ENDIAN} -D -U " .
 			"-i \${.IMPSRC} \\\n" .
+			"\t-V \${CLDR_VERSION} \\\n" .
 			"\t-f \${MAPLOC}/map.\${.TARGET:T:R:E:C/@.*//} " .
 			"\${.OBJDIR}/\${.IMPSRC:T:R}";
 		$MAPLOC = "MAPLOC=\t\t\${.CURDIR}/../../tools/tools/" .
@@ -843,6 +886,7 @@ sub make_makefile {
 			"\$t.LC_COLLATE: \${.CURDIR}/\$f.src\n" .
 			"\tlocaledef \${LOCALEDEF_ENDIAN} -D -U " .
 			"-i \${.ALLSRC} \\\n" .
+			"\t-V \${CLDR_VERSION} \\\n" .
 			"\t\t-f \${MAPLOC}/map.\${.TARGET:T:R:E:C/@.*//} \\\n" .
 			"\t\t\${.OBJDIR}/\${.TARGET:T:R}\n" .
 			".endfor\n\n";
@@ -884,6 +928,13 @@ FILESNAME=	$FILESNAMES{$TYPE}
 .SUFFIXES:	.src .${SRCOUT2}
 ${MAPLOC}
 EOF
+
+	if ($TYPE eq "colldef") {
+		print FOUT <<EOF;
+CLDR_VERSION=	"${CLDR_VERSION}"
+
+EOF
+	}
 
 	if ($TYPE eq "colldef" || $TYPE eq "ctypedef") {
 		print FOUT <<EOF;

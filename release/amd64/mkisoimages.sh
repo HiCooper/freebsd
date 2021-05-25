@@ -45,11 +45,11 @@ if [ "$1" = "-b" ]; then
 	# This is highly x86-centric and will be used directly below.
 	bootable="-o bootimage=i386;$BASEBITSDIR/boot/cdboot -o no-emul-boot"
 
-	# Make EFI system partition (should be done with makefs in the future)
-	# The ISO file is a special case, in that it only has a maximum of
-	# 800 KB available for the boot code. So make an 800 KB ESP
+	# Make EFI system partition.
 	espfilename=$(mktemp /tmp/efiboot.XXXXXX)
-	make_esp_file ${espfilename} 800 ${BASEBITSDIR}/boot/loader.efi
+	# ESP file size in KB.
+	espsize="2048"
+	make_esp_file ${espfilename} ${espsize} ${BASEBITSDIR}/boot/loader.efi
 	bootable="$bootable -o bootimage=i386;${espfilename} -o no-emul-boot -o platformid=efi"
 
 	shift

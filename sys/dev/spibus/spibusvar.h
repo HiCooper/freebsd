@@ -1,6 +1,5 @@
 /*-
- * Copyright (c) 2006 M. Warner Losh
- * All rights reserved.
+ * Copyright (c) 2006 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -44,6 +43,7 @@ struct spibus_ivar
 	uint32_t	cs;
 	uint32_t	mode;
 	uint32_t	clock;
+	struct resource_list	rl;
 };
 
 #define	SPIBUS_CS_HIGH	(1U << 31)

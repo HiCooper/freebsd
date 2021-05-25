@@ -209,7 +209,6 @@ nexus_add_child(device_t bus, u_int order, const char *name, int unit)
 	return (child);
 }
 
-
 /*
  * Allocate a resource on behalf of child.  NB: child is usually going to be a
  * child of one of our descendants, not a direct child of nexus0.
@@ -292,9 +291,11 @@ nexus_config_intr(device_t dev, int irq, enum intr_trigger trig,
     enum intr_polarity pol)
 {
 
-	/* TODO: This is wrong, it's needed for ACPI */
-	device_printf(dev, "bus_config_intr is obsolete and not supported!\n");
-	return (EOPNOTSUPP);
+	/*
+	 * On arm64 (due to INTRNG), ACPI interrupt configuration is 
+	 * done in nexus_acpi_map_intr().
+	 */
+	return (0);
 }
 
 static int
@@ -395,7 +396,6 @@ nexus_set_resource(device_t dev, device_t child, int type, int rid,
 
 	return(0);
 }
-
 
 static int
 nexus_deactivate_resource(device_t bus, device_t child, int type, int rid,

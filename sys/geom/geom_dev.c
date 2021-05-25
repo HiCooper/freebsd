@@ -45,7 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/conf.h>
 #include <sys/ctype.h>
 #include <sys/bio.h>
-#include <sys/bus.h>
+#include <sys/devctl.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/proc.h>
@@ -112,7 +112,8 @@ static struct g_class g_dev_class	= {
  */
 static uint64_t g_dev_del_max_sectors = 262144;
 SYSCTL_DECL(_kern_geom);
-SYSCTL_NODE(_kern_geom, OID_AUTO, dev, CTLFLAG_RW, 0, "GEOM_DEV stuff");
+SYSCTL_NODE(_kern_geom, OID_AUTO, dev, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GEOM_DEV stuff");
 SYSCTL_QUAD(_kern_geom_dev, OID_AUTO, delete_max_sectors, CTLFLAG_RW,
     &g_dev_del_max_sectors, 0, "Maximum number of sectors in a single "
     "delete request sent to the provider. Larger requests are chunked "
@@ -165,7 +166,7 @@ init_dumpdev(struct cdev *dev)
 {
 	struct diocskerneldump_arg kda;
 	struct g_consumer *cp;
-	const char *devprefix = "/dev/", *devname;
+	const char *devprefix = _PATH_DEV, *devname;
 	int error;
 	size_t len;
 
@@ -212,7 +213,7 @@ g_dev_destroy(void *arg, int flags __unused)
 	sc = cp->private;
 	g_trace(G_T_TOPOLOGY, "g_dev_destroy(%p(%s))", cp, gp->name);
 	snprintf(buf, sizeof(buf), "cdev=%s", gp->name);
-	devctl_notify_f("GEOM", "DEV", "DESTROY", buf, M_WAITOK);
+	devctl_notify("GEOM", "DEV", "DESTROY", buf);
 	if (cp->acr > 0 || cp->acw > 0 || cp->ace > 0)
 		g_access(cp, -cp->acr, -cp->acw, -cp->ace);
 	g_detach(cp);
@@ -276,13 +277,13 @@ g_dev_set_media(struct g_consumer *cp)
 	sc = cp->private;
 	dev = sc->sc_dev;
 	snprintf(buf, sizeof(buf), "cdev=%s", dev->si_name);
-	devctl_notify_f("DEVFS", "CDEV", "MEDIACHANGE", buf, M_WAITOK);
-	devctl_notify_f("GEOM", "DEV", "MEDIACHANGE", buf, M_WAITOK);
+	devctl_notify("DEVFS", "CDEV", "MEDIACHANGE", buf);
+	devctl_notify("GEOM", "DEV", "MEDIACHANGE", buf);
 	dev = sc->sc_alias;
 	if (dev != NULL) {
 		snprintf(buf, sizeof(buf), "cdev=%s", dev->si_name);
-		devctl_notify_f("DEVFS", "CDEV", "MEDIACHANGE", buf, M_WAITOK);
-		devctl_notify_f("GEOM", "DEV", "MEDIACHANGE", buf, M_WAITOK);
+		devctl_notify("DEVFS", "CDEV", "MEDIACHANGE", buf);
+		devctl_notify("GEOM", "DEV", "MEDIACHANGE", buf);
 	}
 }
 
@@ -307,7 +308,7 @@ g_dev_resize(struct g_consumer *cp)
 	char buf[SPECNAMELEN + 6];
 
 	snprintf(buf, sizeof(buf), "cdev=%s", cp->provider->name);
-	devctl_notify_f("GEOM", "DEV", "SIZECHANGE", buf, M_WAITOK);
+	devctl_notify("GEOM", "DEV", "SIZECHANGE", buf);
 }
 
 struct g_provider *
@@ -334,6 +335,7 @@ g_dev_taste(struct g_class *mp, struct g_provider *pp, int insist __unused)
 	int error;
 	struct cdev *dev, *adev;
 	char buf[SPECNAMELEN + 6];
+	struct make_dev_args args;
 
 	g_trace(G_T_TOPOLOGY, "dev_taste(%s,%s)", mp->name, pp->name);
 	g_topology_assert();
@@ -344,10 +346,25 @@ g_dev_taste(struct g_class *mp, struct g_provider *pp, int insist __unused)
 	cp->private = sc;
 	cp->flags |= G_CF_DIRECT_SEND | G_CF_DIRECT_RECEIVE;
 	error = g_attach(cp, pp);
-	KASSERT(error == 0,
-	    ("g_dev_taste(%s) failed to g_attach, err=%d", pp->name, error));
-	error = make_dev_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &dev,
-	    &g_dev_cdevsw, NULL, UID_ROOT, GID_OPERATOR, 0640, "%s", gp->name);
+	if (error != 0) {
+		printf("%s: g_dev_taste(%s) failed to g_attach, error=%d\n",
+		    __func__, pp->name, error);
+		g_destroy_consumer(cp);
+		g_destroy_geom(gp);
+		mtx_destroy(&sc->sc_mtx);
+		g_free(sc);
+		return (NULL);
+	}
+	make_dev_args_init(&args);
+	args.mda_flags = MAKEDEV_CHECKNAME | MAKEDEV_WAITOK;
+	args.mda_devsw = &g_dev_cdevsw;
+	args.mda_cr = NULL;
+	args.mda_uid = UID_ROOT;
+	args.mda_gid = GID_OPERATOR;
+	args.mda_mode = 0640;
+	args.mda_si_drv1 = sc;
+	args.mda_si_drv2 = cp;
+	error = make_dev_s(&args, &sc->sc_dev, "%s", gp->name);
 	if (error != 0) {
 		printf("%s: make_dev_p() failed (gp->name=%s, error=%d)\n",
 		    __func__, gp->name, error);
@@ -358,11 +375,9 @@ g_dev_taste(struct g_class *mp, struct g_provider *pp, int insist __unused)
 		g_free(sc);
 		return (NULL);
 	}
+	dev = sc->sc_dev;
 	dev->si_flags |= SI_UNMAPPED;
-	sc->sc_dev = dev;
-
-	dev->si_iosize_max = MAXPHYS;
-	dev->si_drv2 = cp;
+	dev->si_iosize_max = maxphys;
 	error = init_dumpdev(dev);
 	if (error != 0)
 		printf("%s: init_dumpdev() failed (gp->name=%s, error=%d)\n",
@@ -370,11 +385,11 @@ g_dev_taste(struct g_class *mp, struct g_provider *pp, int insist __unused)
 
 	g_dev_attrchanged(cp, "GEOM::physpath");
 	snprintf(buf, sizeof(buf), "cdev=%s", gp->name);
-	devctl_notify_f("GEOM", "DEV", "CREATE", buf, M_WAITOK);
+	devctl_notify("GEOM", "DEV", "CREATE", buf);
 	/*
 	 * Now add all the aliases for this drive
 	 */
-	LIST_FOREACH(gap, &pp->geom->aliases, ga_next) {
+	LIST_FOREACH(gap, &pp->aliases, ga_next) {
 		error = make_dev_alias_p(MAKEDEV_CHECKNAME | MAKEDEV_WAITOK, &adev, dev,
 		    "%s", gap->ga_alias);
 		if (error) {
@@ -383,7 +398,7 @@ g_dev_taste(struct g_class *mp, struct g_provider *pp, int insist __unused)
 			continue;
 		}
 		snprintf(buf, sizeof(buf), "cdev=%s", gap->ga_alias);
-		devctl_notify_f("GEOM", "DEV", "CREATE", buf, M_WAITOK);
+		devctl_notify("GEOM", "DEV", "CREATE", buf);
 	}
 
 	return (gp);
@@ -397,8 +412,6 @@ g_dev_open(struct cdev *dev, int flags, int fmt, struct thread *td)
 	int error, r, w, e;
 
 	cp = dev->si_drv2;
-	if (cp == NULL)
-		return (ENXIO);		/* g_dev_taste() not done yet */
 	g_trace(G_T_ACCESS, "g_dev_open(%s, %d, %d, %p)",
 	    cp->geom->name, flags, fmt, td);
 
@@ -429,7 +442,7 @@ g_dev_open(struct cdev *dev, int flags, int fmt, struct thread *td)
 	error = g_access(cp, r, w, e);
 	g_topology_unlock();
 	if (error == 0) {
-		sc = cp->private;
+		sc = dev->si_drv1;
 		mtx_lock(&sc->sc_mtx);
 		if (sc->sc_open == 0 && (sc->sc_active & SC_A_ACTIVE) != 0)
 			wakeup(&sc->sc_active);
@@ -451,8 +464,6 @@ g_dev_close(struct cdev *dev, int flags, int fmt, struct thread *td)
 	int error, r, w, e;
 
 	cp = dev->si_drv2;
-	if (cp == NULL)
-		return (ENXIO);
 	g_trace(G_T_ACCESS, "g_dev_close(%s, %d, %d, %p)",
 	    cp->geom->name, flags, fmt, td);
 
@@ -477,7 +488,7 @@ g_dev_close(struct cdev *dev, int flags, int fmt, struct thread *td)
 	if (r + w + e == 0)
 		return (EINVAL);
 
-	sc = cp->private;
+	sc = dev->si_drv1;
 	mtx_lock(&sc->sc_mtx);
 	sc->sc_open += r + w + e;
 	if (sc->sc_open == 0)
@@ -493,12 +504,6 @@ g_dev_close(struct cdev *dev, int flags, int fmt, struct thread *td)
 	return (error);
 }
 
-/*
- * XXX: Until we have unmessed the ioctl situation, there is a race against
- * XXX: a concurrent orphanization.  We cannot close it by holding topology
- * XXX: since that would prevent us from doing our job, and stalling events
- * XXX: will break (actually: stall) the BSD disklabel hacks.
- */
 static int
 g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread *td)
 {
@@ -513,6 +518,12 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 	cp = dev->si_drv2;
 	pp = cp->provider;
 
+	/* If consumer or provider is dying, don't disturb. */
+	if (cp->flags & G_CF_ORPHAN)
+		return (ENXIO);
+	if (pp->error)
+		return (pp->error);
+
 	error = 0;
 	KASSERT(cp->acr || cp->acw,
 	    ("Consumer with zero access count in g_dev_ioctl"));
@@ -520,12 +531,12 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 	i = IOCPARM_LEN(cmd);
 	switch (cmd) {
 	case DIOCGSECTORSIZE:
-		*(u_int *)data = cp->provider->sectorsize;
+		*(u_int *)data = pp->sectorsize;
 		if (*(u_int *)data == 0)
 			error = ENOENT;
 		break;
 	case DIOCGMEDIASIZE:
-		*(off_t *)data = cp->provider->mediasize;
+		*(off_t *)data = pp->mediasize;
 		if (*(off_t *)data == 0)
 			error = ENOENT;
 		break;
@@ -538,9 +549,6 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 		error = g_io_getattr("GEOM::fwheads", cp, &i, data);
 		if (error == 0 && *(u_int *)data == 0)
 			error = ENOENT;
-		break;
-	case DIOCGFRONTSTUFF:
-		error = g_io_getattr("GEOM::frontstuff", cp, &i, data);
 		break;
 #ifdef COMPAT_FREEBSD11
 	case DIOCSKERNELDUMP_FREEBSD11:
@@ -609,10 +617,7 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 			kda->kda_encryptedkey = encryptedkey;
 			error = g_dev_setdumpdev(dev, kda);
 		}
-		if (encryptedkey != NULL) {
-			explicit_bzero(encryptedkey, kda->kda_encryptedkeysize);
-			free(encryptedkey, M_TEMP);
-		}
+		zfree(encryptedkey, M_TEMP);
 		explicit_bzero(kda, sizeof(*kda));
 		break;
 	    }
@@ -622,15 +627,14 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 	case DIOCGDELETE:
 		offset = ((off_t *)data)[0];
 		length = ((off_t *)data)[1];
-		if ((offset % cp->provider->sectorsize) != 0 ||
-		    (length % cp->provider->sectorsize) != 0 || length <= 0) {
+		if ((offset % pp->sectorsize) != 0 ||
+		    (length % pp->sectorsize) != 0 || length <= 0) {
 			printf("%s: offset=%jd length=%jd\n", __func__, offset,
 			    length);
 			error = EINVAL;
 			break;
 		}
-		if ((cp->provider->mediasize > 0) &&
-		    (offset >= cp->provider->mediasize)) {
+		if ((pp->mediasize > 0) && (offset >= pp->mediasize)) {
 			/*
 			 * Catch out-of-bounds requests here. The problem is
 			 * that due to historical GEOM I/O implementation
@@ -645,14 +649,12 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 		}
 		while (length > 0) {
 			chunk = length;
-			if (g_dev_del_max_sectors != 0 && chunk >
-			    g_dev_del_max_sectors * cp->provider->sectorsize) {
-				chunk = g_dev_del_max_sectors *
-				    cp->provider->sectorsize;
-				if (cp->provider->stripesize > 0) {
+			if (g_dev_del_max_sectors != 0 &&
+			    chunk > g_dev_del_max_sectors * pp->sectorsize) {
+				chunk = g_dev_del_max_sectors * pp->sectorsize;
+				if (pp->stripesize > 0) {
 					odd = (offset + chunk +
-					    cp->provider->stripeoffset) %
-					    cp->provider->stripesize;
+					    pp->stripeoffset) % pp->stripesize;
 					if (chunk > odd)
 						chunk -= odd;
 				}
@@ -675,15 +677,13 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 		error = g_io_getattr("GEOM::ident", cp, &i, data);
 		break;
 	case DIOCGPROVIDERNAME:
-		if (pp == NULL)
-			return (ENOENT);
 		strlcpy(data, pp->name, i);
 		break;
 	case DIOCGSTRIPESIZE:
-		*(off_t *)data = cp->provider->stripesize;
+		*(off_t *)data = pp->stripesize;
 		break;
 	case DIOCGSTRIPEOFFSET:
-		*(off_t *)data = cp->provider->stripeoffset;
+		*(off_t *)data = pp->stripeoffset;
 		break;
 	case DIOCGPHYSPATH:
 		error = g_io_getattr("GEOM::physpath", cp, &i, data);
@@ -713,14 +713,14 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 
 		if (zone_args->zone_cmd == DISK_ZONE_REPORT_ZONES) {
 			rep = &zone_args->zone_params.report;
-#define	MAXENTRIES	(MAXPHYS / sizeof(struct disk_zone_rep_entry))
+#define	MAXENTRIES	(maxphys / sizeof(struct disk_zone_rep_entry))
 			if (rep->entries_allocated > MAXENTRIES)
 				rep->entries_allocated = MAXENTRIES;
 			alloc_size = rep->entries_allocated *
 			    sizeof(struct disk_zone_rep_entry);
 			if (alloc_size != 0)
 				new_entries = g_malloc(alloc_size,
-				    M_WAITOK| M_ZERO);
+				    M_WAITOK | M_ZERO);
 			old_entries = rep->entries;
 			rep->entries = new_entries;
 		}
@@ -735,8 +735,8 @@ g_dev_ioctl(struct cdev *dev, u_long cmd, caddr_t data, int fflag, struct thread
 		break;
 	}
 	default:
-		if (cp->provider->geom->ioctl != NULL) {
-			error = cp->provider->geom->ioctl(cp->provider, cmd, data, fflag, td);
+		if (pp->geom->ioctl != NULL) {
+			error = pp->geom->ioctl(pp, cmd, data, fflag, td);
 		} else {
 			error = ENOIOCTL;
 		}
@@ -797,7 +797,6 @@ g_dev_strategy(struct bio *bp)
 		("Wrong bio_cmd bio=%p cmd=%d", bp, bp->bio_cmd));
 	dev = bp->bio_dev;
 	cp = dev->si_drv2;
-	sc = cp->private;
 	KASSERT(cp->acr || cp->acw,
 	    ("Consumer with zero access count in g_dev_strategy"));
 	biotrack(bp, __func__);
@@ -809,6 +808,7 @@ g_dev_strategy(struct bio *bp)
 		return;
 	}
 #endif
+	sc = dev->si_drv1;
 	KASSERT(sc->sc_open > 0, ("Closed device in g_dev_strategy"));
 	atomic_add_int(&sc->sc_active, 1);
 

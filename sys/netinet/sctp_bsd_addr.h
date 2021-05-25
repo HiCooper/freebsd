@@ -47,7 +47,6 @@ void sctp_wakeup_iterator(void);
 
 void sctp_startup_iterator(void);
 
-
 #ifdef INET6
 void sctp_gather_internal_ifa_flags(struct sctp_ifa *ifa);
 #endif
@@ -60,6 +59,8 @@ int sctp_copy_out_packet_log(uint8_t *target, int length);
 #endif
 
 void sctp_addr_change(struct ifaddr *ifa, int cmd);
+
+void sctp_addr_change_event_handler(void *, struct ifaddr *, int);
 
 void sctp_add_or_del_interfaces(int (*pred) (struct ifnet *), int add);
 

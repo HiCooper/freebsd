@@ -45,6 +45,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/bus.h>
 #include <sys/intr.h>
+#include <sys/limits.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
 #include <sys/rman.h>
@@ -61,7 +62,6 @@ __FBSDID("$FreeBSD$");
 #include "bcm_mipsvar.h"
 
 #include "bhnd_nexusvar.h"
-
 
 /**
  * Default bhnd_nexus implementation of BHND_BUS_GET_SERVICE_REGISTRY().

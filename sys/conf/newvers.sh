@@ -48,13 +48,16 @@
 #
 #	-V var	Print ${var}="${val-of-var}" and exit
 #
-#	-v	Print TYPE REVISION BRANCH RELEASE VERSION RELDATE variabkes
+#	-v	Print TYPE REVISION BRANCH RELEASE VERSION RELDATE variables
 #		like the -V command
 #
 
 TYPE="FreeBSD"
 REVISION="13.0"
-BRANCH=${BRANCH_OVERRIDE:-CURRENT}
+BRANCH="CURRENT"
+if [ -n "${BRANCH_OVERRIDE}" ]; then
+	BRANCH=${BRANCH_OVERRIDE}
+fi
 RELEASE="${REVISION}-${BRANCH}"
 VERSION="${TYPE} ${RELEASE}"
 
@@ -96,7 +99,10 @@ fi
 COPYRIGHT="$COPYRIGHT
 "
 
-include_metadata=true
+# We expand include_metadata later since we may set it to the
+# future value of modified.
+include_metadata=yes
+modified=no
 while getopts crRvV: opt; do
 	case "$opt" in
 	c)
@@ -104,12 +110,10 @@ while getopts crRvV: opt; do
 		exit 0
 		;;
 	r)
-		include_metadata=
+		include_metadata=no
 		;;
 	R)
-		if [ -z "${modified}" ]; then
-			include_metadata=
-		fi
+		include_metadata=if-modified
 		;;
 	v)
 		# Only put variables that are single lines here.
@@ -158,29 +162,7 @@ findvcs()
 
 git_tree_modified()
 {
-	# git diff-index lists both files that are known to have changes as
-	# well as those with metadata that does not match what is recorded in
-	# git's internal state.  The latter case is indicated by an all-zero
-	# destination file hash.
-
-	local fifo
-
-	fifo=$(mktemp -u)
-	mkfifo -m 600 $fifo || exit 1
-	$git_cmd --work-tree=${VCSTOP} diff-index HEAD > $fifo &
-	while read smode dmode ssha dsha status file; do
-		if ! expr $dsha : '^00*$' >/dev/null; then
-			rm $fifo
-			return 0
-		fi
-		if ! $git_cmd --work-tree=${VCSTOP} diff --quiet -- "${file}"; then
-			rm $fifo
-			return 0
-		fi
-	done < $fifo
-	# No files with content differences.
-	rm $fifo
-	return 1
+	$git_cmd "--work-tree=${VCSTOP}" -c core.checkStat=minimal -c core.fileMode=off diff --quiet
 }
 
 LC_ALL=C; export LC_ALL
@@ -253,7 +235,7 @@ if [ -n "$svnversion" ] ; then
 	case "$svn" in
 	[0-9]*[MSP]|*:*)
 		svn=" r${svn}"
-		modified=true
+		modified=yes
 		;;
 	[0-9]*)
 		svn=" r${svn}"
@@ -290,13 +272,17 @@ if [ -n "$git_cmd" ] ; then
 			git=" ${git}"
 		fi
 	fi
+	git_cnt=$($git_cmd rev-list --count HEAD 2>/dev/null)
+	if [ -n "$git_cnt" ] ; then
+		git="${git}-c${git_cnt}"
+	fi
 	git_b=$($git_cmd rev-parse --abbrev-ref HEAD)
 	if [ -n "$git_b" ] ; then
 		git="${git}(${git_b})"
 	fi
 	if git_tree_modified; then
 		git="${git}-dirty"
-		modified=true
+		modified=yes
 	fi
 fi
 
@@ -312,7 +298,8 @@ if [ -n "$hg_cmd" ] ; then
 	fi
 fi
 
-if [ -z "${include_metadata}" ]; then
+[ ${include_metadata} = "if-modified" -a ${modified} = "yes" ] && include_metadata=yes
+if [ ${include_metadata} != "yes" ]; then
 	VERINFO="${VERSION}${svn}${git}${hg} ${i}"
 	VERSTR="${VERINFO}\\n"
 else
@@ -337,7 +324,7 @@ EOF
 )
 vers_content_old=$(cat vers.c 2>/dev/null || true)
 if [ "$vers_content_new" != "$vers_content_old" ]; then
-	echo "$vers_content_new" > vers.c
+	printf "%s" "$vers_content_new" > vers.c
 fi
 
 echo $((v + 1)) > version

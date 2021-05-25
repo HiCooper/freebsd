@@ -41,7 +41,7 @@
 #ifndef _USB_STANDARD_H_
 #define	_USB_STANDARD_H_
 
-#if defined(_KERNEL)
+#if defined(_KERNEL) || defined(_STANDALONE)
 #ifndef USB_GLOBAL_INCLUDE_FILE
 #include "opt_usb.h"
 #endif
@@ -57,7 +57,7 @@ SYSCTL_DECL(_hw_usb);
 
 MALLOC_DECLARE(M_USB);
 MALLOC_DECLARE(M_USBDEV);
-#endif /* _KERNEL */
+#endif	/* _KERNEL || _STANDALONE */
 
 #ifndef USB_GLOBAL_INCLUDE_FILE
 #include <dev/usb/usb_endian.h>
@@ -274,6 +274,11 @@ typedef struct usb_device_request usb_device_request_t;
 #define	UHF_C_BH_PORT_RESET	29
 #define	UHF_FORCE_LINKPM_ACCEPT	30
 
+/* SuperSpeed suspend support */
+#define	USB_INTERFACE_FUNC_SUSPEND 0
+#define	USB_INTERFACE_FUNC_SUSPEND_LP	(1 << 8)
+#define	USB_INTERFACE_FUNC_SUSPEND_RW	(1 << 9)
+
 struct usb_descriptor {
 	uByte	bLength;
 	uByte	bDescriptorType;
@@ -444,6 +449,7 @@ typedef struct usb_interface_assoc_descriptor usb_interface_assoc_descriptor_t;
 
 #define	UIPROTO_CDC_NONE		0
 #define	UIPROTO_CDC_AT			1
+#define	UIPROTO_CDC_EEM			7
 
 #define	UICLASS_HID		0x03
 #define	UISUBCLASS_BOOT		1

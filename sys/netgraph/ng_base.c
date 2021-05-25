@@ -55,6 +55,7 @@
 #include <sys/malloc.h>
 #include <sys/mbuf.h>
 #include <sys/proc.h>
+#include <sys/epoch.h>
 #include <sys/queue.h>
 #include <sys/refcount.h>
 #include <sys/rwlock.h>
@@ -1425,7 +1426,7 @@ ng_con_part2(node_p node, item_p item, hook_p hook)
 	LIST_INSERT_HEAD(&node->nd_hooks, hook, hk_hooks);
 	node->nd_numhooks++;
 	NG_HOOK_REF(hook);	/* one for the node */
-	
+
 	/*
 	 * We now have a symmetrical situation, where both hooks have been
 	 * linked to their nodes, the newhook methods have been called
@@ -1576,7 +1577,6 @@ ng_mkpeer(node_p node, const char *name, const char *name2, char *type)
 
 	if ((error == 0) && hook2->hk_node->nd_type->connect) {
 		error = (*hook2->hk_node->nd_type->connect) (hook2);
-
 	}
 
 	/*
@@ -1598,7 +1598,7 @@ ng_mkpeer(node_p node, const char *name, const char *name2, char *type)
 /************************************************************************
 		Utility routines to send self messages
 ************************************************************************/
-	
+
 /* Shut this node down as soon as everyone is clear of it */
 /* Should add arg "immediately" to jump the queue */
 int
@@ -3249,7 +3249,8 @@ static moduledata_t netgraph_mod = {
 	(NULL)
 };
 DECLARE_MODULE(netgraph, netgraph_mod, SI_SUB_NETGRAPH, SI_ORDER_FIRST);
-SYSCTL_NODE(_net, OID_AUTO, graph, CTLFLAG_RW, 0, "netgraph Family");
+SYSCTL_NODE(_net, OID_AUTO, graph, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "netgraph Family");
 SYSCTL_INT(_net_graph, OID_AUTO, abi_version, CTLFLAG_RD, SYSCTL_NULL_INT_PTR, NG_ABI_VERSION,"");
 SYSCTL_INT(_net_graph, OID_AUTO, msg_version, CTLFLAG_RD, SYSCTL_NULL_INT_PTR, NG_VERSION, "");
 
@@ -3383,8 +3384,10 @@ sysctl_debug_ng_dump_items(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-SYSCTL_PROC(_debug, OID_AUTO, ng_dump_items, CTLTYPE_INT | CTLFLAG_RW,
-    0, sizeof(int), sysctl_debug_ng_dump_items, "I", "Number of allocated items");
+SYSCTL_PROC(_debug, OID_AUTO, ng_dump_items,
+    CTLTYPE_INT | CTLFLAG_RW | CTLFLAG_NEEDGIANT, 0, sizeof(int),
+    sysctl_debug_ng_dump_items, "I",
+    "Number of allocated items");
 #endif	/* NETGRAPH_DEBUG */
 
 /***********************************************************************
@@ -3398,6 +3401,7 @@ static void
 ngthread(void *arg)
 {
 	for (;;) {
+		struct epoch_tracker et;
 		node_p  node;
 
 		/* Get node from the worklist. */
@@ -3418,6 +3422,7 @@ ngthread(void *arg)
 		 * that lets us be sure that the node still exists.
 		 * Let the reference go at the last minute.
 		 */
+		NET_EPOCH_ENTER(et);
 		for (;;) {
 			item_p item;
 			int rw;
@@ -3435,6 +3440,7 @@ ngthread(void *arg)
 				NG_NODE_UNREF(node);
 			}
 		}
+		NET_EPOCH_EXIT(et);
 		NG_NODE_UNREF(node);
 		CURVNET_RESTORE();
 	}
@@ -3768,11 +3774,14 @@ ng_send_fn2(node_p node, hook_p hook, item_p pitem, ng_item_fn2 *fn, void *arg1,
 static void
 ng_callout_trampoline(void *arg)
 {
+	struct epoch_tracker et;
 	item_p item = arg;
 
+	NET_EPOCH_ENTER(et);
 	CURVNET_SET(NGI_NODE(item)->nd_vnet);
 	ng_snd_item(item, 0);
 	CURVNET_RESTORE();
+	NET_EPOCH_EXIT(et);
 }
 
 int
@@ -3801,7 +3810,7 @@ ng_callout(struct callout *c, node_p node, hook_p hook, int ticks,
 	return (0);
 }
 
-/* A special modified version of untimeout() */
+/* A special modified version of callout_stop() */
 int
 ng_uncallout(struct callout *c, node_p node)
 {

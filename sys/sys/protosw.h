@@ -210,6 +210,7 @@ struct pr_usrreqs {
 #define	PRUS_EOF	0x2
 #define	PRUS_MORETOCOME	0x4
 #define	PRUS_NOTREADY	0x8
+#define	PRUS_IPV6	0x10
 	int	(*pru_ready)(struct socket *so, struct mbuf *m, int count);
 	int	(*pru_sense)(struct socket *so, struct stat *sb);
 	int	(*pru_shutdown)(struct socket *so);
@@ -342,7 +343,6 @@ char	*prcorequests[] = {
 
 #ifdef _KERNEL
 void	pfctlinput(int, struct sockaddr *);
-void	pfctlinput2(int, struct sockaddr *, void *);
 struct domain *pffinddomain(int family);
 struct protosw *pffindproto(int family, int protocol, int type);
 struct protosw *pffindtype(int family, int type);

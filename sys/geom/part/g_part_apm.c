@@ -310,13 +310,13 @@ g_part_apm_dumpconf(struct g_part_table *table, struct g_part_entry *baseentry,
 		strncpy(u.name, entry->ent.ent_name, APM_ENT_NAMELEN);
 		u.name[APM_ENT_NAMELEN] = '\0';
 		sbuf_printf(sb, "%s<label>", indent);
-		g_conf_printf_escaped(sb, "%s", u.name);
-		sbuf_printf(sb, "</label>\n");
+		g_conf_cat_escaped(sb, u.name);
+		sbuf_cat(sb, "</label>\n");
 		strncpy(u.type, entry->ent.ent_type, APM_ENT_TYPELEN);
 		u.type[APM_ENT_TYPELEN] = '\0';
 		sbuf_printf(sb, "%s<rawtype>", indent);
-		g_conf_printf_escaped(sb, "%s", u.type);
-		sbuf_printf(sb, "</rawtype>\n");
+		g_conf_cat_escaped(sb, u.type);
+		sbuf_cat(sb, "</rawtype>\n");
 	} else {
 		/* confxml: scheme information */
 	}
@@ -582,10 +582,10 @@ g_part_apm_write(struct g_part_table *basetable, struct g_consumer *cp)
 			baseentry = LIST_NEXT(baseentry, gpe_entry);
 	}
 
-	for (index = 0; index < tblsz; index += MAXPHYS / pp->sectorsize) {
+	for (index = 0; index < tblsz; index += maxphys / pp->sectorsize) {
 		error = g_write_data(cp, (1 + index) * pp->sectorsize,
 		    buf + index * pp->sectorsize,
-		    (tblsz - index > MAXPHYS / pp->sectorsize) ? MAXPHYS:
+		    (tblsz - index > maxphys / pp->sectorsize) ? maxphys:
 		    (tblsz - index) * pp->sectorsize);
 		if (error) {
 			g_free(buf);

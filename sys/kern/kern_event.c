@@ -42,6 +42,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/systm.h>
 #include <sys/capsicum.h>
 #include <sys/kernel.h>
+#include <sys/limits.h>
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/rwlock.h>
@@ -304,10 +305,10 @@ kn_leave_flux(struct knote *kn)
 } while (0)
 #ifdef INVARIANTS
 #define	KNL_ASSERT_LOCKED(knl) do {					\
-	knl->kl_assert_locked((knl)->kl_lockarg);			\
+	knl->kl_assert_lock((knl)->kl_lockarg, LA_LOCKED);		\
 } while (0)
 #define	KNL_ASSERT_UNLOCKED(knl) do {					\
-	knl->kl_assert_unlocked((knl)->kl_lockarg);			\
+	knl->kl_assert_lock((knl)->kl_lockarg, LA_UNLOCKED);		\
 } while (0)
 #else /* !INVARIANTS */
 #define	KNL_ASSERT_LOCKED(knl) do {} while(0)
@@ -618,7 +619,7 @@ knote_fork(struct knlist *list, int pid)
     (NOTE_SECONDS | NOTE_MSECONDS | NOTE_USECONDS | NOTE_NSECONDS)
 
 static sbintime_t
-timer2sbintime(intptr_t data, int flags)
+timer2sbintime(int64_t data, int flags)
 {
 	int64_t secs;
 
@@ -1194,11 +1195,11 @@ kern_kevent(struct thread *td, int fd, int nchanges, int nevents,
 	struct file *fp;
 	int error;
 
-	cap_rights_init(&rights);
+	cap_rights_init_zero(&rights);
 	if (nchanges > 0)
-		cap_rights_set(&rights, CAP_KQUEUE_CHANGE);
+		cap_rights_set_one(&rights, CAP_KQUEUE_CHANGE);
 	if (nevents > 0)
-		cap_rights_set(&rights, CAP_KQUEUE_EVENT);
+		cap_rights_set_one(&rights, CAP_KQUEUE_EVENT);
 	error = fget(td, fd, &rights, &fp);
 	if (error != 0)
 		return (error);
@@ -1560,7 +1561,7 @@ findkn:
 			goto done;
 		}
 	}
-	
+
 	if (kev->flags & EV_DELETE) {
 		kn_enter_flux(kn);
 		KQ_UNLOCK(kq);
@@ -2374,17 +2375,13 @@ knlist_mtx_unlock(void *arg)
 }
 
 static void
-knlist_mtx_assert_locked(void *arg)
+knlist_mtx_assert_lock(void *arg, int what)
 {
 
-	mtx_assert((struct mtx *)arg, MA_OWNED);
-}
-
-static void
-knlist_mtx_assert_unlocked(void *arg)
-{
-
-	mtx_assert((struct mtx *)arg, MA_NOTOWNED);
+	if (what == LA_LOCKED)
+		mtx_assert((struct mtx *)arg, MA_OWNED);
+	else
+		mtx_assert((struct mtx *)arg, MA_NOTOWNED);
 }
 
 static void
@@ -2402,23 +2399,19 @@ knlist_rw_runlock(void *arg)
 }
 
 static void
-knlist_rw_assert_locked(void *arg)
+knlist_rw_assert_lock(void *arg, int what)
 {
 
-	rw_assert((struct rwlock *)arg, RA_LOCKED);
-}
-
-static void
-knlist_rw_assert_unlocked(void *arg)
-{
-
-	rw_assert((struct rwlock *)arg, RA_UNLOCKED);
+	if (what == LA_LOCKED)
+		rw_assert((struct rwlock *)arg, RA_LOCKED);
+	else
+		rw_assert((struct rwlock *)arg, RA_UNLOCKED);
 }
 
 void
 knlist_init(struct knlist *knl, void *lock, void (*kl_lock)(void *),
     void (*kl_unlock)(void *),
-    void (*kl_assert_locked)(void *), void (*kl_assert_unlocked)(void *))
+    void (*kl_assert_lock)(void *, int))
 {
 
 	if (lock == NULL)
@@ -2434,14 +2427,10 @@ knlist_init(struct knlist *knl, void *lock, void (*kl_lock)(void *),
 		knl->kl_unlock = knlist_mtx_unlock;
 	else
 		knl->kl_unlock = kl_unlock;
-	if (kl_assert_locked == NULL)
-		knl->kl_assert_locked = knlist_mtx_assert_locked;
+	if (kl_assert_lock == NULL)
+		knl->kl_assert_lock = knlist_mtx_assert_lock;
 	else
-		knl->kl_assert_locked = kl_assert_locked;
-	if (kl_assert_unlocked == NULL)
-		knl->kl_assert_unlocked = knlist_mtx_assert_unlocked;
-	else
-		knl->kl_assert_unlocked = kl_assert_unlocked;
+		knl->kl_assert_lock = kl_assert_lock;
 
 	knl->kl_autodestroy = 0;
 	SLIST_INIT(&knl->kl_list);
@@ -2451,7 +2440,7 @@ void
 knlist_init_mtx(struct knlist *knl, struct mtx *lock)
 {
 
-	knlist_init(knl, lock, NULL, NULL, NULL, NULL);
+	knlist_init(knl, lock, NULL, NULL, NULL);
 }
 
 struct knlist *
@@ -2469,7 +2458,7 @@ knlist_init_rw_reader(struct knlist *knl, struct rwlock *lock)
 {
 
 	knlist_init(knl, lock, knlist_rw_rlock, knlist_rw_runlock,
-	    knlist_rw_assert_locked, knlist_rw_assert_unlocked);
+	    knlist_rw_assert_lock);
 }
 
 void

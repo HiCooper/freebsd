@@ -34,6 +34,7 @@ __FBSDID("$FreeBSD$");
 
 #include <sys/types.h>
 #include <machine/vmm.h>
+#include <machine/vmm_snapshot.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,11 +43,13 @@ __FBSDID("$FreeBSD$");
 #include <vmmapi.h>
 
 #include "acpi.h"
+#include "debug.h"
 #include "bootrom.h"
 #include "inout.h"
 #include "pci_emul.h"
 #include "pci_irq.h"
 #include "pci_lpc.h"
+#include "pctestdev.h"
 #include "uart_emul.h"
 
 #define	IO_ICU1		0x20
@@ -78,6 +81,8 @@ static struct lpc_uart_softc {
 
 static const char *lpc_uart_names[LPC_UART_NUM] = { "COM1", "COM2" };
 
+static bool pctestdev_present;
+
 /*
  * LPC device configuration is in the following form:
  * <lpc_device_name>[,<options>]
@@ -105,6 +110,18 @@ lpc_device_parse(const char *opts)
 				goto done;
 			}
 		}
+		if (strcasecmp(lpcdev, pctestdev_getname()) == 0) {
+			if (pctestdev_present) {
+				EPRINTLN("More than one %s device conf is "
+				    "specified; only one is allowed.",
+				    pctestdev_getname());
+			} else if (pctestdev_parse(str) == 0) {
+				pctestdev_present = true;
+				error = 0;
+				free(cpy);
+				goto done;
+			}
+		}
 	}
 
 done:
@@ -122,6 +139,7 @@ lpc_print_supported_devices()
 	printf("bootrom\n");
 	for (i = 0; i < LPC_UART_NUM; i++)
 		printf("%s\n", lpc_uart_names[i]);
+	printf("%s\n", pctestdev_getname());
 }
 
 const char *
@@ -191,7 +209,7 @@ lpc_init(struct vmctx *ctx)
 	int unit, error;
 
 	if (romfile != NULL) {
-		error = bootrom_init(ctx, romfile);
+		error = bootrom_loadrom(ctx, romfile);
 		if (error)
 			return (error);
 	}
@@ -202,8 +220,8 @@ lpc_init(struct vmctx *ctx)
 		name = lpc_uart_names[unit];
 
 		if (uart_legacy_alloc(unit, &sc->iobase, &sc->irq) != 0) {
-			fprintf(stderr, "Unable to allocate resources for "
-			    "LPC device %s\n", name);
+			EPRINTLN("Unable to allocate resources for "
+			    "LPC device %s", name);
 			return (-1);
 		}
 		pci_irq_reserve(sc->irq);
@@ -212,8 +230,8 @@ lpc_init(struct vmctx *ctx)
 				    lpc_uart_intr_deassert, sc);
 
 		if (uart_set_backend(sc->uart_softc, sc->opts) != 0) {
-			fprintf(stderr, "Unable to initialize backend '%s' "
-			    "for LPC device %s\n", sc->opts, name);
+			EPRINTLN("Unable to initialize backend '%s' "
+			    "for LPC device %s", sc->opts, name);
 			return (-1);
 		}
 
@@ -228,6 +246,13 @@ lpc_init(struct vmctx *ctx)
 		error = register_inout(&iop);
 		assert(error == 0);
 		sc->enabled = 1;
+	}
+
+	/* pc-testdev */
+	if (pctestdev_present) {
+		error = pctestdev_init(ctx);
+		if (error)
+			return (error);
 	}
 
 	return (0);
@@ -398,7 +423,7 @@ pci_lpc_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	 * Do not allow more than one LPC bridge to be configured.
 	 */
 	if (lpc_bridge != NULL) {
-		fprintf(stderr, "Only one LPC bridge is allowed.\n");
+		EPRINTLN("Only one LPC bridge is allowed.");
 		return (-1);
 	}
 
@@ -408,7 +433,7 @@ pci_lpc_init(struct vmctx *ctx, struct pci_devinst *pi, char *opts)
 	 * all legacy i/o ports behind bus 0.
 	 */
 	if (pi->pi_bus != 0) {
-		fprintf(stderr, "LPC bridge can be present only on bus 0.\n");
+		EPRINTLN("LPC bridge can be present only on bus 0.");
 		return (-1);
 	}
 
@@ -451,12 +476,35 @@ lpc_pirq_routed(void)
 		pci_set_cfgdata8(lpc_bridge, 0x68 + pin, pirq_read(pin + 5));
 }
 
+#ifdef BHYVE_SNAPSHOT
+static int
+pci_lpc_snapshot(struct vm_snapshot_meta *meta)
+{
+	int unit, ret;
+	struct uart_softc *sc;
+
+	for (unit = 0; unit < LPC_UART_NUM; unit++) {
+		sc = lpc_uart_softc[unit].uart_softc;
+
+		ret = uart_snapshot(sc, meta);
+		if (ret != 0)
+			goto done;
+	}
+
+done:
+	return (ret);
+}
+#endif
+
 struct pci_devemu pci_de_lpc = {
 	.pe_emu =	"lpc",
 	.pe_init =	pci_lpc_init,
 	.pe_write_dsdt = pci_lpc_write_dsdt,
 	.pe_cfgwrite =	pci_lpc_cfgwrite,
 	.pe_barwrite =	pci_lpc_write,
-	.pe_barread =	pci_lpc_read
+	.pe_barread =	pci_lpc_read,
+#ifdef BHYVE_SNAPSHOT
+	.pe_snapshot =	pci_lpc_snapshot,
+#endif
 };
 PCI_EMUL_SET(pci_de_lpc);

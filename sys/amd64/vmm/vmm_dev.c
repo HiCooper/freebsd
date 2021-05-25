@@ -31,6 +31,8 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_bhyve_snapshot.h"
+
 #include <sys/param.h>
 #include <sys/kernel.h>
 #include <sys/jail.h>
@@ -53,8 +55,10 @@ __FBSDID("$FreeBSD$");
 
 #include <machine/vmparam.h>
 #include <machine/vmm.h>
-#include <machine/vmm_instruction_emul.h>
 #include <machine/vmm_dev.h>
+#include <machine/vmm_instruction_emul.h>
+#include <machine/vmm_snapshot.h>
+#include <x86/apicreg.h>
 
 #include "vmm_lapic.h"
 #include "vmm_stat.h"
@@ -245,10 +249,10 @@ vmmdev_rw(struct cdev *cdev, struct uio *uio, int flags)
 	return (error);
 }
 
-CTASSERT(sizeof(((struct vm_memseg *)0)->name) >= SPECNAMELEN + 1);
+CTASSERT(sizeof(((struct vm_memseg *)0)->name) >= VM_MAX_SUFFIXLEN + 1);
 
 static int
-get_memseg(struct vmmdev_softc *sc, struct vm_memseg *mseg)
+get_memseg(struct vmmdev_softc *sc, struct vm_memseg *mseg, size_t len)
 {
 	struct devmem_softc *dsc;
 	int error;
@@ -265,16 +269,16 @@ get_memseg(struct vmmdev_softc *sc, struct vm_memseg *mseg)
 		}
 		KASSERT(dsc != NULL, ("%s: devmem segment %d not found",
 		    __func__, mseg->segid));
-		error = copystr(dsc->name, mseg->name, SPECNAMELEN + 1, NULL);
+		error = copystr(dsc->name, mseg->name, len, NULL);
 	} else {
-		bzero(mseg->name, sizeof(mseg->name));
+		bzero(mseg->name, len);
 	}
 
 	return (error);
 }
 
 static int
-alloc_memseg(struct vmmdev_softc *sc, struct vm_memseg *mseg)
+alloc_memseg(struct vmmdev_softc *sc, struct vm_memseg *mseg, size_t len)
 {
 	char *name;
 	int error;
@@ -284,10 +288,14 @@ alloc_memseg(struct vmmdev_softc *sc, struct vm_memseg *mseg)
 	name = NULL;
 	sysmem = true;
 
+	/*
+	 * The allocation is lengthened by 1 to hold a terminating NUL.  It'll
+	 * by stripped off when devfs processes the full string.
+	 */
 	if (VM_MEMSEG_NAME(mseg)) {
 		sysmem = false;
-		name = malloc(SPECNAMELEN + 1, M_VMMDEV, M_WAITOK);
-		error = copystr(mseg->name, name, SPECNAMELEN + 1, 0);
+		name = malloc(len, M_VMMDEV, M_WAITOK);
+		error = copystr(mseg->name, name, len, NULL);
 		if (error)
 			goto done;
 	}
@@ -374,8 +382,12 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 	struct vm_rtc_data *rtcdata;
 	struct vm_memmap *mm;
 	struct vm_cpu_topology *topology;
+	struct vm_readwrite_kernemu_device *kernemu;
 	uint64_t *regvals;
 	int *regnums;
+#ifdef BHYVE_SNAPSHOT
+	struct vm_snapshot_meta *snapshot_meta;
+#endif
 
 	error = vmm_priv_check(curthread->td_ucred);
 	if (error)
@@ -425,6 +437,9 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 	case VM_MAP_PPTDEV_MMIO:
 	case VM_BIND_PPTDEV:
 	case VM_UNBIND_PPTDEV:
+#ifdef COMPAT_FREEBSD12
+	case VM_ALLOC_MEMSEG_FBSD12:
+#endif
 	case VM_ALLOC_MEMSEG:
 	case VM_MMAP_MEMSEG:
 	case VM_REINIT:
@@ -438,6 +453,9 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		state_changed = 2;
 		break;
 
+#ifdef COMPAT_FREEBSD12
+	case VM_GET_MEMSEG_FBSD12:
+#endif
 	case VM_GET_MEMSEG:
 	case VM_MMAP_GETNEXT:
 		/*
@@ -496,6 +514,11 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 				       pptmsix->addr, pptmsix->msg,
 				       pptmsix->vector_control);
 		break;
+	case VM_PPTDEV_DISABLE_MSIX:
+		pptdev = (struct vm_pptdev *)data;
+		error = ppt_disable_msix(sc->vm, pptdev->bus, pptdev->slot,
+					 pptdev->func);
+		break;
 	case VM_MAP_PPTDEV_MMIO:
 		pptmmio = (struct vm_pptdev_mmio *)data;
 		error = ppt_map_mmio(sc->vm, pptmmio->bus, pptmmio->slot,
@@ -550,6 +573,41 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 	case VM_IOAPIC_PINCOUNT:
 		*(int *)data = vioapic_pincount(sc->vm);
 		break;
+	case VM_SET_KERNEMU_DEV:
+	case VM_GET_KERNEMU_DEV: {
+		mem_region_write_t mwrite;
+		mem_region_read_t mread;
+		bool arg;
+
+		kernemu = (void *)data;
+
+		if (kernemu->access_width > 0)
+			size = (1u << kernemu->access_width);
+		else
+			size = 1;
+
+		if (kernemu->gpa >= DEFAULT_APIC_BASE && kernemu->gpa < DEFAULT_APIC_BASE + PAGE_SIZE) {
+			mread = lapic_mmio_read;
+			mwrite = lapic_mmio_write;
+		} else if (kernemu->gpa >= VIOAPIC_BASE && kernemu->gpa < VIOAPIC_BASE + VIOAPIC_SIZE) {
+			mread = vioapic_mmio_read;
+			mwrite = vioapic_mmio_write;
+		} else if (kernemu->gpa >= VHPET_BASE && kernemu->gpa < VHPET_BASE + VHPET_SIZE) {
+			mread = vhpet_mmio_read;
+			mwrite = vhpet_mmio_write;
+		} else {
+			error = EINVAL;
+			break;
+		}
+
+		if (cmd == VM_SET_KERNEMU_DEV)
+			error = mwrite(sc->vm, kernemu->vcpuid, kernemu->gpa,
+			    kernemu->value, size, &arg);
+		else
+			error = mread(sc->vm, kernemu->vcpuid, kernemu->gpa,
+			    &kernemu->value, size, &arg);
+		break;
+		}
 	case VM_ISA_ASSERT_IRQ:
 		isa_irq = (struct vm_isa_irq *)data;
 		error = vatpic_assert_irq(sc->vm, isa_irq->atpic_irq);
@@ -585,11 +643,25 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		error = vm_mmap_memseg(sc->vm, mm->gpa, mm->segid, mm->segoff,
 		    mm->len, mm->prot, mm->flags);
 		break;
-	case VM_ALLOC_MEMSEG:
-		error = alloc_memseg(sc, (struct vm_memseg *)data);
+#ifdef COMPAT_FREEBSD12
+	case VM_ALLOC_MEMSEG_FBSD12:
+		error = alloc_memseg(sc, (struct vm_memseg *)data,
+		    sizeof(((struct vm_memseg_fbsd12 *)0)->name));
 		break;
+#endif
+	case VM_ALLOC_MEMSEG:
+		error = alloc_memseg(sc, (struct vm_memseg *)data,
+		    sizeof(((struct vm_memseg *)0)->name));
+		break;
+#ifdef COMPAT_FREEBSD12
+	case VM_GET_MEMSEG_FBSD12:
+		error = get_memseg(sc, (struct vm_memseg *)data,
+		    sizeof(((struct vm_memseg_fbsd12 *)0)->name));
+		break;
+#endif
 	case VM_GET_MEMSEG:
-		error = get_memseg(sc, (struct vm_memseg *)data);
+		error = get_memseg(sc, (struct vm_memseg *)data,
+		    sizeof(((struct vm_memseg *)0)->name));
 		break;
 	case VM_GET_REGISTER:
 		vmreg = (struct vm_register *)data;
@@ -779,6 +851,15 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		    &topology->threads, &topology->maxcpus);
 		error = 0;
 		break;
+#ifdef BHYVE_SNAPSHOT
+	case VM_SNAPSHOT_REQ:
+		snapshot_meta = (struct vm_snapshot_meta *)data;
+		error = vm_snapshot_req(sc->vm, snapshot_meta);
+		break;
+	case VM_RESTORE_TIME:
+		error = vm_restore_time(sc->vm);
+		break;
+#endif
 	default:
 		error = ENOTTY;
 		break;
@@ -790,8 +871,12 @@ vmmdev_ioctl(struct cdev *cdev, u_long cmd, caddr_t data, int fflag,
 		vcpu_unlock_all(sc);
 
 done:
-	/* Make sure that no handler returns a bogus value like ERESTART */
-	KASSERT(error >= 0, ("vmmdev_ioctl: invalid error return %d", error));
+	/*
+	 * Make sure that no handler returns a kernel-internal
+	 * error value to userspace.
+	 */
+	KASSERT(error == ERESTART || error >= 0,
+	    ("vmmdev_ioctl: invalid error return %d", error));
 	return (error);
 }
 
@@ -894,26 +979,29 @@ vmmdev_destroy(void *arg)
 static int
 sysctl_vmm_destroy(SYSCTL_HANDLER_ARGS)
 {
-	int error;
-	char buf[VM_MAX_NAMELEN];
 	struct devmem_softc *dsc;
 	struct vmmdev_softc *sc;
 	struct cdev *cdev;
+	char *buf;
+	int error, buflen;
 
 	error = vmm_priv_check(req->td->td_ucred);
 	if (error)
 		return (error);
 
-	strlcpy(buf, "beavis", sizeof(buf));
-	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	buflen = VM_MAX_NAMELEN + 1;
+	buf = malloc(buflen, M_VMMDEV, M_WAITOK | M_ZERO);
+	strlcpy(buf, "beavis", buflen);
+	error = sysctl_handle_string(oidp, buf, buflen, req);
 	if (error != 0 || req->newptr == NULL)
-		return (error);
+		goto out;
 
 	mtx_lock(&vmmdev_mtx);
 	sc = vmmdev_lookup(buf);
 	if (sc == NULL || sc->cdev == NULL) {
 		mtx_unlock(&vmmdev_mtx);
-		return (EINVAL);
+		error = EINVAL;
+		goto out;
 	}
 
 	/*
@@ -943,11 +1031,16 @@ sysctl_vmm_destroy(SYSCTL_HANDLER_ARGS)
 		destroy_dev_sched_cb(dsc->cdev, devmem_destroy, dsc);
 	}
 	destroy_dev_sched_cb(cdev, vmmdev_destroy, sc);
-	return (0);
+	error = 0;
+
+out:
+	free(buf, M_VMMDEV);
+	return (error);
 }
 SYSCTL_PROC(_hw_vmm, OID_AUTO, destroy,
-	    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_PRISON,
-	    NULL, 0, sysctl_vmm_destroy, "A", NULL);
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_PRISON | CTLFLAG_MPSAFE,
+    NULL, 0, sysctl_vmm_destroy, "A",
+    NULL);
 
 static struct cdevsw vmmdevsw = {
 	.d_name		= "vmmdev",
@@ -961,30 +1054,34 @@ static struct cdevsw vmmdevsw = {
 static int
 sysctl_vmm_create(SYSCTL_HANDLER_ARGS)
 {
-	int error;
 	struct vm *vm;
 	struct cdev *cdev;
 	struct vmmdev_softc *sc, *sc2;
-	char buf[VM_MAX_NAMELEN];
+	char *buf;
+	int error, buflen;
 
 	error = vmm_priv_check(req->td->td_ucred);
 	if (error)
 		return (error);
 
-	strlcpy(buf, "beavis", sizeof(buf));
-	error = sysctl_handle_string(oidp, buf, sizeof(buf), req);
+	buflen = VM_MAX_NAMELEN + 1;
+	buf = malloc(buflen, M_VMMDEV, M_WAITOK | M_ZERO);
+	strlcpy(buf, "beavis", buflen);
+	error = sysctl_handle_string(oidp, buf, buflen, req);
 	if (error != 0 || req->newptr == NULL)
-		return (error);
+		goto out;
 
 	mtx_lock(&vmmdev_mtx);
 	sc = vmmdev_lookup(buf);
 	mtx_unlock(&vmmdev_mtx);
-	if (sc != NULL)
-		return (EEXIST);
+	if (sc != NULL) {
+		error = EEXIST;
+		goto out;
+	}
 
 	error = vm_create(buf, &vm);
 	if (error != 0)
-		return (error);
+		goto out;
 
 	sc = malloc(sizeof(struct vmmdev_softc), M_VMMDEV, M_WAITOK | M_ZERO);
 	sc->vm = vm;
@@ -1004,14 +1101,15 @@ sysctl_vmm_create(SYSCTL_HANDLER_ARGS)
 
 	if (sc2 != NULL) {
 		vmmdev_destroy(sc);
-		return (EEXIST);
+		error = EEXIST;
+		goto out;
 	}
 
 	error = make_dev_p(MAKEDEV_CHECKNAME, &cdev, &vmmdevsw, NULL,
 			   UID_ROOT, GID_WHEEL, 0600, "vmm/%s", buf);
 	if (error != 0) {
 		vmmdev_destroy(sc);
-		return (error);
+		goto out;
 	}
 
 	mtx_lock(&vmmdev_mtx);
@@ -1019,11 +1117,14 @@ sysctl_vmm_create(SYSCTL_HANDLER_ARGS)
 	sc->cdev->si_drv1 = sc;
 	mtx_unlock(&vmmdev_mtx);
 
-	return (0);
+out:
+	free(buf, M_VMMDEV);
+	return (error);
 }
 SYSCTL_PROC(_hw_vmm, OID_AUTO, create,
-	    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_PRISON,
-	    NULL, 0, sysctl_vmm_create, "A", NULL);
+    CTLTYPE_STRING | CTLFLAG_RW | CTLFLAG_PRISON | CTLFLAG_MPSAFE,
+    NULL, 0, sysctl_vmm_create, "A",
+    NULL);
 
 void
 vmmdev_init(void)

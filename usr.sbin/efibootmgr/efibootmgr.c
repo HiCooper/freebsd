@@ -67,6 +67,8 @@ __FBSDID("$FreeBSD$");
 
 #define BAD_LENGTH	((size_t)-1)
 
+#define EFI_OS_INDICATIONS_BOOT_TO_FW_UI 0x0000000000000001
+
 typedef struct _bmgr_opts {
 	char	*env;
 	char	*loader;
@@ -81,6 +83,10 @@ typedef struct _bmgr_opts {
 	bool    delete_bootnext;
 	bool    del_timeout;
 	bool    dry_run;
+	bool	device_path;
+	bool	esp_device;
+	bool    fw_ui;
+	bool    no_fw_ui;
 	bool	has_bootnum;
 	bool    once;
 	int	cp_src;
@@ -89,6 +95,7 @@ typedef struct _bmgr_opts {
 	bool    set_inactive;
 	bool    set_timeout;
 	int     timeout;
+	bool	unix_path;
 	bool    verbose;
 } bmgr_opts_t;
 
@@ -100,17 +107,22 @@ static struct option lopts[] = {
 	{"copy", required_argument, NULL, 'C'},		/* Copy boot method */
 	{"create", no_argument, NULL, 'c'},
 	{"deactivate", no_argument, NULL, 'A'},
-	{"del-timout", no_argument, NULL, 'T'},
+	{"del-timeout", no_argument, NULL, 'T'},
 	{"delete", no_argument, NULL, 'B'},
 	{"delete-bootnext", no_argument, NULL, 'N'},
+	{"device-path", no_argument, NULL, 'd'},
 	{"dry-run", no_argument, NULL, 'D'},
 	{"env", required_argument, NULL, 'e'},
+	{"esp", no_argument, NULL, 'E'},
+	{"fw-ui", no_argument, NULL, 'f'},
+	{"no-fw-ui", no_argument, NULL, 'F'},
 	{"help", no_argument, NULL, 'h'},
 	{"kernel", required_argument, NULL, 'k'},
 	{"label", required_argument, NULL, 'L'},
 	{"loader", required_argument, NULL, 'l'},
 	{"once", no_argument, NULL, 'O'},
 	{"set-timeout", required_argument, NULL, 't'},
+	{"unix-path", no_argument, NULL, 'p'},
 	{"verbose", no_argument, NULL, 'v'},
 	{ NULL, 0, NULL, 0}
 };
@@ -191,7 +203,7 @@ parse_args(int argc, char *argv[])
 {
 	int ch;
 
-	while ((ch = getopt_long(argc, argv, "AaBb:C:cDe:hk:L:l:NnOo:Tt:v",
+	while ((ch = getopt_long(argc, argv, "AaBb:C:cdDe:EFfhk:L:l:NnOo:pTt:v",
 		    lopts, NULL)) != -1) {
 		switch (ch) {
 		case 'A':
@@ -216,9 +228,21 @@ parse_args(int argc, char *argv[])
 		case 'D': /* should be remove dups XXX */
 			opts.dry_run = true;
 			break;
+		case 'd':
+			opts.device_path = true;
+			break;
 		case 'e':
 			free(opts.env);
 			opts.env = strdup(optarg);
+			break;
+		case 'E':
+			opts.esp_device = true;
+			break;
+		case 'F':
+			opts.no_fw_ui = true;
+			break;
+		case 'f':
+			opts.fw_ui = true;
 			break;
 		case 'h':
 		default:
@@ -250,6 +274,9 @@ parse_args(int argc, char *argv[])
 			free(opts.order);
 			opts.order = strdup(optarg);
 			break;
+		case 'p':
+			opts.unix_path = true;
+			break;
 		case 'T':
 			opts.del_timeout = true;
 			break;
@@ -268,7 +295,7 @@ parse_args(int argc, char *argv[])
 		return;
 	}
 
-	if (opts.order && !(opts.order))
+	if (opts.order != NULL && *opts.order == '\0')
 		errx(1, "%s", ORDER_USAGE);
 
 	if ((opts.set_inactive || opts.set_active) && !opts.has_bootnum)
@@ -647,11 +674,16 @@ make_boot_var(const char *label, const char *loader, const char *kernel, const c
 		err(1, "bootvar creation");
 	if (loader == NULL)
 		errx(1, "Must specify boot loader");
-	if (efivar_unix_path_to_device_path(loader, &loaderdp) != 0)
-		err(1, "Cannot translate unix loader path '%s' to UEFI", loader);
+	ret = efivar_unix_path_to_device_path(loader, &loaderdp);
+	if (ret != 0)
+		errc(1, ret, "Cannot translate unix loader path '%s' to UEFI",
+		    loader);
 	if (kernel != NULL) {
-		if (efivar_unix_path_to_device_path(kernel, &kerneldp) != 0)
-			err(1, "Cannot translate unix kernel path '%s' to UEFI", kernel);
+		ret = efivar_unix_path_to_device_path(kernel, &kerneldp);
+		if (ret != 0)
+			errc(1, ret,
+			    "Cannot translate unix kernel path '%s' to UEFI",
+			    kernel);
 	} else {
 		kerneldp = NULL;
 	}
@@ -810,6 +842,45 @@ print_boot_var(const char *name, bool verbose, bool curboot)
 }
 
 
+static bool
+os_indication_supported(uint64_t indication)
+{
+	uint8_t *data;
+	size_t size;
+	uint32_t attrs;
+	int ret;
+
+	ret = efi_get_variable(EFI_GLOBAL_GUID, "OsIndicationsSupported", &data,
+	    &size, &attrs);
+	if (ret < 0)
+		return false;
+	return (le64dec(data) & indication) == indication;
+}
+
+static uint64_t
+os_indications(void)
+{
+	uint8_t *data;
+	size_t size;
+	uint32_t attrs;
+	int ret;
+
+	ret = efi_get_variable(EFI_GLOBAL_GUID, "OsIndications", &data, &size,
+	    &attrs);
+	if (ret < 0)
+		return 0;
+	return le64dec(data);
+}
+
+static int
+os_indications_set(uint64_t mask, uint64_t val)
+{
+	uint8_t new[sizeof(uint64_t)];
+
+	le64enc(&new, (os_indications() & ~mask) | (val & mask));
+	return set_bootvar("OsIndications", new, sizeof(new));
+}
+
 /* Cmd epilogue, or just the default with no args.
  * The order is [bootnext] bootcurrent, timeout, order, and the bootvars [-v]
  */
@@ -826,6 +897,14 @@ print_boot_vars(bool verbose)
 	uint32_t attrs;
 	int ret, bolen;
 	uint16_t *boot_order = NULL, current;
+	bool boot_to_fw_ui;
+
+	if (os_indication_supported(EFI_OS_INDICATIONS_BOOT_TO_FW_UI)) {
+		boot_to_fw_ui =
+		    (os_indications() & EFI_OS_INDICATIONS_BOOT_TO_FW_UI) != 0;
+		printf("Boot to FW : %s\n", boot_to_fw_ui != 0 ?
+		    "true" : "false");
+	}
 
 	ret = efi_get_variable(EFI_GLOBAL_GUID, "BootNext", &data, &size, &attrs);
 	if (ret > 0) {
@@ -906,6 +985,89 @@ handle_timeout(int to)
 		errx(1, "Can't set Timeout for booting.");
 }
 
+static void
+report_esp_device(bool do_dp, bool do_unix)
+{
+	uint8_t *data;
+	size_t size, len;
+	uint32_t attrs;
+	int ret;
+	uint16_t current, fplen;
+	char *name, *dev, *relpath, *abspath;
+	uint8_t *walker, *ep;
+	efi_char *descr;
+	efidp dp, edp;
+	char buf[PATH_MAX];
+
+	if (do_dp && do_unix)
+		errx(1, "Can't report both UEFI device-path and Unix path together");
+
+	ret = efi_get_variable(EFI_GLOBAL_GUID, "BootCurrent", &data, &size,&attrs);
+	if (ret < 0)
+		err(1, "Can't get BootCurrent");
+	current = le16dec(data);
+	if (asprintf(&name, "Boot%04X", current) < 0)
+		err(1, "Can't format boot var\n");
+	if (efi_get_variable(EFI_GLOBAL_GUID, name, &data, &size, NULL) < 0)
+		err(1, "Can't retrieve EFI var %s", name);
+	// First 4 bytes are attribute flags
+	walker = data;
+	ep = walker + size;
+	walker += sizeof(uint32_t);
+	// Next two bytes are length of the file paths
+	fplen = le16dec(walker);
+	walker += sizeof(fplen);
+	// Next we have a 0 terminated UCS2 string that we know to be aligned
+	descr = (efi_char *)(intptr_t)(void *)walker;
+	len = ucs2len(descr); // XXX need to sanity check that len < (datalen - (ep - walker) / 2)
+	walker += (len + 1) * sizeof(efi_char);
+	if (walker > ep)
+		errx(1, "malformed boot variable %s", name);
+	// Now we have fplen bytes worth of file path stuff
+	dp = (efidp)walker;
+	walker += fplen;
+	edp = (efidp)walker;
+	if (walker > ep)
+		errx(1, "malformed boot variable %s", name);
+	if (do_dp) {
+		efidp_format_device_path_node(buf, sizeof(buf), dp);
+		printf("%s\n", buf);
+		exit(0);
+	}
+	if (efivar_device_path_to_unix_path(dp, &dev, &relpath, &abspath) != 0)
+		errx(1, "Can't convert to unix path");
+	if (do_unix) {
+		if (abspath == NULL)
+			errx(1, "Can't find where %s:%s is mounted",
+			    dev, relpath);
+		abspath[strlen(abspath) - strlen(relpath) - 1] = '\0';
+		printf("%s\n", abspath);
+	} else {
+		printf("%s\n", dev);
+	}
+	free(dev);
+	free(relpath);
+	free(abspath);
+	exit(0);
+}
+
+static void
+set_boot_to_fw_ui(bool to_fw)
+{
+	int ret;
+
+	if (!os_indication_supported(EFI_OS_INDICATIONS_BOOT_TO_FW_UI)) {
+		if (to_fw)
+			errx(1, "boot to fw ui not supported");
+		else
+			return;
+	}
+	ret = os_indications_set(EFI_OS_INDICATIONS_BOOT_TO_FW_UI,
+	    to_fw ? ~0 : 0);
+	if (ret < 0)
+		errx(1, "failed to set boot to fw ui");
+}
+
 int
 main(int argc, char *argv[])
 {
@@ -938,6 +1100,12 @@ main(int argc, char *argv[])
 		delete_timeout();
 	else if (opts.set_timeout)
 		handle_timeout(opts.timeout);
+	else if (opts.esp_device)
+		report_esp_device(opts.device_path, opts.unix_path);
+	else if (opts.fw_ui)
+		set_boot_to_fw_ui(true);
+	else if (opts.no_fw_ui)
+		set_boot_to_fw_ui(false);
 
 	print_boot_vars(opts.verbose);
 }

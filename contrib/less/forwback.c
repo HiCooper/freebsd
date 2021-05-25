@@ -1,6 +1,6 @@
 /* $FreeBSD$ */
 /*
- * Copyright (C) 1984-2017  Mark Nudelman
+ * Copyright (C) 1984-2020  Mark Nudelman
  *
  * You may distribute under the terms of either the GNU General Public
  * License or the Less License, as specified in the README file.
@@ -21,7 +21,6 @@ public int screen_trashed;
 public int squished;
 public int no_back_scroll = 0;
 public int forw_prompt;
-public int same_pos_bell = 1;
 
 extern int sigs;
 extern int top_scroll;
@@ -48,7 +47,7 @@ extern char *tagoption;
  * Sound the bell to indicate user is trying to move past end of file.
  */
 	static void
-eof_bell()
+eof_bell(VOID_PARAM)
 {
 	if (quiet == NOT_QUIET)
 		bell();
@@ -60,7 +59,7 @@ eof_bell()
  * Check to see if the end of file is currently displayed.
  */
 	public int
-eof_displayed()
+eof_displayed(VOID_PARAM)
 {
 	POSITION pos;
 
@@ -87,7 +86,7 @@ eof_displayed()
  * Check to see if the entire file is currently displayed.
  */
 	public int
-entire_file_displayed()
+entire_file_displayed(VOID_PARAM)
 {
 	POSITION pos;
 
@@ -107,7 +106,7 @@ entire_file_displayed()
  * for the first time.
  */
 	public void
-squish_check()
+squish_check(VOID_PARAM)
 {
 	if (!squished)
 		return;
@@ -290,7 +289,7 @@ forw(n, pos, force, only_last, nblank)
 		forw_prompt = 1;
 	}
 
-	if (nlines == 0 && !ignore_eoi && same_pos_bell)
+	if (nlines == 0 && !ignore_eoi)
 		eof_bell();
 	else if (do_repaint)
 		repaint();
@@ -350,7 +349,7 @@ back(n, pos, force, only_last)
 		}
 	}
 
-	if (nlines == 0 && same_pos_bell)
+	if (nlines == 0)
 		eof_bell();
 	else if (do_repaint)
 		repaint();
@@ -439,7 +438,7 @@ backward(n, force, only_last)
  * top_scroll, as well as back_scroll.
  */
 	public int
-get_back_scroll()
+get_back_scroll(VOID_PARAM)
 {
 	if (no_back_scroll)
 		return (0);
@@ -451,19 +450,18 @@ get_back_scroll()
 }
 
 /*
- * Return number of displayable lines in the file.
- * Stop counting at screen height + 1.
+ * Will the entire file fit on one screen?
  */
 	public int
-get_line_count()
+get_one_screen(VOID_PARAM)
 {
 	int nlines;
 	POSITION pos = ch_zero();
 
-	for (nlines = 0;  nlines <= sc_height;  nlines++)
+	for (nlines = 0;  nlines < sc_height;  nlines++)
 	{
 		pos = forw_line(pos);
 		if (pos == NULL_POSITION) break;
 	}
-	return nlines;
+	return (nlines < sc_height);
 }

@@ -49,7 +49,7 @@ static MALLOC_DEFINE(M_VTFONT, "vtfont", "vt font");
 #define	VTFONT_MAXDIMENSION	128
 
 static uint16_t
-vtfont_bisearch(const struct vt_font_map *map, unsigned int len, uint32_t src)
+vtfont_bisearch(const vfnt_map_t *map, unsigned int len, uint32_t src)
 {
 	int min, mid, max;
 
@@ -92,11 +92,6 @@ vtfont_lookup(const struct vt_font *vf, term_char_t c)
 	unsigned int normal_map;
 	unsigned int bold_map;
 
-	/*
-	 * No support for printing right hand sides for CJK fullwidth
-	 * characters. Simply print a space and assume that the left
-	 * hand side describes the entire character.
-	 */
 	src = TCHAR_CHARACTER(c);
 	if (TCHAR_FORMAT(c) & TF_CJK_RIGHT) {
 		normal_map = VFNT_MAP_NORMAL_RIGHT;
@@ -142,7 +137,7 @@ vtfont_unref(struct vt_font *vf)
 }
 
 static int
-vtfont_validate_map(struct vt_font_map *vfm, unsigned int length,
+vtfont_validate_map(vfnt_map_t *vfm, unsigned int length,
     unsigned int glyph_count)
 {
 	unsigned int i, last = 0;
@@ -203,7 +198,7 @@ vtfont_load(vfnt_t *f, struct vt_font **ret)
 		vf->vf_map_count[i] = f->map_count[i];
 		if (f->map_count[i] == 0)
 			continue;
-		mapsize = f->map_count[i] * sizeof(struct vt_font_map);
+		mapsize = f->map_count[i] * sizeof(vfnt_map_t);
 		vf->vf_map[i] = malloc(mapsize, M_VTFONT, M_WAITOK);
 		error = copyin(f->map[i], vf->vf_map[i], mapsize);
 		if (error)

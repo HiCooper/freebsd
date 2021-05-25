@@ -39,7 +39,7 @@
 
 #include "elfcopy.h"
 
-ELFTC_VCSID("$Id: main.c 3577 2017-09-14 02:19:42Z emaste $");
+ELFTC_VCSID("$Id: main.c 3757 2019-06-28 01:15:28Z emaste $");
 
 enum options
 {
@@ -388,9 +388,6 @@ create_elf(struct elfcopy *ecp)
 	 */
 	copy_content(ecp);
 
-	/* Generate section name string table (.shstrtab). */
-	set_shstrtab(ecp);
-
 	/*
 	 * Second processing of output sections: Update section headers.
 	 * At this stage we set name string index, update st_link and st_info
@@ -486,6 +483,9 @@ free_elf(struct elfcopy *ecp)
 	/* Free symbol table buffers. */
 	free_symtab(ecp);
 
+	/* Free section name string table. */
+	elftc_string_table_destroy(ecp->shstrtab->strtab);
+
 	/* Free internal section list. */
 	if (!TAILQ_EMPTY(&ecp->v_sec)) {
 		TAILQ_FOREACH_SAFE(sec, &ecp->v_sec, sec_list, sec_temp) {
@@ -512,44 +512,57 @@ free_elf(struct elfcopy *ecp)
 
 /* Create a temporary file. */
 void
-create_tempfile(char **fn, int *fd)
+create_tempfile(const char *src, char **fn, int *fd)
 {
+	static const char _TEMPDIR[] = "/tmp/";
+	static const char _TEMPFILE[] = "ecp.XXXXXXXX";
 	const char	*tmpdir;
-	char		*cp, *tmpf;
-	size_t		 tlen, plen;
-
-#define	_TEMPFILE "ecp.XXXXXXXX"
-#define	_TEMPFILEPATH "/tmp/ecp.XXXXXXXX"
+	char		*tmpf;
+	size_t		 tlen, slen, plen;
 
 	if (fn == NULL || fd == NULL)
 		return;
-	/* Repect TMPDIR environment variable. */
-	tmpdir = getenv("TMPDIR");
-	if (tmpdir != NULL && *tmpdir != '\0') {
-		tlen = strlen(tmpdir);
-		plen = strlen(_TEMPFILE);
-		tmpf = malloc(tlen + plen + 2);
+	for (;;) {
+		if (src == NULL) {
+			/* Respect TMPDIR environment variable. */
+			tmpdir = getenv("TMPDIR");
+			if (tmpdir == NULL || *tmpdir == '\0')
+				tmpdir = _TEMPDIR;
+			tlen = strlen(tmpdir);
+			slen = tmpdir[tlen - 1] == '/' ? 0 : 1;
+		} else {
+			/* Create temporary file relative to source file. */
+			if ((tmpdir = strrchr(src, '/')) == NULL) {
+				/* No path, only use a template filename. */
+				tlen = 0;
+			} else {
+				/* Append the template after the slash. */
+				tlen = ++tmpdir - src;
+				tmpdir = src;
+			}
+			slen = 0;
+		}
+		plen = strlen(_TEMPFILE) + 1;
+		tmpf = malloc(tlen + slen + plen);
 		if (tmpf == NULL)
 			err(EXIT_FAILURE, "malloc failed");
-		strncpy(tmpf, tmpdir, tlen);
-		cp = &tmpf[tlen - 1];
-		if (*cp++ != '/')
-			*cp++ = '/';
-		strncpy(cp, _TEMPFILE, plen);
-		cp[plen] = '\0';
-	} else {
-		tmpf = strdup(_TEMPFILEPATH);
-		if (tmpf == NULL)
-			err(EXIT_FAILURE, "strdup failed");
+		if (tlen > 0)
+			memcpy(tmpf, tmpdir, tlen);
+		if (slen > 0)
+			tmpf[tlen] = '/';
+		/* Copy template filename including NUL terminator. */
+		memcpy(tmpf + tlen + slen, _TEMPFILE, plen);
+		if ((*fd = mkstemp(tmpf)) != -1)
+			break;
+		if (errno != EACCES || src == NULL)
+			err(EXIT_FAILURE, "mkstemp %s failed", tmpf);
+		/* Permission denied, try again using TMPDIR or /tmp. */
+		free(tmpf);
+		src = NULL;
 	}
-	if ((*fd = mkstemp(tmpf)) == -1)
-		err(EXIT_FAILURE, "mkstemp %s failed", tmpf);
 	if (fchmod(*fd, 0644) == -1)
 		err(EXIT_FAILURE, "fchmod %s failed", tmpf);
 	*fn = tmpf;
-
-#undef _TEMPFILE
-#undef _TEMPFILEPATH
 }
 
 /*
@@ -571,31 +584,35 @@ copy_from_tempfile(const char *src, const char *dst, int infd, int *outfd,
 		if (rename(src, dst) >= 0) {
 			*outfd = infd;
 			return (0);
-		} else if (errno != EXDEV)
+		} else if (errno != EXDEV && errno != EACCES)
 			return (-1);
-	
+
 		/*
 		 * If the rename() failed due to 'src' and 'dst' residing in
 		 * two different file systems, invoke a helper function in
 		 * libelftc to do the copy.
 		 */
 
-		if (unlink(dst) < 0)
+		if (errno != EACCES && unlink(dst) < 0)
 			return (-1);
 	}
 
 	if ((tmpfd = open(dst, O_CREAT | O_TRUNC | O_WRONLY, 0755)) < 0)
 		return (-1);
 
-	if (elftc_copyfile(infd, tmpfd) < 0)
+	if (elftc_copyfile(infd, tmpfd) < 0) {
+		(void) close(tmpfd);
 		return (-1);
+	}
 
 	/*
 	 * Remove the temporary file from the file system
 	 * namespace, and close its file descriptor.
 	 */
-	if (unlink(src) < 0)
+	if (unlink(src) < 0) {
+		(void) close(tmpfd);
 		return (-1);
+	}
 
 	(void) close(infd);
 
@@ -626,7 +643,7 @@ create_file(struct elfcopy *ecp, const char *src, const char *dst)
 		err(EXIT_FAILURE, "fstat %s failed", src);
 
 	if (dst == NULL)
-		create_tempfile(&tempfile, &ofd);
+		create_tempfile(src, &tempfile, &ofd);
 	else
 		if ((ofd = open(dst, O_RDWR|O_CREAT, 0755)) == -1)
 			err(EXIT_FAILURE, "open %s failed", dst);
@@ -659,7 +676,7 @@ create_file(struct elfcopy *ecp, const char *src, const char *dst)
 			if (ecp->oed == ELFDATANONE)
 				ecp->oed = ELFDATA2LSB;
 		}
-		create_tempfile(&elftemp, &efd);
+		create_tempfile(src, &elftemp, &efd);
 		if ((ecp->eout = elf_begin(efd, ELF_C_WRITE, NULL)) == NULL)
 			errx(EXIT_FAILURE, "elf_begin() failed: %s",
 			    elf_errmsg(-1));
@@ -719,7 +736,7 @@ create_file(struct elfcopy *ecp, const char *src, const char *dst)
 					    tempfile);
 				free(tempfile);
 			}
-			create_tempfile(&tempfile, &ofd0);
+			create_tempfile(src, &tempfile, &ofd0);
 
 
 			/*
@@ -1017,13 +1034,16 @@ elfcopy_main(struct elfcopy *ecp, int argc, char **argv)
 		}
 	}
 
-	if (optind == argc || optind + 2 < argc)
+	argc -= optind;
+	argv += optind;
+
+	if (argc == 0 || argc > 2)
 		elfcopy_usage();
 
-	infile = argv[optind];
+	infile = argv[0];
 	outfile = NULL;
-	if (optind + 1 < argc)
-		outfile = argv[optind + 1];
+	if (argc > 1)
+		outfile = argv[1];
 
 	create_file(ecp, infile, outfile);
 }
@@ -1067,7 +1087,10 @@ mcs_main(struct elfcopy *ecp, int argc, char **argv)
 		}
 	}
 
-	if (optind == argc)
+	argc -= optind;
+	argv += optind;
+
+	if (argc == 0)
 		mcs_usage();
 
 	/* Must specify one operation at least. */
@@ -1104,7 +1127,7 @@ mcs_main(struct elfcopy *ecp, int argc, char **argv)
 		sac->string = string;
 	}
 
-	for (i = optind; i < argc; i++) {
+	for (i = 0; i < argc; i++) {
 		/* If only -p is specified, output to /dev/null */
 		if (print && !append && !compress && !delete)
 			create_file(ecp, argv[i], "/dev/null");
@@ -1180,15 +1203,24 @@ strip_main(struct elfcopy *ecp, int argc, char **argv)
 		}
 	}
 
+	argc -= optind;
+	argv += optind;
+
 	if (ecp->strip == 0 &&
 	    ((ecp->flags & DISCARD_LOCAL) == 0) &&
 	    ((ecp->flags & DISCARD_LLABEL) == 0) &&
 	    lookup_symop_list(ecp, NULL, SYMOP_STRIP) == NULL)
 		ecp->strip = STRIP_ALL;
-	if (optind == argc)
+	if (argc == 0)
+		strip_usage();
+	/*
+	 * Only accept a single input file if an output file had been
+	 * specified.
+	 */
+	if (outfile != NULL && argc != 1)
 		strip_usage();
 
-	for (i = optind; i < argc; i++)
+	for (i = 0; i < argc; i++)
 		create_file(ecp, argv[i], outfile);
 }
 
@@ -1375,6 +1407,7 @@ set_output_target(struct elfcopy *ecp, const char *target_name)
 		ecp->oec = elftc_bfd_target_class(tgt);
 		ecp->oed = elftc_bfd_target_byteorder(tgt);
 		ecp->oem = elftc_bfd_target_machine(tgt);
+		ecp->abi = elftc_bfd_target_osabi(tgt);
 	}
 	if (ecp->otf == ETF_EFI || ecp->otf == ETF_PE)
 		ecp->oem = elftc_bfd_target_machine(tgt);
@@ -1565,7 +1598,6 @@ main(int argc, char **argv)
 	ecp = calloc(1, sizeof(*ecp));
 	if (ecp == NULL)
 		err(EXIT_FAILURE, "calloc failed");
-	memset(ecp, 0, sizeof(*ecp));
 
 	ecp->itf = ecp->otf = ETF_ELF;
 	ecp->iec = ecp->oec = ELFCLASSNONE;

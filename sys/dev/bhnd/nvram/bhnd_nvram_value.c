@@ -31,6 +31,7 @@
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/limits.h>
 #include <sys/sbuf.h>
 
 #ifdef _KERNEL
@@ -65,7 +66,6 @@ static int	 bhnd_nvram_val_set(bhnd_nvram_val *value, const void *inp,
 		     size_t ilen, bhnd_nvram_type itype, uint32_t flags);
 static int	 bhnd_nvram_val_set_inline(bhnd_nvram_val *value,
 		     const void *inp, size_t ilen, bhnd_nvram_type itype);
-
 
 static int	 bhnd_nvram_val_encode_data(const void *inp, size_t ilen,
 		     bhnd_nvram_type itype, void *outp, size_t *olen,
@@ -204,7 +204,7 @@ bhnd_nvram_val_default_fmt(bhnd_nvram_type type)
 	case BHND_NVRAM_TYPE_BOOL_ARRAY:
 		return (&bhnd_nvram_val_bool_array_fmt);
 	}
-	
+
 	/* Quiesce gcc4.2 */
 	BHND_NV_PANIC("bhnd nvram type %u unknown", type);
 }
@@ -310,22 +310,22 @@ bhnd_nvram_val_init_common(bhnd_nvram_val *value,
 
 		return (0);
 	}
-	
+
 	/* Determine size when encoded in native format */
 	error = bhnd_nvram_value_coerce(inp, ilen, itype, NULL, &olen, otype);
 	if (error)
 		return (error);
-	
+
 	/* Fetch reference to (or allocate) an appropriately sized buffer */
 	outp = bhnd_nvram_val_alloc_bytes(value, olen, otype, flags);
 	if (outp == NULL)
 		return (ENOMEM);
-	
+
 	/* Perform encode */
 	error = bhnd_nvram_value_coerce(inp, ilen, itype, outp, &olen, otype);
 	if (error)
 		return (error);
-	
+
 	return (0);
 }
 
@@ -411,7 +411,6 @@ bhnd_nvram_val_new(bhnd_nvram_val **value, const bhnd_nvram_val_fmt *fmt,
 	return (error);
 }
 
-
 /* Common initialization support for bhnd_nvram_val_convert_init() and
  * bhnd_nvram_val_convert_new() */
 static int
@@ -460,12 +459,12 @@ bhnd_nvram_val_convert_common(bhnd_nvram_val *value,
 	/* Determine size when encoded in native format */
 	if ((error = bhnd_nvram_val_encode(src, NULL, &olen, otype)))
 		return (error);
-	
+
 	/* Fetch reference to (or allocate) an appropriately sized buffer */
 	outp = bhnd_nvram_val_alloc_bytes(value, olen, otype, flags);
 	if (outp == NULL)
 		return (ENOMEM);
-	
+
 	/* Perform encode */
 	if ((error = bhnd_nvram_val_encode(src, outp, &olen, otype)))
 		return (error);
@@ -592,7 +591,6 @@ bhnd_nvram_val_copy(bhnd_nvram_val *value)
 		/* Perform copy below */
 		break;
 	}
-
 
 	/* Compute the new value's flags based on the source value */
 	switch (value->data_storage) {
@@ -809,7 +807,6 @@ bhnd_nvram_val_encode_data(const void *inp, size_t ilen, bhnd_nvram_type itype,
 		    BHND_NVRAM_TYPE_UINT8_ARRAY, outp, olen, otype));
 	}
 }
-
 
 /**
  * Standard string/char array/char encoding implementation.
@@ -1275,7 +1272,7 @@ bhnd_nvram_val_encode_int(const void *inp, size_t ilen, bhnd_nvram_type itype,
 	case BHND_NVRAM_TYPE_STRING:
 	case BHND_NVRAM_TYPE_STRING_ARRAY: {
 		ssize_t len;
-	
+
 		/* Attempt to write the entry + NUL */
 		if (otype_signed) {
 			len = snprintf(outp, limit, "%" PRId64, intv.i64);

@@ -72,7 +72,7 @@ static void siis_ch_led(void *priv, int onoff);
 static void siis_begin_transaction(device_t dev, union ccb *ccb);
 static void siis_dmasetprd(void *arg, bus_dma_segment_t *segs, int nsegs, int error);
 static void siis_execute_transaction(struct siis_slot *slot);
-static void siis_timeout(struct siis_slot *slot);
+static void siis_timeout(void *arg);
 static void siis_end_transaction(struct siis_slot *slot, enum siis_err_type et);
 static int siis_setup_fis(device_t dev, struct siis_cmd *ctp, union ccb *ccb, int tag);
 static void siis_dmainit(device_t dev);
@@ -688,8 +688,7 @@ siis_dmainit(device_t dev)
 	if (bus_dma_tag_create(bus_get_dma_tag(dev), 1, 0,
 	    BUS_SPACE_MAXADDR, BUS_SPACE_MAXADDR,
 	    NULL, NULL,
-	    SIIS_SG_ENTRIES * PAGE_SIZE * SIIS_MAX_SLOTS,
-	    SIIS_SG_ENTRIES, 0xFFFFFFFF,
+	    SIIS_SG_ENTRIES * PAGE_SIZE, SIIS_SG_ENTRIES, 0xFFFFFFFF,
 	    0, busdma_lock_mutex, &ch->mtx, &ch->dma.data_tag)) {
 		goto error;
 	}
@@ -745,6 +744,7 @@ siis_slotsalloc(device_t dev)
 		slot->dev = dev;
 		slot->slot = i;
 		slot->state = SIIS_SLOT_EMPTY;
+		slot->prb_offset = SIIS_PRB_SIZE * i;
 		slot->ccb = NULL;
 		callout_init_mtx(&slot->timeout, &ch->mtx, 0);
 
@@ -1034,8 +1034,7 @@ siis_dmasetprd(void *arg, bus_dma_segment_t *segs, int nsegs, int error)
 	slot->dma.nsegs = nsegs;
 	if (nsegs != 0) {
 		/* Get a piece of the workspace for this request */
-		ctp = (struct siis_cmd *)(ch->dma.work + SIIS_CT_OFFSET +
-		    (SIIS_CT_SIZE * slot->slot));
+		ctp = (struct siis_cmd *)(ch->dma.work + slot->prb_offset);
 		/* Fill S/G table */
 		if (slot->ccb->ccb_h.func_code == XPT_ATA_IO) 
 			prd = &ctp->u.ata.prd[0];
@@ -1066,8 +1065,7 @@ siis_execute_transaction(struct siis_slot *slot)
 
 	mtx_assert(&ch->mtx, MA_OWNED);
 	/* Get a piece of the workspace for this request */
-	ctp = (struct siis_cmd *)
-		(ch->dma.work + SIIS_CT_OFFSET + (SIIS_CT_SIZE * slot->slot));
+	ctp = (struct siis_cmd *)(ch->dma.work + slot->prb_offset);
 	ctp->control = 0;
 	ctp->protocol_override = 0;
 	ctp->transfer_count = 0;
@@ -1117,13 +1115,12 @@ siis_execute_transaction(struct siis_slot *slot)
 	/* Issue command to the controller. */
 	slot->state = SIIS_SLOT_RUNNING;
 	ch->rslots |= (1 << slot->slot);
-	prb_bus = ch->dma.work_bus +
-	      SIIS_CT_OFFSET + (SIIS_CT_SIZE * slot->slot);
+	prb_bus = ch->dma.work_bus + slot->prb_offset;
 	ATA_OUTL(ch->r_mem, SIIS_P_CACTL(slot->slot), prb_bus);
 	ATA_OUTL(ch->r_mem, SIIS_P_CACTH(slot->slot), prb_bus >> 32);
 	/* Start command execution timeout */
 	callout_reset_sbt(&slot->timeout, SBT_1MS * ccb->ccb_h.timeout, 0,
-	    (timeout_t*)siis_timeout, slot, 0);
+	    siis_timeout, slot, 0);
 	return;
 }
 
@@ -1166,14 +1163,15 @@ siis_rearm_timeout(device_t dev)
 			continue;
 		callout_reset_sbt(&slot->timeout,
 		    SBT_1MS * slot->ccb->ccb_h.timeout, 0,
-		    (timeout_t*)siis_timeout, slot, 0);
+		    siis_timeout, slot, 0);
 	}
 }
 
 /* Locked by callout mechanism. */
 static void
-siis_timeout(struct siis_slot *slot)
+siis_timeout(void *arg)
 {
+	struct siis_slot *slot = arg;
 	device_t dev = slot->dev;
 	struct siis_channel *ch = device_get_softc(dev);
 	union ccb *ccb = slot->ccb;
@@ -1722,13 +1720,14 @@ siis_setup_fis(device_t dev, struct siis_cmd *ctp, union ccb *ccb, int tag)
 		fis[9] = ccb->ataio.cmd.lba_mid_exp;
 		fis[10] = ccb->ataio.cmd.lba_high_exp;
 		fis[11] = ccb->ataio.cmd.features_exp;
+		fis[12] = ccb->ataio.cmd.sector_count;
 		if (ccb->ataio.cmd.flags & CAM_ATAIO_FPDMA) {
-			fis[12] = tag << 3;
-			fis[13] = 0;
-		} else {
-			fis[12] = ccb->ataio.cmd.sector_count;
-			fis[13] = ccb->ataio.cmd.sector_count_exp;
+			fis[12] &= 0x07;
+			fis[12] |= tag << 3;
 		}
+		fis[13] = ccb->ataio.cmd.sector_count_exp;
+		if (ccb->ataio.ata_flags & ATA_FLAG_ICC)
+			fis[14] = ccb->ataio.icc;
 		fis[15] = ATA_A_4BIT;
 		if (ccb->ataio.ata_flags & ATA_FLAG_AUX) {
 			fis[16] =  ccb->ataio.aux        & 0xff;
@@ -1965,7 +1964,7 @@ siisaction(struct cam_sim *sim, union ccb *ccb)
 		cpi->transport_version = XPORT_VERSION_UNSPECIFIED;
 		cpi->protocol = PROTO_ATA;
 		cpi->protocol_version = PROTO_VERSION_UNSPECIFIED;
-		cpi->maxio = MAXPHYS;
+		cpi->maxio = maxphys;
 		cpi->hba_vendor = pci_get_vendor(parent);
 		cpi->hba_device = pci_get_device(parent);
 		cpi->hba_subvendor = pci_get_subvendor(parent);

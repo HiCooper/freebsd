@@ -109,7 +109,7 @@ cap_sysctl_limit_name(cap_sysctl_limit_t *limit, const char *name, int flags)
 }
 
 cap_sysctl_limit_t *
-cap_sysctl_limit_mib(cap_sysctl_limit_t *limit, int *mibp, u_int miblen,
+cap_sysctl_limit_mib(cap_sysctl_limit_t *limit, const int *mibp, u_int miblen,
     int flags)
 {
 	nvlist_t *lnv;
@@ -316,7 +316,7 @@ sysctl_valid(const nvlist_t *nvl, bool limit)
 			 */
 			mask = limit ? (CAP_SYSCTL_RDWR |
 			    CAP_SYSCTL_RECURSIVE) : CAP_SYSCTL_RDWR;
-			if ((operation & ~limit) != 0 ||
+			if ((operation & ~mask) != 0 ||
 			    (operation & CAP_SYSCTL_RDWR) == 0)
 				return (EINVAL);
 			/* Only one 'operation' can be present. */

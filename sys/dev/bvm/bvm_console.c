@@ -107,6 +107,8 @@ static void
 cn_drvinit(void *unused)
 {
 	struct tty *tp;
+    
+	gone_in(13, "bvmconsole");
 
 	if (bvm_consdev.cn_pri != CN_DEAD) {
 		tp = tty_alloc(&bvm_ttydevsw, NULL);
@@ -130,7 +132,7 @@ static void
 bvm_tty_close(struct tty *tp)
 {
 
-	tty_lock_assert(tp, MA_OWNED);
+	tty_assert_locked(tp);
 	callout_stop(&bvm_timer);
 }
 
@@ -159,7 +161,7 @@ bvm_timeout(void *v)
 
 	tp = (struct tty *)v;
 
-	tty_lock_assert(tp, MA_OWNED);
+	tty_assert_locked(tp);
 	while ((c = bvm_cngetc(NULL)) != -1)
 		ttydisc_rint(tp, c, 0);
 	ttydisc_rint_done(tp);

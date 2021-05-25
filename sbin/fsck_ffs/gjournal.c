@@ -93,7 +93,6 @@ static LIST_HEAD(, cgchain) cglist = LIST_HEAD_INITIALIZER(cglist);
 static const char *devnam;
 static struct uufsd *diskp = NULL;
 static struct fs *fs = NULL;
-struct ufs2_dinode ufs2_zino;
 
 static void putcgs(void);
 
@@ -134,7 +133,7 @@ getcg(int cg)
 		if (cgc == NULL)
 			err(1, "malloc(%zu)", sizeof(*cgc));
 	}
-	if (cgget(diskp, cg, &cgc->cgc_cg) == -1)
+	if (cgget(fsreadfd, fs, cg, &cgc->cgc_cg) == -1)
 		err(1, "cgget(%d)", cg);
 	cgc->cgc_busy = 0;
 	cgc->cgc_dirty = 0;
@@ -190,7 +189,7 @@ putcgs(void)
 		LIST_REMOVE(cgc, cgc_next);
 		ncgs--;
 		if (cgc->cgc_dirty) {
-			if (cgput(diskp, &cgc->cgc_cg) == -1)
+			if (cgput(fswritefd, fs, &cgc->cgc_cg) == -1)
 				err(1, "cgput(%d)", cgc->cgc_cg.cg_cgx);
 			//printf("%s: Wrote cg=%d\n", __func__,
 			//    cgc->cgc_cg.cg_cgx);

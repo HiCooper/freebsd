@@ -81,7 +81,6 @@ __FBSDID("$FreeBSD$");
 /* Non-exported fixed clocks */
 #define CLK_OSC_12M		150
 
-
 static struct aw_ccung_reset a83t_ccu_resets[] = {
 	CCU_RESET(RST_USB_PHY0, 0xcc, 0)
 	CCU_RESET(RST_USB_PHY1, 0xcc, 1)
@@ -786,4 +785,4 @@ DEFINE_CLASS_1(ccu_a83tng, ccu_a83tng_driver, ccu_a83tng_methods,
   sizeof(struct aw_ccung_softc), aw_ccung_driver);
 
 EARLY_DRIVER_MODULE(ccu_a83tng, simplebus, ccu_a83tng_driver,
-    ccu_a83tng_devclass, 0, 0, BUS_PASS_BUS + BUS_PASS_ORDER_LAST);
+    ccu_a83tng_devclass, 0, 0, BUS_PASS_RESOURCE + BUS_PASS_ORDER_MIDDLE);

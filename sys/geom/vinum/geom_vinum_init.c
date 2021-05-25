@@ -35,6 +35,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/vinum/geom_vinum_var.h>
 #include <geom/vinum/geom_vinum.h>
 
@@ -239,7 +240,6 @@ gv_sync(struct gv_volume *v)
 	KASSERT(v != NULL, ("gv_sync: NULL v"));
 	sc = v->vinumconf;
 	KASSERT(sc != NULL, ("gv_sync: NULL sc on %s", v->name));
-
 
 	up = gv_find_good_plex(v);
 	if (up == NULL)

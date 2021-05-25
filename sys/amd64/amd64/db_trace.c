@@ -123,7 +123,6 @@ db_frame(struct db_variable *vp, db_expr_t *valuep, int op)
 #define	TRAP		1
 #define	INTERRUPT	2
 #define	SYSCALL		3
-#define	TRAP_INTERRUPT	5
 
 static void db_nextframe(struct amd64_frame **, db_addr_t *, struct thread *);
 static void db_print_stack_entry(const char *, db_addr_t, void *);
@@ -204,6 +203,7 @@ db_nextframe(struct amd64_frame **fp, db_addr_t *ip, struct thread *td)
 			frame_type = TRAP;
 		else if (strncmp(name, "Xatpic_intr", 11) == 0 ||
 		    strncmp(name, "Xapic_isr", 9) == 0 ||
+		    strcmp(name, "Xxen_intr_upcall") == 0 ||
 		    strcmp(name, "Xtimerint") == 0 ||
 		    strcmp(name, "Xipi_intr_bitmap_handler") == 0 ||
 		    strcmp(name, "Xcpustop") == 0 ||
@@ -218,13 +218,6 @@ db_nextframe(struct amd64_frame **fp, db_addr_t *ip, struct thread *td)
 		else if (strcmp(name, "Xint0x80_syscall") == 0)
 			frame_type = SYSCALL;
 #endif
-		/* XXX: These are interrupts with trap frames. */
-		else if (strcmp(name, "Xtimerint") == 0 ||
-		    strcmp(name, "Xcpustop") == 0 ||
-		    strcmp(name, "Xcpususpend") == 0 ||
-		    strcmp(name, "Xrendezvous") == 0 ||
-		    strcmp(name, "Xipi_intr_bitmap_handler") == 0)
-			frame_type = TRAP_INTERRUPT;
 	}
 
 	/*
@@ -256,7 +249,6 @@ db_nextframe(struct amd64_frame **fp, db_addr_t *ip, struct thread *td)
 			db_printf("--- syscall");
 			decode_syscall(tf->tf_rax, td);
 			break;
-		case TRAP_INTERRUPT:
 		case INTERRUPT:
 			db_printf("--- interrupt");
 			break;
@@ -462,7 +454,6 @@ amd64_set_watch(watchnum, watchaddr, size, access, d)
 	return (watchnum);
 }
 
-
 int
 amd64_clr_watch(watchnum, d)
 	int watchnum;
@@ -477,7 +468,6 @@ amd64_clr_watch(watchnum, d)
 
 	return (0);
 }
-
 
 int
 db_md_set_watchpoint(addr, size)
@@ -546,7 +536,6 @@ db_md_clr_watchpoint(addr, size)
 			if (DBREG_DRX((d), i) >= addr &&
 			    DBREG_DRX((d), i) < addr + size)
 				amd64_clr_watch(i, d);
-
 		}
 	}
 
@@ -562,7 +551,6 @@ db_md_clr_watchpoint(addr, size)
 	return (0);
 }
 
-
 static const char *
 watchtype_str(type)
 	int type;
@@ -574,7 +562,6 @@ watchtype_str(type)
 		default		      : return "invalid";    break;
 	}
 }
-
 
 void
 db_md_list_watchpoints(void)

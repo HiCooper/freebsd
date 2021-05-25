@@ -2,11 +2,12 @@
 
 PROG_CXX=	llvm-objdump
 
-SRCDIR=		tools/llvm-objdump
+SRCDIR=		llvm/tools/llvm-objdump
 SRCS+=		COFFDump.cpp
 SRCS+=		ELFDump.cpp
 SRCS+=		MachODump.cpp
 SRCS+=		WasmDump.cpp
+SRCS+=		XCOFFDump.cpp
 SRCS+=		llvm-objdump.cpp
 
 LIBADD+=	z

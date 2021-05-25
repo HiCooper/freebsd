@@ -498,7 +498,6 @@ static struct aw_clk_nm_def ir_clk = {
 /* Missing CSI clock */
 /* Missing VE clock */
 
-
 /* Clocks list */
 static struct aw_ccung_clk a13_ccu_clks[] = {
 	{ .type = AW_CLK_NKMP, .clk.nkmp = &pll_core},
@@ -568,4 +567,4 @@ DEFINE_CLASS_1(ccu_a13ng, ccu_a13ng_driver, ccu_a13ng_methods,
   sizeof(struct aw_ccung_softc), aw_ccung_driver);
 
 EARLY_DRIVER_MODULE(ccu_a13ng, simplebus, ccu_a13ng_driver,
-    ccu_a13ng_devclass, 0, 0, BUS_PASS_BUS + BUS_PASS_ORDER_MIDDLE);
+    ccu_a13ng_devclass, 0, 0, BUS_PASS_RESOURCE + BUS_PASS_ORDER_MIDDLE);

@@ -711,11 +711,11 @@ t4_free_etid_table(struct adapter *sc)
 }
 
 /* etid services */
-static int alloc_etid(struct adapter *, struct cxgbe_snd_tag *);
+static int alloc_etid(struct adapter *, struct cxgbe_rate_tag *);
 static void free_etid(struct adapter *, int);
 
 static int
-alloc_etid(struct adapter *sc, struct cxgbe_snd_tag *cst)
+alloc_etid(struct adapter *sc, struct cxgbe_rate_tag *cst)
 {
 	struct tid_info *t = &sc->tids;
 	int etid = -1;
@@ -733,7 +733,7 @@ alloc_etid(struct adapter *sc, struct cxgbe_snd_tag *cst)
 	return (etid);
 }
 
-struct cxgbe_snd_tag *
+struct cxgbe_rate_tag *
 lookup_etid(struct adapter *sc, int etid)
 {
 	struct tid_info *t = &sc->tids;
@@ -755,17 +755,16 @@ free_etid(struct adapter *sc, int etid)
 }
 
 int
-cxgbe_snd_tag_alloc(struct ifnet *ifp, union if_snd_tag_alloc_params *params,
+cxgbe_rate_tag_alloc(struct ifnet *ifp, union if_snd_tag_alloc_params *params,
     struct m_snd_tag **pt)
 {
 	int rc, schedcl;
 	struct vi_info *vi = ifp->if_softc;
 	struct port_info *pi = vi->pi;
 	struct adapter *sc = pi->adapter;
-	struct cxgbe_snd_tag *cst;
+	struct cxgbe_rate_tag *cst;
 
-	if (params->hdr.type != IF_SND_TAG_TYPE_RATE_LIMIT)
-		return (ENOTSUP);
+	MPASS(params->hdr.type == IF_SND_TAG_TYPE_RATE_LIMIT);
 
 	rc = t4_reserve_cl_rl_kbps(sc, pi->port_id,
 	    (params->rate_limit.max_rate * 8ULL / 1000), &schedcl);
@@ -789,7 +788,7 @@ failed:
 	mtx_init(&cst->lock, "cst_lock", NULL, MTX_DEF);
 	mbufq_init(&cst->pending_tx, INT_MAX);
 	mbufq_init(&cst->pending_fwack, INT_MAX);
-	m_snd_tag_init(&cst->com, ifp);
+	m_snd_tag_init(&cst->com, ifp, IF_SND_TAG_TYPE_RATE_LIMIT);
 	cst->flags |= EO_FLOWC_PENDING | EO_SND_TAG_REF;
 	cst->adapter = sc;
 	cst->port_id = pi->port_id;
@@ -798,7 +797,7 @@ failed:
 	cst->tx_credits = sc->params.eo_wr_cred;
 	cst->tx_total = cst->tx_credits;
 	cst->plen = 0;
-	cst->ctrl0 = htobe32(V_TXPKT_OPCODE(CPL_TX_PKT) |
+	cst->ctrl0 = htobe32(V_TXPKT_OPCODE(CPL_TX_PKT_XT) |
 	    V_TXPKT_INTF(pi->tx_chan) | V_TXPKT_PF(sc->pf) |
 	    V_TXPKT_VF(vi->vin) | V_TXPKT_VF_VLD(vi->vfvld));
 
@@ -814,11 +813,11 @@ failed:
  * Change in parameters, no change in ifp.
  */
 int
-cxgbe_snd_tag_modify(struct m_snd_tag *mst,
+cxgbe_rate_tag_modify(struct m_snd_tag *mst,
     union if_snd_tag_modify_params *params)
 {
 	int rc, schedcl;
-	struct cxgbe_snd_tag *cst = mst_to_cst(mst);
+	struct cxgbe_rate_tag *cst = mst_to_crt(mst);
 	struct adapter *sc = cst->adapter;
 
 	/* XXX: is schedcl -1 ok here? */
@@ -840,10 +839,10 @@ cxgbe_snd_tag_modify(struct m_snd_tag *mst,
 }
 
 int
-cxgbe_snd_tag_query(struct m_snd_tag *mst,
+cxgbe_rate_tag_query(struct m_snd_tag *mst,
     union if_snd_tag_query_params *params)
 {
-	struct cxgbe_snd_tag *cst = mst_to_cst(mst);
+	struct cxgbe_rate_tag *cst = mst_to_crt(mst);
 
 	params->rate_limit.max_rate = cst->max_rate;
 
@@ -858,7 +857,7 @@ cxgbe_snd_tag_query(struct m_snd_tag *mst,
  * Unlocks cst and frees it.
  */
 void
-cxgbe_snd_tag_free_locked(struct cxgbe_snd_tag *cst)
+cxgbe_rate_tag_free_locked(struct cxgbe_rate_tag *cst)
 {
 	struct adapter *sc = cst->adapter;
 
@@ -879,9 +878,9 @@ cxgbe_snd_tag_free_locked(struct cxgbe_snd_tag *cst)
 }
 
 void
-cxgbe_snd_tag_free(struct m_snd_tag *mst)
+cxgbe_rate_tag_free(struct m_snd_tag *mst)
 {
-	struct cxgbe_snd_tag *cst = mst_to_cst(mst);
+	struct cxgbe_rate_tag *cst = mst_to_crt(mst);
 
 	mtx_lock(&cst->lock);
 
@@ -896,11 +895,54 @@ cxgbe_snd_tag_free(struct m_snd_tag *mst)
 		 * credits for the etid otherwise.
 		 */
 		if (cst->tx_credits == cst->tx_total) {
-			cxgbe_snd_tag_free_locked(cst);
+			cxgbe_rate_tag_free_locked(cst);
 			return;	/* cst is gone. */
 		}
 		send_etid_flush_wr(cst);
 	}
 	mtx_unlock(&cst->lock);
+}
+
+void
+cxgbe_ratelimit_query(struct ifnet *ifp, struct if_ratelimit_query_results *q)
+{
+	struct vi_info *vi = ifp->if_softc;
+	struct adapter *sc = vi->adapter;
+
+	q->rate_table = NULL;
+	q->flags = RT_IS_SELECTABLE;
+	/*
+	 * Absolute max limits from the firmware configuration.  Practical
+	 * limits depend on the burstsize, pktsize (ifp->if_mtu ultimately) and
+	 * the card's cclk.
+	 */
+	q->max_flows = sc->tids.netids;
+	q->number_of_rates = sc->chip_params->nsched_cls;
+	q->min_segment_burst = 4; /* matches PKTSCHED_BURST in the firmware. */
+
+#if 1
+	if (chip_id(sc) < CHELSIO_T6) {
+		/* Based on testing by rrs@ with a T580 at burstsize = 4. */
+		MPASS(q->min_segment_burst == 4);
+		q->max_flows = min(4000, q->max_flows);
+	} else {
+		/* XXX: TBD, carried forward from T5 for now. */
+		q->max_flows = min(4000, q->max_flows);
+	}
+
+	/*
+	 * XXX: tcp_ratelimit.c grabs all available rates on link-up before it
+	 * even knows whether hw pacing will be used or not.  This prevents
+	 * other consumers like SO_MAX_PACING_RATE or those using cxgbetool or
+	 * the private ioctls from using any of traffic classes.
+	 *
+	 * Underreport the number of rates to tcp_ratelimit so that it doesn't
+	 * hog all of them.  This can be removed if/when tcp_ratelimit switches
+	 * to making its allocations on first-use rather than link-up.  There is
+	 * nothing wrong with one particular consumer reserving all the classes
+	 * but it should do so only if it'll actually use hw rate limiting.
+	 */
+	q->number_of_rates /= 4;
+#endif
 }
 #endif

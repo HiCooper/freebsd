@@ -38,7 +38,6 @@
 #include "libc_private.h"
 #include "static_tls.h"
 
-int __elf_phdr_match_addr(struct dl_phdr_info *, void *);
 void __pthread_map_stacks_exec(void);
 void __pthread_distribute_static_tls(size_t, void *, size_t, size_t);
 
@@ -66,7 +65,7 @@ __elf_phdr_match_addr(struct dl_phdr_info *phdr_info, void *addr)
 #endif
 
 		if (phdr_info->dlpi_addr + ph->p_vaddr <= (uintptr_t)addr &&
-		    (uintptr_t)addr + sizeof(addr) < phdr_info->dlpi_addr +
+		    (uintptr_t)addr < phdr_info->dlpi_addr +
 		    ph->p_vaddr + ph->p_memsz)
 			break;
 	}

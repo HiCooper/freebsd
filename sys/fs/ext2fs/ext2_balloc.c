@@ -40,6 +40,7 @@
 
 #include <sys/param.h>
 #include <sys/systm.h>
+#include <sys/endian.h>
 #include <sys/bio.h>
 #include <sys/buf.h>
 #include <sys/limits.h>
@@ -62,7 +63,7 @@ ext2_ext_balloc(struct inode *ip, uint32_t lbn, int size,
 	struct buf *bp = NULL;
 	struct vnode *vp = ITOV(ip);
 	daddr_t newblk;
-	int osize, nsize, blks, error, allocated;
+	int blks, error, allocated;
 
 	fs = ip->i_e2fs;
 	blks = howmany(size, fs->e2fs_bsize);
@@ -72,46 +73,19 @@ ext2_ext_balloc(struct inode *ip, uint32_t lbn, int size,
 		return (error);
 
 	if (allocated) {
-		if (ip->i_size < (lbn + 1) * fs->e2fs_bsize)
-			nsize = fragroundup(fs, size);
-		else
-			nsize = fs->e2fs_bsize;
-
-		bp = getblk(vp, lbn, nsize, 0, 0, 0);
+		bp = getblk(vp, lbn, fs->e2fs_bsize, 0, 0, 0);
 		if(!bp)
 			return (EIO);
-
-		bp->b_blkno = fsbtodb(fs, newblk);
-		if (flags & BA_CLRBUF)
-			vfs_bio_clrbuf(bp);
 	} else {
-		if (ip->i_size >= (lbn + 1) * fs->e2fs_bsize) {
-
-			error = bread(vp, lbn, fs->e2fs_bsize, NOCRED, &bp);
-			if (error) {
-				brelse(bp);
-				return (error);
-			}
-			bp->b_blkno = fsbtodb(fs, newblk);
-			*bpp = bp;
-			return (0);
-		}
-
-		/*
-		 * Consider need to reallocate a fragment.
-		 */
-		osize = fragroundup(fs, blkoff(fs, ip->i_size));
-		nsize = fragroundup(fs, size);
-		if (nsize <= osize)
-			error = bread(vp, lbn, osize, NOCRED, &bp);
-		else
-			error = bread(vp, lbn, fs->e2fs_bsize, NOCRED, &bp);
+		error = bread(vp, lbn, fs->e2fs_bsize, NOCRED, &bp);
 		if (error) {
-			brelse(bp);
 			return (error);
 		}
-		bp->b_blkno = fsbtodb(fs, newblk);
 	}
+
+	bp->b_blkno = fsbtodb(fs, newblk);
+	if (flags & BA_CLRBUF)
+		vfs_bio_clrbuf(bp);
 
 	*bpp = bp;
 
@@ -134,7 +108,7 @@ ext2_balloc(struct inode *ip, e2fs_lbn_t lbn, int size, struct ucred *cred,
 	struct indir indirs[EXT2_NIADDR + 2];
 	e4fs_daddr_t nb, newb;
 	e2fs_daddr_t *bap, pref;
-	int osize, nsize, num, i, error;
+	int num, i, error;
 
 	*bpp = NULL;
 	if (lbn < 0)
@@ -164,53 +138,21 @@ ext2_balloc(struct inode *ip, e2fs_lbn_t lbn, int size, struct ucred *cred,
 		 * no new block is to be allocated, and no need to expand
 		 * the file
 		 */
-		if (nb != 0 && ip->i_size >= (lbn + 1) * fs->e2fs_bsize) {
+		if (nb != 0) {
 			error = bread(vp, lbn, fs->e2fs_bsize, NOCRED, &bp);
 			if (error) {
-				brelse(bp);
 				return (error);
 			}
 			bp->b_blkno = fsbtodb(fs, nb);
-			*bpp = bp;
-			return (0);
-		}
-		if (nb != 0) {
-			/*
-			 * Consider need to reallocate a fragment.
-			 */
-			osize = fragroundup(fs, blkoff(fs, ip->i_size));
-			nsize = fragroundup(fs, size);
-			if (nsize <= osize) {
-				error = bread(vp, lbn, osize, NOCRED, &bp);
-				if (error) {
-					brelse(bp);
-					return (error);
-				}
-				bp->b_blkno = fsbtodb(fs, nb);
-			} else {
-				/*
-				 * Godmar thinks: this shouldn't happen w/o
-				 * fragments
-				 */
-				printf("nsize %d(%d) > osize %d(%d) nb %d\n",
-				    (int)nsize, (int)size, (int)osize,
-				    (int)ip->i_size, (int)nb);
-				panic(
-				    "ext2_balloc: Something is terribly wrong");
-/*
- * please note there haven't been any changes from here on -
- * FFS seems to work.
- */
+			if (ip->i_size >= (lbn + 1) * fs->e2fs_bsize) {
+				*bpp = bp;
+				return (0);
 			}
 		} else {
-			if (ip->i_size < (lbn + 1) * fs->e2fs_bsize)
-				nsize = fragroundup(fs, size);
-			else
-				nsize = fs->e2fs_bsize;
 			EXT2_LOCK(ump);
 			error = ext2_alloc(ip, lbn,
 			    ext2_blkpref(ip, lbn, (int)lbn, &ip->i_db[0], 0),
-			    nsize, cred, &newb);
+			    fs->e2fs_bsize, cred, &newb);
 			if (error)
 				return (error);
 			/*
@@ -219,7 +161,7 @@ ext2_balloc(struct inode *ip, e2fs_lbn_t lbn, int size, struct ucred *cred,
 			 */
 			if (newb > UINT_MAX)
 				return (EFBIG);
-			bp = getblk(vp, lbn, nsize, 0, 0, 0);
+			bp = getblk(vp, lbn, fs->e2fs_bsize, 0, 0, 0);
 			bp->b_blkno = fsbtodb(fs, newb);
 			if (flags & BA_CLRBUF)
 				vfs_bio_clrbuf(bp);
@@ -275,11 +217,10 @@ ext2_balloc(struct inode *ip, e2fs_lbn_t lbn, int size, struct ucred *cred,
 		error = bread(vp,
 		    indirs[i].in_lbn, (int)fs->e2fs_bsize, NOCRED, &bp);
 		if (error) {
-			brelse(bp);
 			return (error);
 		}
 		bap = (e2fs_daddr_t *)bp->b_data;
-		nb = bap[indirs[i].in_off];
+		nb = le32toh(bap[indirs[i].in_off]);
 		if (i == num)
 			break;
 		i += 1;
@@ -308,11 +249,10 @@ ext2_balloc(struct inode *ip, e2fs_lbn_t lbn, int size, struct ucred *cred,
 		 */
 		if ((error = bwrite(nbp)) != 0) {
 			ext2_blkfree(ip, nb, fs->e2fs_bsize);
-			EXT2_UNLOCK(ump);
 			brelse(bp);
 			return (error);
 		}
-		bap[indirs[i - 1].in_off] = nb;
+		bap[indirs[i - 1].in_off] = htole32(nb);
 		/*
 		 * If required, write synchronously, otherwise use
 		 * delayed write.
@@ -344,7 +284,7 @@ ext2_balloc(struct inode *ip, e2fs_lbn_t lbn, int size, struct ucred *cred,
 		nbp->b_blkno = fsbtodb(fs, nb);
 		if (flags & BA_CLRBUF)
 			vfs_bio_clrbuf(nbp);
-		bap[indirs[i].in_off] = nb;
+		bap[indirs[i].in_off] = htole32(nb);
 		/*
 		 * If required, write synchronously, otherwise use
 		 * delayed write.

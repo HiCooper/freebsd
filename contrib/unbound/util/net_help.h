@@ -44,6 +44,7 @@
 #include "util/log.h"
 struct sock_list;
 struct regional;
+struct config_strlist;
 
 /** DNS constants for uint16_t style flag manipulation. host byteorder. 
  *                                1  1  1  1  1  1
@@ -98,6 +99,9 @@ extern int MINIMAL_RESPONSES;
 
 /** rrset order roundrobin */
 extern int RRSET_ROUNDROBIN;
+
+/** log tag queries with name instead of 'info' for filtering */
+extern int LOG_TAG_QUERYREPLY;
 
 /**
  * See if string is ip4 or ip6.
@@ -236,6 +240,12 @@ void log_nametypeclass(enum verbosity_value v, const char* str,
 	uint8_t* name, uint16_t type, uint16_t dclass);
 
 /**
+ * Like log_nametypeclass, but logs with log_query for query logging
+ */
+void log_query_in(const char* str, uint8_t* name, uint16_t type,
+	uint16_t dclass);
+
+/**
  * Compare two sockaddrs. Imposes an ordering on the addresses.
  * Compares address and port.
  * @param addr1: address 1.
@@ -369,6 +379,21 @@ void sock_list_merge(struct sock_list** list, struct regional* region,
 void log_crypto_err(const char* str);
 
 /**
+ * Log libcrypto error from errcode with descriptive string, calls log_err.
+ * @param str: what failed.
+ * @param err: error code from ERR_get_error.
+ */
+void log_crypto_err_code(const char* str, unsigned long err);
+
+/**
+ * Log certificate details verbosity, string, of X509 cert
+ * @param level: verbosity level
+ * @param str: string to prefix on output
+ * @param cert: X509* structure.
+ */
+void log_cert(unsigned level, const char* str, void* cert);
+
+/**
  * Set SSL_OP_NOxxx options on SSL context to disable bad crypto
  * @param ctxt: SSL_CTX*
  * @return false on failure.
@@ -418,6 +443,22 @@ void* incoming_ssl_fd(void* sslctx, int fd);
 void* outgoing_ssl_fd(void* sslctx, int fd);
 
 /**
+ * check if authname SSL functionality is available, false if not
+ * @param auth_name: the name for the remote server, used for error print.
+ * @return false if SSL functionality to check the SSL name is not available.
+ */
+int check_auth_name_for_ssl(char* auth_name);
+
+/**
+ * set auth name on SSL for verification
+ * @param ssl: SSL* to set
+ * @param auth_name: if NULL nothing happens, otherwise the name to check.
+ * @param use_sni: if SNI will be used.
+ * @return 1 on success or NULL auth_name, 0 on failure.
+ */
+int set_auth_name_on_ssl(void* ssl, char* auth_name, int use_sni);
+
+/**
  * Initialize openssl locking for thread safety
  * @return false on failure (alloc failure).
  */
@@ -427,5 +468,38 @@ int ub_openssl_lock_init(void);
  * De-init the allocated openssl locks
  */
 void ub_openssl_lock_delete(void);
+
+/**
+ * setup TLS session ticket
+ * @param sslctx: the SSL_CTX to use (from connect_sslctx_create())
+ * @param tls_session_ticket_keys: TLS ticket secret filenames
+ * @return false on failure (alloc failure).
+ */
+int listen_sslctx_setup_ticket_keys(void* sslctx,
+	struct config_strlist* tls_session_ticket_keys);
+
+/** Free memory used for TLS session ticket keys */
+void listen_sslctx_delete_ticket_keys(void);
+
+/**
+ * RPZ format netblock to network byte order address and netblock
+ * example RPZ netblock format dnames:
+ *  - 24.10.100.51.198.rpz-ip -> 198.51.100.10/24
+ *  - 32.10.zz.db8.2001.rpz-ip -> 2001:db8:0:0:0:0:0:10/32
+ * @param dname: the dname containing RPZ format netblock
+ * @param dnamelen: length of dname
+ * @param addr: where to store sockaddr.
+ * @param addrlen: length of stored sockaddr is returned.
+ * @param net: where to store netmask
+ * @param af: where to store address family.
+ * @return 0 on error.
+ */
+int netblockdnametoaddr(uint8_t* dname, size_t dnamelen,
+	struct sockaddr_storage* addr, socklen_t* addrlen, int* net, int* af);
+
+/** Return strerror or wsastrerror for socket error printout */
+char* sock_strerror(int errn);
+/** close the socket with close, or wsa closesocket */
+void sock_close(int socket);
 
 #endif /* NET_HELP_H */

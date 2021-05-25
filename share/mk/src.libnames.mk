@@ -15,9 +15,10 @@ __<src.libnames.mk>__:
 _PRIVATELIBS=	\
 		atf_c \
 		atf_cxx \
+		auditd \
 		bsdstat \
 		devdctl \
-		event \
+		event1 \
 		gmock \
 		gtest \
 		gmock_main \
@@ -40,7 +41,15 @@ _INTERNALLIBS=	\
 		fifolog \
 		ifconfig \
 		ipf \
+		kyua_cli \
+		kyua_drivers \
+		kyua_engine \
+		kyua_model \
+		kyua_store \
+		kyua_utils \
 		lpr \
+		lua \
+		lutok \
 		netbsd \
 		ntp \
 		ntpevent \
@@ -61,10 +70,10 @@ _LIBRARIES=	\
 		${_INTERNALLIBS} \
 		${LOCAL_LIBRARIES} \
 		80211 \
+		9p \
 		alias \
 		archive \
 		asn1 \
-		auditd \
 		avl \
 		be \
 		begemot \
@@ -81,8 +90,8 @@ _LIBRARIES=	\
 		cap_dns \
 		cap_fileargs \
 		cap_grp \
+		cap_net \
 		cap_pwd \
-		cap_random \
 		cap_sysctl \
 		cap_syslog \
 		com_err \
@@ -117,6 +126,7 @@ _LIBRARIES=	\
 		heimntlm \
 		heimsqlite \
 		hx509 \
+		icp \
 		ipsec \
 		ipt \
 		jail \
@@ -135,10 +145,10 @@ _LIBRARIES=	\
 		memstat \
 		mp \
 		mt \
-		nandfs \
 		ncurses \
 		ncursesw \
 		netgraph \
+		netmap \
 		ngatm \
 		nv \
 		nvpair \
@@ -165,14 +175,17 @@ _LIBRARIES=	\
 		sdp \
 		sm \
 		smb \
+		spl \
 		ssl \
 		ssp_nonshared \
+		stats \
 		stdthreads \
 		supcplusplus \
 		sysdecode \
 		tacplus \
 		termcap \
 		termcapw \
+		tpool \
 		ufs \
 		ugidfw \
 		ulog \
@@ -190,7 +203,9 @@ _LIBRARIES=	\
 		z \
 		zfs_core \
 		zfs \
+		zfsbootenv \
 		zpool \
+		zutil
 
 .if ${MK_BLACKLIST} != "no"
 _LIBRARIES+= \
@@ -215,24 +230,25 @@ _LIBRARIES+= \
 .endif
 
 .if ${MK_BEARSSL} == "yes"
-_INTERNALLIBS+= \
+_LIBRARIES+= \
 		bearssl \
 		secureboot \
 
-LIBBEARSSL?=	${LIBBEARSSLDIR}/libbearssl${PIE_SUFFIX}.a
-LIBSECUREBOOT?=	${LIBSECUREBOOTDIR}/libsecureboot${PIE_SUFFIX}.a
+LIBBEARSSL?=	${LIBBEARSSLDIR}/libbearssl.a
+LIBSECUREBOOT?=	${LIBSECUREBOOTDIR}/libsecureboot.a
 .endif
 
 .if ${MK_VERIEXEC} == "yes"
-_INTERNALLIBS+= veriexec
+_LIBRARIES+= veriexec
 
-LIBVERIEXEC?=	${LIBVERIEXECDIR}/libveriexec${PIE_SUFFIX}.a
+LIBVERIEXEC?=	${LIBVERIEXECDIR}/libveriexec.a
 .endif
 
 # Each library's LIBADD needs to be duplicated here for static linkage of
 # 2nd+ order consumers.  Auto-generating this would be better.
 _DP_80211=	sbuf bsdxml
-_DP_archive=	z bz2 lzma bsdxml
+_DP_9p=		sbuf
+_DP_archive=	z bz2 lzma bsdxml zstd
 _DP_zstd=	pthread
 .if ${MK_BLACKLIST} != "no"
 _DP_blacklist+=	pthread
@@ -256,12 +272,17 @@ _DP_bsnmp=	crypto
 _DP_geom=	bsdxml sbuf
 _DP_cam=	sbuf
 _DP_kvm=	elf
+_DP_kyua_cli=		kyua_drivers kyua_engine kyua_model kyua_store kyua_utils
+_DP_kyua_drivers=	kyua_model kyua_engine kyua_store
+_DP_kyua_engine=	lutok kyua_utils
+_DP_kyua_model=		lutok
+_DP_kyua_utils=		lutok
+_DP_kyua_store=		kyua_model kyua_utils sqlite3
 _DP_casper=	nv
 _DP_cap_dns=	nv
 _DP_cap_fileargs=	nv
 _DP_cap_grp=	nv
 _DP_cap_pwd=	nv
-_DP_cap_random=	nv
 _DP_cap_sysctl=	nv
 _DP_cap_syslog=	nv
 .if ${MK_OFED} != "no"
@@ -295,6 +316,8 @@ _DP_memstat=	kvm
 _DP_magic=	z
 _DP_mt=		sbuf bsdxml
 _DP_ldns=	ssl crypto
+_DP_lua=	m
+_DP_lutok=	lua
 .if ${MK_OPENSSL} != "no"
 _DP_fetch=	ssl crypto
 .else
@@ -306,7 +329,7 @@ _DP_dpv=	dialog figpar util ncursesw
 _DP_dialog=	ncursesw m
 _DP_cuse=	pthread
 _DP_atf_cxx=	atf_c
-_DP_gtest=	pthread
+_DP_gtest=	pthread regex
 _DP_gmock=	gtest
 _DP_gmock_main=	gmock
 _DP_gtest_main=	gtest
@@ -336,19 +359,22 @@ _DP_heimipcs=	heimbase roken pthread
 _DP_kafs5=	asn1 krb5 roken
 _DP_krb5+=	asn1 com_err crypt crypto hx509 roken wind heimbase heimipcc
 _DP_gssapi_krb5+=	gssapi krb5 crypto roken asn1 com_err
-_DP_lzma=	pthread
+_DP_lzma=	md pthread
 _DP_ucl=	m
 _DP_vmmapi=	util
 _DP_opencsd=	cxxrt
-_DP_ctf=	z
+_DP_ctf=	spl z
 _DP_dtrace=	ctf elf proc pthread rtld_db
 _DP_xo=		util
+_DP_ztest=	geom m nvpair umem zpool pthread avl zfs_core spl zutil zfs uutil icp
 # The libc dependencies are not strictly needed but are defined to make the
 # assert happy.
 _DP_c=		compiler_rt
-.if ${MK_SSP} != "no"
+.if ${MK_SSP} != "no" && \
+    (${MACHINE_ARCH} == "i386" || ${MACHINE_ARCH:Mpower*} != "")
 _DP_c+=		ssp_nonshared
 .endif
+_DP_stats=	sbuf pthread
 _DP_stdthreads=	pthread
 _DP_tacplus=	md
 _DP_panel=	ncurses
@@ -358,11 +384,17 @@ _DP_smb=	kiconv
 _DP_ulog=	md
 _DP_fifolog=	z
 _DP_ipf=	kvm
-_DP_zfs=	md pthread umem util uutil m nvpair avl bsdxml geom nvpair z \
-		zfs_core
+_DP_tpool=	spl
+_DP_uutil=	avl spl
+_DP_zfs=	md pthread umem util uutil m avl bsdxml crypto geom nvpair \
+	z zfs_core zutil
+_DP_zfsbootenv= zfs nvpair
 _DP_zfs_core=	nvpair
-_DP_zpool=	md pthread z nvpair avl umem
-_DP_be=		zfs nvpair
+_DP_zpool=	md pthread z icp spl nvpair avl umem
+_DP_zutil=	avl tpool
+_DP_be=		zfs spl nvpair zfsbootenv
+_DP_netmap=
+_DP_ifconfig=	m
 
 # OFED support
 .if ${MK_OFED} != "no"
@@ -463,76 +495,101 @@ DPADD+=		${DPADD_${_l}}
 LDADD+=		${LDADD_${_l}}
 .endfor
 
+_LIB_OBJTOP?=	${OBJTOP}
 # INTERNALLIB definitions.
-LIBELFTCDIR=	${OBJTOP}/lib/libelftc
+LIBELFTCDIR=	${_LIB_OBJTOP}/lib/libelftc
 LIBELFTC?=	${LIBELFTCDIR}/libelftc${PIE_SUFFIX}.a
 
-LIBPEDIR=	${OBJTOP}/lib/libpe
+LIBKYUA_CLIDIR=	${_LIB_OBJTOP}/lib/kyua/cli
+LIBKYUA_CLI?=	${LIBKYUA_CLIDIR}/libkyua_cli${PIE_SUFFIX}.a
+
+LIBKYUA_DRIVERSDIR=	${_LIB_OBJTOP}/lib/kyua/drivers
+LIBKYUA_DRIVERS?=	${LIBKYUA_DRIVERSDIR}/libkyua_drivers${PIE_SUFFIX}.a
+
+LIBKYUA_ENGINEDIR=	${_LIB_OBJTOP}/lib/kyua/engine
+LIBKYUA_ENGINE?=	${LIBKYUA_ENGINEDIR}/libkyua_engine${PIE_SUFFIX}.a
+
+LIBKYUA_MODELDIR=	${_LIB_OBJTOP}/lib/kyua/model
+LIBKYUA_MODEL?=		${LIBKYUA_MODELDIR}/libkyua_model${PIE_SUFFIX}.a
+
+LIBKYUA_STOREDIR=	${_LIB_OBJTOP}/lib/kyua/store
+LIBKYUA_STORE?=		${LIBKYUA_STOREDIR}/libkyua_store${PIE_SUFFIX}.a
+
+LIBKYUA_UTILSDIR=	${_LIB_OBJTOP}/lib/kyua/utils
+LIBKYUA_UTILS?=		${LIBKYUA_UTILSDIR}/libkyua_utils${PIE_SUFFIX}.a
+
+LIBLUADIR=	${_LIB_OBJTOP}/lib/liblua
+LIBLUA?=	${LIBLUADIR}/liblua${PIE_SUFFIX}.a
+
+LIBLUTOKDIR=	${_LIB_OBJTOP}/lib/liblutok
+LIBLUTOK?=	${LIBLUTOKDIR}/liblutok${PIE_SUFFIX}.a
+
+LIBPEDIR=	${_LIB_OBJTOP}/lib/libpe
 LIBPE?=		${LIBPEDIR}/libpe${PIE_SUFFIX}.a
 
-LIBOPENBSDDIR=	${OBJTOP}/lib/libopenbsd
+LIBOPENBSDDIR=	${_LIB_OBJTOP}/lib/libopenbsd
 LIBOPENBSD?=	${LIBOPENBSDDIR}/libopenbsd${PIE_SUFFIX}.a
 
-LIBSMDIR=	${OBJTOP}/lib/libsm
+LIBSMDIR=	${_LIB_OBJTOP}/lib/libsm
 LIBSM?=		${LIBSMDIR}/libsm${PIE_SUFFIX}.a
 
-LIBSMDBDIR=	${OBJTOP}/lib/libsmdb
+LIBSMDBDIR=	${_LIB_OBJTOP}/lib/libsmdb
 LIBSMDB?=	${LIBSMDBDIR}/libsmdb${PIE_SUFFIX}.a
 
-LIBSMUTILDIR=	${OBJTOP}/lib/libsmutil
+LIBSMUTILDIR=	${_LIB_OBJTOP}/lib/libsmutil
 LIBSMUTIL?=	${LIBSMUTILDIR}/libsmutil${PIE_SUFFIX}.a
 
-LIBNETBSDDIR?=	${OBJTOP}/lib/libnetbsd
+LIBNETBSDDIR?=	${_LIB_OBJTOP}/lib/libnetbsd
 LIBNETBSD?=	${LIBNETBSDDIR}/libnetbsd${PIE_SUFFIX}.a
 
-LIBVERSDIR?=	${OBJTOP}/kerberos5/lib/libvers
+LIBVERSDIR?=	${_LIB_OBJTOP}/kerberos5/lib/libvers
 LIBVERS?=	${LIBVERSDIR}/libvers${PIE_SUFFIX}.a
 
-LIBSLDIR=	${OBJTOP}/kerberos5/lib/libsl
+LIBSLDIR=	${_LIB_OBJTOP}/kerberos5/lib/libsl
 LIBSL?=		${LIBSLDIR}/libsl${PIE_SUFFIX}.a
 
-LIBIFCONFIGDIR=	${OBJTOP}/lib/libifconfig
+LIBIFCONFIGDIR=	${_LIB_OBJTOP}/lib/libifconfig
 LIBIFCONFIG?=	${LIBIFCONFIGDIR}/libifconfig${PIE_SUFFIX}.a
 
-LIBIPFDIR=	${OBJTOP}/sbin/ipf/libipf
+LIBIPFDIR=	${_LIB_OBJTOP}/sbin/ipf/libipf
 LIBIPF?=	${LIBIPFDIR}/libipf${PIE_SUFFIX}.a
 
-LIBTELNETDIR=	${OBJTOP}/lib/libtelnet
+LIBTELNETDIR=	${_LIB_OBJTOP}/lib/libtelnet
 LIBTELNET?=	${LIBTELNETDIR}/libtelnet${PIE_SUFFIX}.a
 
-LIBCRONDIR=	${OBJTOP}/usr.sbin/cron/lib
+LIBCRONDIR=	${_LIB_OBJTOP}/usr.sbin/cron/lib
 LIBCRON?=	${LIBCRONDIR}/libcron${PIE_SUFFIX}.a
 
-LIBNTPDIR=	${OBJTOP}/usr.sbin/ntp/libntp
+LIBNTPDIR=	${_LIB_OBJTOP}/usr.sbin/ntp/libntp
 LIBNTP?=	${LIBNTPDIR}/libntp${PIE_SUFFIX}.a
 
-LIBNTPEVENTDIR=	${OBJTOP}/usr.sbin/ntp/libntpevent
+LIBNTPEVENTDIR=	${_LIB_OBJTOP}/usr.sbin/ntp/libntpevent
 LIBNTPEVENT?=	${LIBNTPEVENTDIR}/libntpevent${PIE_SUFFIX}.a
 
-LIBOPTSDIR=	${OBJTOP}/usr.sbin/ntp/libopts
+LIBOPTSDIR=	${_LIB_OBJTOP}/usr.sbin/ntp/libopts
 LIBOPTS?=	${LIBOPTSDIR}/libopts${PIE_SUFFIX}.a
 
-LIBPARSEDIR=	${OBJTOP}/usr.sbin/ntp/libparse
+LIBPARSEDIR=	${_LIB_OBJTOP}/usr.sbin/ntp/libparse
 LIBPARSE?=	${LIBPARSEDIR}/libparse${PIE_SUFFIX}.a
 
-LIBLPRDIR=	${OBJTOP}/usr.sbin/lpr/common_source
+LIBLPRDIR=	${_LIB_OBJTOP}/usr.sbin/lpr/common_source
 LIBLPR?=	${LIBLPRDIR}/liblpr${PIE_SUFFIX}.a
 
-LIBFIFOLOGDIR=	${OBJTOP}/usr.sbin/fifolog/lib
+LIBFIFOLOGDIR=	${_LIB_OBJTOP}/usr.sbin/fifolog/lib
 LIBFIFOLOG?=	${LIBFIFOLOGDIR}/libfifolog${PIE_SUFFIX}.a
 
-LIBBSNMPTOOLSDIR=	${OBJTOP}/usr.sbin/bsnmpd/tools/libbsnmptools
+LIBBSNMPTOOLSDIR=	${_LIB_OBJTOP}/usr.sbin/bsnmpd/tools/libbsnmptools
 LIBBSNMPTOOLS?=	${LIBBSNMPTOOLSDIR}/libbsnmptools${PIE_SUFFIX}.a
 
-LIBAMUDIR=	${OBJTOP}/usr.sbin/amd/libamu
+LIBAMUDIR=	${_LIB_OBJTOP}/usr.sbin/amd/libamu
 LIBAMU?=	${LIBAMUDIR}/libamu${PIE_SUFFIX}.a
 
 LIBBE?=		${LIBBEDIR}/libbe${PIE_SUFFIX}.a
 
-LIBPMCSTATDIR=	${OBJTOP}/lib/libpmcstat
+LIBPMCSTATDIR=	${_LIB_OBJTOP}/lib/libpmcstat
 LIBPMCSTAT?=	${LIBPMCSTATDIR}/libpmcstat${PIE_SUFFIX}.a
 
-LIBC_NOSSP_PICDIR=	${OBJTOP}/lib/libc
+LIBC_NOSSP_PICDIR=	${_LIB_OBJTOP}/lib/libc
 LIBC_NOSSP_PIC?=	${LIBC_NOSSP_PICDIR}/libc_nossp_pic.a
 
 # Define a directory for each library.  This is useful for adding -L in when
@@ -541,12 +598,16 @@ LIBC_NOSSP_PIC?=	${LIBC_NOSSP_PICDIR}/libc_nossp_pic.a
 LIBAVLDIR=	${OBJTOP}/cddl/lib/libavl
 LIBCTFDIR=	${OBJTOP}/cddl/lib/libctf
 LIBDTRACEDIR=	${OBJTOP}/cddl/lib/libdtrace
+LIBICPDIR=	${OBJTOP}/cddl/lib/libicp
 LIBNVPAIRDIR=	${OBJTOP}/cddl/lib/libnvpair
 LIBUMEMDIR=	${OBJTOP}/cddl/lib/libumem
 LIBUUTILDIR=	${OBJTOP}/cddl/lib/libuutil
 LIBZFSDIR=	${OBJTOP}/cddl/lib/libzfs
 LIBZFS_COREDIR=	${OBJTOP}/cddl/lib/libzfs_core
+LIBZFSBOOTENVDIR=	${OBJTOP}/cddl/lib/libzfsbootenv
 LIBZPOOLDIR=	${OBJTOP}/cddl/lib/libzpool
+LIBZUTILDIR=	${OBJTOP}/cddl/lib/libzutil
+LIBTPOOLDIR=	${OBJTOP}/cddl/lib/libtpool
 
 # OFED support
 LIBCXGB4DIR=	${OBJTOP}/lib/ofed/libcxgb4
@@ -563,12 +624,9 @@ LIBOPENSMDIR=	${OBJTOP}/lib/ofed/libopensm
 LIBOSMVENDORDIR=${OBJTOP}/lib/ofed/libvendor
 
 LIBDIALOGDIR=	${OBJTOP}/gnu/lib/libdialog
-LIBGCOVDIR=	${OBJTOP}/gnu/lib/libgcov
-LIBGOMPDIR=	${OBJTOP}/gnu/lib/libgomp
 LIBGNUREGEXDIR=	${OBJTOP}/gnu/lib/libregex
-LIBSSPDIR=	${OBJTOP}/gnu/lib/libssp
-LIBSSP_NONSHAREDDIR=	${OBJTOP}/gnu/lib/libssp/libssp_nonshared
-LIBSUPCPLUSPLUSDIR=	${OBJTOP}/gnu/lib/libsupc++
+LIBSSPDIR=	${OBJTOP}/lib/libssp
+LIBSSP_NONSHAREDDIR=	${OBJTOP}/lib/libssp_nonshared
 LIBASN1DIR=	${OBJTOP}/kerberos5/lib/libasn1
 LIBGSSAPI_KRB5DIR=	${OBJTOP}/kerberos5/lib/libgssapi_krb5
 LIBGSSAPI_NTLMDIR=	${OBJTOP}/kerberos5/lib/libgssapi_ntlm
@@ -599,8 +657,8 @@ LIBBSNMPDIR=	${OBJTOP}/lib/libbsnmp/libbsnmp
 LIBCASPERDIR=	${OBJTOP}/lib/libcasper/libcasper
 LIBCAP_DNSDIR=	${OBJTOP}/lib/libcasper/services/cap_dns
 LIBCAP_GRPDIR=	${OBJTOP}/lib/libcasper/services/cap_grp
+LIBCAP_NETDIR=	${OBJTOP}/lib/libcasper/services/cap_net
 LIBCAP_PWDDIR=	${OBJTOP}/lib/libcasper/services/cap_pwd
-LIBCAP_RANDOMDIR=	${OBJTOP}/lib/libcasper/services/cap_random
 LIBCAP_SYSCTLDIR=	${OBJTOP}/lib/libcasper/services/cap_sysctl
 LIBCAP_SYSLOGDIR=	${OBJTOP}/lib/libcasper/services/cap_syslog
 LIBBSDXMLDIR=	${OBJTOP}/lib/libexpat
@@ -616,6 +674,7 @@ LIBNCURSESWDIR=	${OBJTOP}/lib/ncurses/ncursesw
 LIBPANELDIR=	${OBJTOP}/lib/ncurses/panel
 LIBPANELWDIR=	${OBJTOP}/lib/ncurses/panelw
 LIBCRYPTODIR=	${OBJTOP}/secure/lib/libcrypto
+LIBSPLDIR=	${OBJTOP}/cddl/lib/libspl
 LIBSSHDIR=	${OBJTOP}/secure/lib/libssh
 LIBSSLDIR=	${OBJTOP}/secure/lib/libssl
 LIBTEKENDIR=	${OBJTOP}/sys/teken/libteken

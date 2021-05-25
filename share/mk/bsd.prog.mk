@@ -3,6 +3,7 @@
 
 .include <bsd.init.mk>
 .include <bsd.compiler.mk>
+.include <bsd.linker.mk>
 
 .SUFFIXES: .out .o .bc .c .cc .cpp .cxx .C .m .y .l .ll .ln .s .S .asm
 
@@ -38,18 +39,48 @@ MK_DEBUG_FILES=	no
 .if ${MK_BIND_NOW} != "no"
 LDFLAGS+= -Wl,-znow
 .endif
-.if ${MK_PIE} != "no" && (!defined(NO_SHARED) || ${NO_SHARED:tl} == "no")
+.if ${MK_PIE} != "no"
+# Static PIE is not yet supported/tested.
+.if !defined(NO_SHARED) || ${NO_SHARED:tl} == "no"
 CFLAGS+= -fPIE
 CXXFLAGS+= -fPIE
 LDFLAGS+= -pie
 .endif
+.endif
 .if ${MK_RETPOLINE} != "no"
+.if ${COMPILER_FEATURES:Mretpoline} && ${LINKER_FEATURES:Mretpoline}
 CFLAGS+= -mretpoline
 CXXFLAGS+= -mretpoline
 # retpolineplt is broken with static linking (PR 233336)
 .if !defined(NO_SHARED) || ${NO_SHARED:tl} == "no"
 LDFLAGS+= -Wl,-zretpolineplt
 .endif
+.else
+.warning Retpoline requested but not supported by compiler or linker
+.endif
+.endif
+
+# Initialize stack variables on function entry
+.if ${MK_INIT_ALL_ZERO} == "yes"
+.if ${COMPILER_FEATURES:Minit-all}
+CFLAGS+= -ftrivial-auto-var-init=zero \
+    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+CXXFLAGS+= -ftrivial-auto-var-init=zero \
+    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+.else
+.warning InitAll (zeros) requested but not support by compiler
+.endif
+.elif ${MK_INIT_ALL_PATTERN} == "yes"
+.if ${COMPILER_FEATURES:Minit-all}
+CFLAGS+= -ftrivial-auto-var-init=pattern
+CXXFLAGS+= -ftrivial-auto-var-init=pattern
+.else
+.warning InitAll (pattern) requested but not support by compiler
+.endif
+.endif
+
+.if ${MACHINE_CPUARCH} == "riscv" && ${LINKER_FEATURES:Mriscv-relaxations} == ""
+CFLAGS += -mno-relax
 .endif
 
 .if defined(CRUNCH_CFLAGS)
@@ -68,13 +99,18 @@ STRIP?=	-s
 
 .if defined(NO_ROOT)
 .if !defined(TAGS) || ! ${TAGS:Mpackage=*}
-TAGS+=		package=${PACKAGE:Uruntime}
+TAGS+=		package=${PACKAGE:Uutilities}
 .endif
 TAG_ARGS=	-T ${TAGS:[*]:S/ /,/g}
 .endif
 
 .if defined(NO_SHARED) && ${NO_SHARED:tl} != "no"
 LDFLAGS+= -static
+.endif
+
+# clang currently defaults to dynamic TLS for mips64 binaries
+.if ${MACHINE_ARCH:Mmips64*} && ${COMPILER_TYPE} == "clang"
+CFLAGS+= -ftls-model=initial-exec
 .endif
 
 .if ${MK_DEBUG_FILES} != "no"
@@ -256,9 +292,9 @@ _proginstall:
 	    ${_INSTALLFLAGS} ${PROG} ${DESTDIR}${BINDIR}/${PROGNAME}
 .if ${MK_DEBUG_FILES} != "no"
 .if defined(DEBUGMKDIR)
-	${INSTALL} ${TAG_ARGS:D${TAG_ARGS},debug} -d ${DESTDIR}${DEBUGFILEDIR}/
+	${INSTALL} ${TAG_ARGS:D${TAG_ARGS},dbg} -d ${DESTDIR}${DEBUGFILEDIR}/
 .endif
-	${INSTALL} ${TAG_ARGS:D${TAG_ARGS},debug} -o ${BINOWN} -g ${BINGRP} -m ${DEBUGMODE} \
+	${INSTALL} ${TAG_ARGS:D${TAG_ARGS},dbg} -o ${BINOWN} -g ${BINGRP} -m ${DEBUGMODE} \
 	    ${PROGNAME}.debug ${DESTDIR}${DEBUGFILEDIR}/${PROGNAME}.debug
 .endif
 .endif

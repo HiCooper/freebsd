@@ -90,11 +90,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/resource.h>
 #include <machine/atomic.h>
 
-#ifdef __sparc64__
-#include <dev/ofw/openfirm.h>
-#include <machine/ofw_machdep.h>
-#endif
-
 #include <sys/rman.h>
 
 #include <cam/cam.h>
@@ -134,8 +129,6 @@ typedef	u_int32_t u32;
 #define MEMORY_BARRIER()	do { ; } while(0)
 #elif	defined	__powerpc__
 #define MEMORY_BARRIER()	__asm__ volatile("eieio; sync" : : : "memory")
-#elif	defined	__sparc64__
-#define MEMORY_BARRIER()	__asm__ volatile("membar #Sync" : : : "memory")
 #elif	defined	__arm__
 #define MEMORY_BARRIER()	dmb()
 #elif	defined	__aarch64__
@@ -2014,7 +2007,6 @@ static void sym_fw_bind_script (hcb_p np, u32 *start, int len)
 	end = start + len/4;
 
 	while (cur < end) {
-
 		opcode = *cur;
 
 		/*
@@ -2652,9 +2644,6 @@ static int sym_prepare_setting(hcb_p np, struct sym_nvram *nvram)
 	 */
 	np->myaddr = 255;
 	sym_nvram_setup_host (np, nvram);
-#ifdef __sparc64__
-	np->myaddr = OF_getscsinitid(np->device);
-#endif
 
 	/*
 	 *  Get SCSI addr of host adapter (set by bios?).
@@ -9224,7 +9213,6 @@ static void S24C16_set_bit(hcb_p np, u_char write_bit, u_char *gpreg,
 	case CLR_CLK:
 		*gpreg &= 0xfd;
 		break;
-
 	}
 	OUTB (nc_gpreg, *gpreg);
 	UDELAY (5);
@@ -9536,7 +9524,6 @@ static int T93C46_Read_Data(hcb_p np, u_short *data,int len,u_char *gpreg)
 	int	x;
 
 	for (x = 0; x < len; x++)  {
-
 		/* output read command and address */
 		T93C46_Send_Command(np, 0x180 | x, &read_bit, gpreg);
 		if (read_bit & 0x01)

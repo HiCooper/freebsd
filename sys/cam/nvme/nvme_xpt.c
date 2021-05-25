@@ -192,9 +192,8 @@ static struct xpt_proto nvme_proto = {
 CAM_XPT_PROTO(nvme_proto);
 
 static void
-nvme_probe_periph_init()
+nvme_probe_periph_init(void)
 {
-
 }
 
 static cam_status
@@ -311,9 +310,11 @@ nvme_probe_done(struct cam_periph *periph, union ccb *done_ccb)
 	struct nvme_controller_data *nvme_cdata;
 	nvme_probe_softc *softc;
 	struct cam_path *path;
+	struct scsi_vpd_device_id *did;
+	struct scsi_vpd_id_descriptor *idd;
 	cam_status status;
 	u_int32_t  priority;
-	int found = 1;
+	int found = 1, e, g, len;
 
 	CAM_DEBUG(done_ccb->ccb_h.path, CAM_DEBUG_TRACE, ("nvme_probe_done\n"));
 
@@ -370,6 +371,21 @@ device_fail:	if ((path->device->flags & CAM_DEV_UNCONFIGURED) == 0)
 		bcopy(&softc->cd, nvme_cdata, sizeof(*nvme_cdata));
 		path->device->nvme_cdata = nvme_cdata;
 
+		/* Save/update serial number. */
+		if (path->device->serial_num != NULL) {
+			free(path->device->serial_num, M_CAMXPT);
+			path->device->serial_num = NULL;
+			path->device->serial_num_len = 0;
+		}
+		path->device->serial_num = (u_int8_t *)
+		    malloc(NVME_SERIAL_NUMBER_LENGTH + 1, M_CAMXPT, M_NOWAIT);
+		if (path->device->serial_num != NULL) {
+			cam_strvis(path->device->serial_num, nvme_cdata->sn,
+			    NVME_SERIAL_NUMBER_LENGTH, NVME_SERIAL_NUMBER_LENGTH + 1);
+			path->device->serial_num_len =
+			    strlen(path->device->serial_num);
+		}
+
 //		nvme_find_quirk(path->device);
 		nvme_device_transport(path);
 		NVME_PROBE_SET_ACTION(softc, NVME_PROBE_IDENTIFY_NS);
@@ -394,6 +410,53 @@ device_fail:	if ((path->device->flags & CAM_DEV_UNCONFIGURED) == 0)
 		}
 		bcopy(&softc->ns, nvme_data, sizeof(*nvme_data));
 		path->device->nvme_data = nvme_data;
+
+		/* Save/update device_id based on NGUID and/or EUI64. */
+		if (path->device->device_id != NULL) {
+			free(path->device->device_id, M_CAMXPT);
+			path->device->device_id = NULL;
+			path->device->device_id_len = 0;
+		}
+		len = 0;
+		for (g = 0; g < sizeof(nvme_data->nguid); g++) {
+			if (nvme_data->nguid[g] != 0)
+				break;
+		}
+		if (g < sizeof(nvme_data->nguid))
+			len += sizeof(struct scsi_vpd_id_descriptor) + 16;
+		for (e = 0; e < sizeof(nvme_data->eui64); e++) {
+			if (nvme_data->eui64[e] != 0)
+				break;
+		}
+		if (e < sizeof(nvme_data->eui64))
+			len += sizeof(struct scsi_vpd_id_descriptor) + 8;
+		if (len > 0) {
+			path->device->device_id = (u_int8_t *)
+			    malloc(SVPD_DEVICE_ID_HDR_LEN + len,
+			    M_CAMXPT, M_NOWAIT);
+		}
+		if (path->device->device_id != NULL) {
+			did = (struct scsi_vpd_device_id *)path->device->device_id;
+			did->device = SID_QUAL_LU_CONNECTED | T_DIRECT;
+			did->page_code = SVPD_DEVICE_ID;
+			scsi_ulto2b(len, did->length);
+			idd = (struct scsi_vpd_id_descriptor *)(did + 1);
+			if (g < sizeof(nvme_data->nguid)) {
+				idd->proto_codeset = SVPD_ID_CODESET_BINARY;
+				idd->id_type = SVPD_ID_ASSOC_LUN | SVPD_ID_TYPE_EUI64;
+				idd->length = 16;
+				bcopy(nvme_data->nguid, idd->identifier, 16);
+				idd = (struct scsi_vpd_id_descriptor *)
+				    &idd->identifier[16];
+			}
+			if (e < sizeof(nvme_data->eui64)) {
+				idd->proto_codeset = SVPD_ID_CODESET_BINARY;
+				idd->id_type = SVPD_ID_ASSOC_LUN | SVPD_ID_TYPE_EUI64;
+				idd->length = 8;
+				bcopy(nvme_data->eui64, idd->identifier, 8);
+			}
+			path->device->device_id_len = SVPD_DEVICE_ID_HDR_LEN + len;
+		}
 
 		if (periph->path->device->flags & CAM_DEV_UNCONFIGURED) {
 			path->device->flags &= ~CAM_DEV_UNCONFIGURED;
@@ -547,9 +610,9 @@ nvme_alloc_device(struct cam_eb *bus, struct cam_et *target, lun_id_t lun_id)
 	device->maxtags = 0;
 	device->inq_flags = 0;
 	device->queue_flags = 0;
-	device->device_id = NULL;	/* XXX Need to set this somewhere */
+	device->device_id = NULL;
 	device->device_id_len = 0;
-	device->serial_num = NULL;	/* XXX Need to set this somewhere */
+	device->serial_num = NULL;
 	device->serial_num_len = 0;
 	return (device);
 }
@@ -588,8 +651,9 @@ nvme_dev_advinfo(union ccb *start_ccb)
 {
 	struct cam_ed *device;
 	struct ccb_dev_advinfo *cdai;
-	off_t amt; 
+	off_t amt;
 
+	xpt_path_assert(start_ccb->ccb_h.path, MA_OWNED);
 	start_ccb->ccb_h.status = CAM_REQ_INVALID;
 	device = start_ccb->ccb_h.path->device;
 	cdai = &start_ccb->cdai;
@@ -722,6 +786,8 @@ nvme_announce_periph(struct cam_periph *periph)
 	struct	ccb_trans_settings cts;
 	struct	cam_path *path = periph->path;
 	struct ccb_trans_settings_nvme	*nvmex;
+	struct sbuf	sb;
+	char		buffer[120];
 
 	cam_periph_assert(periph, MA_OWNED);
 
@@ -736,13 +802,18 @@ nvme_announce_periph(struct cam_periph *periph)
 
 	/* Ask the SIM for its base transfer speed */
 	xpt_path_inq(&cpi, periph->path);
-	printf("%s%d: nvme version %d.%d x%d (max x%d) lanes PCIe Gen%d (max Gen%d) link",
+	sbuf_new(&sb, buffer, sizeof(buffer), SBUF_FIXEDLEN);
+	sbuf_printf(&sb, "%s%d: nvme version %d.%d",
 	    periph->periph_name, periph->unit_number,
 	    NVME_MAJOR(nvmex->spec),
-	    NVME_MINOR(nvmex->spec),
-	    nvmex->lanes, nvmex->max_lanes,
-	    nvmex->speed, nvmex->max_speed);
-	printf("\n");
+	    NVME_MINOR(nvmex->spec));
+	if (nvmex->valid & CTS_NVME_VALID_LINK)
+		sbuf_printf(&sb, " x%d (max x%d) lanes PCIe Gen%d (max Gen%d) link",
+		    nvmex->lanes, nvmex->max_lanes,
+		    nvmex->speed, nvmex->max_speed);
+	sbuf_printf(&sb, "\n");
+	sbuf_finish(&sb);
+	sbuf_putbuf(&sb);
 }
 
 static void
@@ -778,4 +849,3 @@ nvme_proto_debug_out(union ccb *ccb)
 		ccb->ccb_h.func_code == XPT_NVME_ADMIN),
 		nvme_cmd_string(&ccb->nvmeio.cmd, cdb_str, sizeof(cdb_str))));
 }
-

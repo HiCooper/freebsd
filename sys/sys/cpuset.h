@@ -57,7 +57,7 @@
 #define	CPU_CMP(p, c)			BIT_CMP(CPU_SETSIZE, p, c)
 #define	CPU_OR(d, s)			BIT_OR(CPU_SETSIZE, d, s)
 #define	CPU_AND(d, s)			BIT_AND(CPU_SETSIZE, d, s)
-#define	CPU_NAND(d, s)			BIT_NAND(CPU_SETSIZE, d, s)
+#define	CPU_ANDNOT(d, s)		BIT_ANDNOT(CPU_SETSIZE, d, s)
 #define	CPU_CLR_ATOMIC(n, p)		BIT_CLR_ATOMIC(CPU_SETSIZE, n, p)
 #define	CPU_SET_ATOMIC(n, p)		BIT_SET_ATOMIC(CPU_SETSIZE, n, p)
 #define	CPU_SET_ATOMIC_ACQ(n, p)	BIT_SET_ATOMIC_ACQ(CPU_SETSIZE, n, p)
@@ -65,7 +65,7 @@
 #define	CPU_OR_ATOMIC(d, s)		BIT_OR_ATOMIC(CPU_SETSIZE, d, s)
 #define	CPU_COPY_STORE_REL(f, t)	BIT_COPY_STORE_REL(CPU_SETSIZE, f, t)
 #define	CPU_FFS(p)			BIT_FFS(CPU_SETSIZE, p)
-#define	CPU_COUNT(p)			BIT_COUNT(CPU_SETSIZE, p)
+#define	CPU_COUNT(p)			((int)BIT_COUNT(CPU_SETSIZE, p))
 #define	CPUSET_FSET			BITSET_FSET(_NCPUWORDS)
 #define	CPUSET_T_INITIALIZER		BITSET_T_INITIALIZER
 
@@ -111,15 +111,15 @@ LIST_HEAD(setlist, cpuset);
  * to deal with inconsistent results.
  */
 struct cpuset {
-	cpuset_t		cs_mask;	/* bitmask of valid cpus. */
-	struct domainset	*cs_domain;	/* (c) NUMA policy. */
 	volatile u_int		cs_ref;		/* (a) Reference count. */
 	int			cs_flags;	/* (s) Flags from below. */
-	cpusetid_t		cs_id;		/* (s) Id or INVALID. */
-	struct cpuset		*cs_parent;	/* (s) Pointer to our parent. */
 	LIST_ENTRY(cpuset)	cs_link;	/* (c) All identified sets. */
 	LIST_ENTRY(cpuset)	cs_siblings;	/* (c) Sibling set link. */
 	struct setlist		cs_children;	/* (c) List of children. */
+	struct domainset	*cs_domain;	/* (c) NUMA policy. */
+	cpusetid_t		cs_id;		/* (s) Id or INVALID. */
+	struct cpuset		*cs_parent;	/* (s) Pointer to our parent. */
+	cpuset_t		cs_mask;	/* bitmask of valid cpus. */
 };
 
 #define CPU_SET_ROOT    0x0001  /* Set is a root set. */

@@ -54,8 +54,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/user.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_dumpset.h>
 
 #include <machine/clock.h>
 #include <machine/cpu.h>
@@ -132,7 +135,7 @@ static void
 malta_lcd_print(char *str)
 {
 	int i;
-	
+
 	if (str == NULL)
 		return;
 

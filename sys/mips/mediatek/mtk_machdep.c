@@ -54,8 +54,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/user.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_object.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_dumpset.h>
 
 #include <machine/cache.h>
 #include <machine/clock.h>
@@ -70,7 +73,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/pte.h>
 #include <machine/sigframe.h>
 #include <machine/trap.h>
-#include <machine/vmparam.h>
 
 #include <mips/mediatek/mtk_sysctl.h>
 #include <mips/mediatek/mtk_soc.h>
@@ -295,7 +297,6 @@ platform_start(__register_t a0 __unused, __register_t a1 __unused,
 		else
 			kern_setenv(n, arg);
 	}
-
 
 	mips_init();
 	mips_timer_init_params(timer_clk, 0);

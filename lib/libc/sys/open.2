@@ -28,7 +28,7 @@
 .\"     @(#)open.2	8.2 (Berkeley) 11/16/93
 .\" $FreeBSD$
 .\"
-.Dd November 11, 2018
+.Dd September 23, 2020
 .Dt OPEN 2
 .Os
 .Sh NAME
@@ -117,6 +117,12 @@ is specified with an absolute
 a directory passed by the
 .Fa fd
 argument is used as the topping point for the resolution.
+When
+.Dv O_BENEATH
+is specified with a relative path, the
+.Fa fd
+argument is used both as the starting point, and as the topping point
+for the resolution.
 See the definition of the
 .Dv O_BENEATH
 flag below.
@@ -166,6 +172,7 @@ O_RDONLY	open for reading only
 O_WRONLY	open for writing only
 O_RDWR		open for reading and writing
 O_EXEC		open for execute only
+O_SEARCH	open for search only, an alias for O_EXEC
 O_NONBLOCK	do not block on open
 O_APPEND	append on each write
 O_CREAT		create file if it does not exist
@@ -182,7 +189,8 @@ O_TTY_INIT	ignored
 O_DIRECTORY	error if file is not a directory
 O_CLOEXEC	set FD_CLOEXEC upon open
 O_VERIFY	verify the contents of the file
-O_BENEATH	require path to be strictly relative to topping directory
+O_BENEATH	require resolved path to be strictly relative to topping directory
+O_RESOLVE_BENEATH	require walked path to be strictly relative to topping directory
 .Ed
 .Pp
 Opening a file with
@@ -224,10 +232,7 @@ The descriptor remains in non-blocking mode for subsequent operations.
 If
 .Dv O_FSYNC
 is used in the mask, all writes will
-immediately be written to disk,
-the kernel will not cache written data
-and all writes on the descriptor will not return until
-the data to be written completes.
+immediately and synchronously be written to disk.
 .Pp
 .Dv O_SYNC
 is a synonym for
@@ -313,8 +318,8 @@ been verified before operating on them.
 .Dv O_BENEATH
 returns
 .Er ENOTCAPABLE
-if the specified relative path, after resolving all symlinks and ".."
-references, does not reside in the directory hierarchy of
+if the specified path, after resolving all symlinks and ".."
+references, does not end up with tail residing in the directory hierarchy of
 children beneath the topping directory.
 Topping directory is the process current directory if relative
 .Fa path
@@ -324,10 +329,32 @@ and the directory referenced by the
 .Fa fd
 argument when using
 .Fn openat .
-If the specified path is absolute,
 .Dv O_BENEATH
 allows arbitrary prefix that ends up at the topping directory,
 after which all further resolved components must be under it.
+.Pp
+.Dv O_RESOLVE_BENEATH
+returns
+.Er ENOTCAPABLE
+if any intermediate component of the specified relative path does not
+reside in the directory hierarchy beneath the topping directory.
+Comparing to
+.Dv O_BENEATH ,
+absolute paths or even the temporal escape from beneath of the topping
+directory is not allowed.
+.Pp
+When
+.Fa fd
+is opened with
+.Dv O_SEARCH ,
+execute permissions are checked at open time.
+The
+.Fa fd
+may not be used for any read operations like
+.Xr getdirentries 2 .
+The primary use for this descriptor will be as the lookup descriptor for the
+.Fn *at
+family of functions.
 .Pp
 If successful,
 .Fn open
@@ -422,6 +449,11 @@ Too many symbolic links were encountered in translating the pathname.
 .It Bq Er EISDIR
 The named file is a directory, and the arguments specify
 it is to be modified.
+.It Bq Er EISDIR
+The named file is a directory, and the flags specified
+.Dv O_CREAT
+without
+.Dv O_DIRECTORY .
 .It Bq Er EROFS
 The named file resides on a read-only file system,
 and the file is to be modified.
@@ -494,6 +526,8 @@ which the file is being created has been exhausted.
 An I/O error occurred while making the directory entry or
 allocating the inode for
 .Dv O_CREAT .
+.It Bq Er EINTEGRITY
+Corrupted data was detected while reading from the file system.
 .It Bq Er ETXTBSY
 The file is a pure procedure (shared text) file that is being
 executed and the
@@ -516,9 +550,18 @@ An attempt was made to open a descriptor with an illegal combination
 of
 .Dv O_RDONLY ,
 .Dv O_WRONLY ,
-.Dv O_RDWR
+or
+.Dv O_RDWR ,
 and
-.Dv O_EXEC .
+.Dv O_EXEC
+or
+.Dv O_SEARCH .
+.It Bq Er EINVAL
+The
+.Dv O_RESOLVE_BENEATH
+flag is specified and
+.Dv path
+is absolute.
 .It Bq Er EBADF
 The
 .Fa path
@@ -561,6 +604,12 @@ does not have its tail fully contained under the topping directory,
 or the relative
 .Fa path
 escapes it.
+.It Bq Er ENOTCAPABLE
+The
+.Dv O_RESOLVE_BENEATH
+flag was provided, and the relative
+.Fa path
+escapes topping directory.
 .El
 .Sh SEE ALSO
 .Xr chmod 2 ,
@@ -613,3 +662,8 @@ permits searches.
 The present implementation of the
 .Fa openat
 checks the current permissions of directory instead.
+.Pp
+The
+.Fa mode
+argument is variadic and may result in different calling conventions
+than might otherwise be expected.

@@ -215,7 +215,7 @@ static struct aac_mntinforesp *
 
 static struct cdevsw aac_cdevsw = {
 	.d_version =	D_VERSION,
-	.d_flags =	D_NEEDGIANT,
+	.d_flags =	0,
 	.d_open =	aac_open,
 	.d_ioctl =	aac_ioctl,
 	.d_poll =	aac_poll,
@@ -225,7 +225,8 @@ static struct cdevsw aac_cdevsw = {
 static MALLOC_DEFINE(M_AACBUF, "aacbuf", "Buffers for the AAC driver");
 
 /* sysctl node */
-SYSCTL_NODE(_hw, OID_AUTO, aac, CTLFLAG_RD, 0, "AAC driver parameters");
+SYSCTL_NODE(_hw, OID_AUTO, aac, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "AAC driver parameters");
 
 /*
  * Device Interface
@@ -1028,7 +1029,6 @@ aac_command_thread(struct aac_softc *sc)
 	sc->aifflags = AAC_AIFFLAGS_RUNNING;
 
 	while ((sc->aifflags & AAC_AIFFLAGS_EXIT) == 0) {
-
 		retval = 0;
 		if ((sc->aifflags & AAC_AIFFLAGS_PENDING) == 0)
 			retval = msleep(sc->aifthread, &sc->aac_io_lock, PRIBIO,
@@ -1532,7 +1532,6 @@ aac_free_commands(struct aac_softc *sc)
 	fwprintf(sc, HBA_FLAGS_DBG_FUNCTION_ENTRY_B, "");
 
 	while ((fm = TAILQ_FIRST(&sc->aac_fibmap_tqh)) != NULL) {
-
 		TAILQ_REMOVE(&sc->aac_fibmap_tqh, fm, fm_link);
 		/*
 		 * We check against total_fibs to handle partially
@@ -3210,9 +3209,7 @@ aac_cdevpriv_dtor(void *arg)
 
 	sc = arg;
 	fwprintf(sc, HBA_FLAGS_DBG_FUNCTION_ENTRY_B, "");
-	mtx_lock(&Giant);
 	device_unbusy(sc->aac_dev);
-	mtx_unlock(&Giant);
 }
 
 /*

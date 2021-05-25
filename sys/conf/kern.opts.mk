@@ -22,6 +22,8 @@
 # They have to be listed here so we can build modules outside of the
 # src tree.
 
+KLDXREF_CMD?=	kldxref
+
 __DEFAULT_YES_OPTIONS = \
     AUTOFS \
     BHYVE \
@@ -40,7 +42,7 @@ __DEFAULT_YES_OPTIONS = \
     KERNEL_SYMBOLS \
     NETGRAPH \
     PF \
-    REPRODUCIBLE_BUILD \
+    SCTP_SUPPORT \
     SOURCELESS_HOST \
     SOURCELESS_UCODE \
     TESTS \
@@ -48,11 +50,14 @@ __DEFAULT_YES_OPTIONS = \
     ZFS
 
 __DEFAULT_NO_OPTIONS = \
+    BHYVE_SNAPSHOT \
     EXTRA_TCP_STACKS \
+    INIT_ALL_PATTERN \
+    INIT_ALL_ZERO \
     KERNEL_RETPOLINE \
-    NAND \
     OFED \
-    RATELIMIT
+    RATELIMIT \
+    REPRODUCIBLE_BUILD
 
 # Some options are totally broken on some architectures. We disable
 # them. If you need to enable them on an experimental basis, you
@@ -63,6 +68,11 @@ __DEFAULT_NO_OPTIONS = \
 # affected by KERNEL_SYMBOLS, FORMAT_EXTENSIONS, CTF and SSP.
 
 # Things that don't work based on the CPU
+.if ${MACHINE} == "amd64"
+# PR251083 conflict between INIT_ALL_ZERO and ifunc memset
+BROKEN_OPTIONS+= INIT_ALL_ZERO
+.endif
+
 .if ${MACHINE_CPUARCH} == "arm"
 . if ${MACHINE_ARCH:Marmv[67]*} == ""
 BROKEN_OPTIONS+= CDDL ZFS
@@ -77,10 +87,6 @@ BROKEN_OPTIONS+= CDDL ZFS SSP
 BROKEN_OPTIONS+= ZFS
 .endif
 
-.if ${MACHINE_CPUARCH} == "riscv"
-BROKEN_OPTIONS+= FORMAT_EXTENSIONS
-.endif
-
 # Things that don't work because the kernel doesn't have the support
 # for them.
 .if ${MACHINE} != "i386" && ${MACHINE} != "amd64"
@@ -92,8 +98,8 @@ BROKEN_OPTIONS+= OFED
 BROKEN_OPTIONS+= KERNEL_RETPOLINE
 .endif
 
-# EFI doesn't exist on mips, powerpc, sparc or riscv.
-.if ${MACHINE:Mmips} || ${MACHINE:Mpowerpc} || ${MACHINE:Msparc64} || ${MACHINE:Mriscv}
+# EFI doesn't exist on mips, powerpc, or riscv.
+.if ${MACHINE:Mmips} || ${MACHINE:Mpowerpc} || ${MACHINE:Mriscv}
 BROKEN_OPTIONS+=EFI
 .endif
 

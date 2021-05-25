@@ -39,9 +39,12 @@
 #include <sys/queue.h>
 #include <sys/event.h>
 #include <sys/lock.h>
+#include <sys/mutex.h>
 #include <sys/priority.h>
 #include <sys/seqc.h>
 #include <sys/sx.h>
+#include <sys/_smr.h>
+#include <sys/smr_types.h>
 
 #include <machine/_limits.h>
 
@@ -76,15 +79,31 @@ struct fdescenttbl {
  */
 #define NDSLOTTYPE	u_long
 
+/*
+ * This struct is copy-on-write and allocated from an SMR zone.
+ * All fields are constant after initialization apart from the reference count.
+ *
+ * Check pwd_* routines for usage.
+ */
+struct pwd {
+	volatile u_int pwd_refcount;
+	struct	vnode *pwd_cdir;		/* current directory */
+	struct	vnode *pwd_rdir;		/* root directory */
+	struct	vnode *pwd_jdir;		/* jail root directory */
+};
+typedef SMR_POINTER(struct pwd *) smrpwd_t;
+
+struct pwddesc {
+	struct mtx	pd_lock;	/* protects members of this struct */
+	smrpwd_t	pd_pwd;		/* directories */
+	volatile u_int	pd_refcount;
+	u_short		pd_cmask;	/* mask for file creation */
+};
+
 struct filedesc {
 	struct	fdescenttbl *fd_files;	/* open files table */
-	struct	vnode *fd_cdir;		/* current directory */
-	struct	vnode *fd_rdir;		/* root directory */
-	struct	vnode *fd_jdir;		/* jail root directory */
 	NDSLOTTYPE *fd_map;		/* bitmap of free fds */
-	int	fd_lastfile;		/* high-water mark of fd_ofiles */
 	int	fd_freefile;		/* approx. next free file */
-	u_short	fd_cmask;		/* mask for file creation */
 	int	fd_refcnt;		/* thread reference count */
 	int	fd_holdcnt;		/* hold count on structure + mutex */
 	struct	sx fd_sx;		/* protects members of this struct */
@@ -121,6 +140,28 @@ struct filedesc_to_leader {
 
 #ifdef _KERNEL
 
+/* Lock a paths descriptor table. */
+#define	PWDDESC_LOCK(pdp)	(&(pdp)->pd_lock)
+#define	PWDDESC_LOCK_INIT(pdp) \
+    mtx_init(PWDDESC_LOCK(pdp), "pwddesc", NULL, MTX_DEF)
+#define	PWDDESC_LOCK_DESTROY(pdp)	mtx_destroy(PWDDESC_LOCK(pdp))
+#define	PWDDESC_XLOCK(pdp)	mtx_lock(PWDDESC_LOCK(pdp))
+#define	PWDDESC_XUNLOCK(pdp)	mtx_unlock(PWDDESC_LOCK(pdp))
+#define	PWDDESC_LOCK_ASSERT(pdp, what) \
+    mtx_assert(PWDDESC_LOCK(pdp), (what))
+#define	PWDDESC_ASSERT_XLOCKED(pdp) \
+    PWDDESC_LOCK_ASSERT((pdp), MA_OWNED)
+#define	PWDDESC_ASSERT_UNLOCKED(pdp) \
+    PWDDESC_LOCK_ASSERT((pdp), MA_NOTOWNED)
+
+#define	PWDDESC_XLOCKED_LOAD_PWD(pdp)	({					\
+	struct pwddesc *_pdp = (pdp);						\
+	struct pwd *_pwd;							\
+	_pwd = smr_serialized_load(&(_pdp)->pd_pwd,				\
+	    (PWDDESC_ASSERT_XLOCKED(_pdp), true));				\
+	_pwd;									\
+})
+
 /* Lock a file descriptor table. */
 #define	FILEDESC_LOCK_INIT(fdp)	sx_init(&(fdp)->fd_sx, "filedesc structure")
 #define	FILEDESC_LOCK_DESTROY(fdp)	sx_destroy(&(fdp)->fd_sx)
@@ -135,6 +176,22 @@ struct filedesc_to_leader {
 #define	FILEDESC_XLOCK_ASSERT(fdp)	sx_assert(&(fdp)->fd_sx, SX_XLOCKED | \
 					    SX_NOTRECURSED)
 #define	FILEDESC_UNLOCK_ASSERT(fdp)	sx_assert(&(fdp)->fd_sx, SX_UNLOCKED)
+
+#else
+
+/*
+ * Accessor for libkvm et al.
+ */
+#define	PWDDESC_KVM_LOAD_PWD(pdp)	({					\
+	struct pwddesc *_pdp = (pdp);						\
+	struct pwd *_pwd;							\
+	_pwd = smr_kvm_load(&(_pdp)->pd_pwd);					\
+	_pwd;									\
+})
+
+#endif
+
+#ifdef _KERNEL
 
 /* Operation types for kern_dup(). */
 enum {
@@ -189,7 +246,9 @@ void	fdinstall_remapped(struct thread *td, struct filedesc *fdp);
 void	fdunshare(struct thread *td);
 void	fdescfree(struct thread *td);
 void	fdescfree_remapped(struct filedesc *fdp);
-struct	filedesc *fdinit(struct filedesc *fdp, bool prepfiles);
+int	fdlastfile(struct filedesc *fdp);
+int	fdlastfile_single(struct filedesc *fdp);
+struct	filedesc *fdinit(struct filedesc *fdp, bool prepfiles, int *lastfile);
 struct	filedesc *fdshare(struct filedesc *fdp);
 struct filedesc_to_leader *
 	filedesc_to_leader_alloc(struct filedesc_to_leader *old,
@@ -204,8 +263,10 @@ int	fget_cap(struct thread *td, int fd, cap_rights_t *needrightsp,
 	    struct file **fpp, struct filecaps *havecapsp);
 
 /* Return a referenced file from an unlocked descriptor. */
-int	fget_unlocked(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
+int	fget_unlocked_seq(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
 	    struct file **fpp, seqc_t *seqp);
+int	fget_unlocked(struct filedesc *fdp, int fd, cap_rights_t *needrightsp,
+	    struct file **fpp);
 
 /* Requires a FILEDESC_{S,X}LOCK held and returns without a ref. */
 static __inline struct file *
@@ -247,9 +308,28 @@ fd_modified(struct filedesc *fdp, int fd, seqc_t seqc)
 #endif
 
 /* cdir/rdir/jdir manipulation functions. */
+struct pwddesc *pdcopy(struct pwddesc *pdp);
+void	pdescfree(struct thread *td);
+struct pwddesc *pdinit(struct pwddesc *pdp, bool keeplock);
+struct pwddesc *pdshare(struct pwddesc *pdp);
+void	pdunshare(struct thread *td);
+
 void	pwd_chdir(struct thread *td, struct vnode *vp);
 int	pwd_chroot(struct thread *td, struct vnode *vp);
 void	pwd_ensure_dirs(void);
+void	pwd_set_rootvnode(void);
+
+struct pwd *pwd_hold_pwddesc(struct pwddesc *pdp);
+bool	pwd_hold_smr(struct pwd *pwd);
+struct pwd *pwd_hold(struct thread *td);
+void	pwd_drop(struct pwd *pwd);
+static inline void
+pwd_set(struct pwddesc *pdp, struct pwd *newpwd)
+{
+	smr_serialized_store(&pdp->pd_pwd, newpwd,
+	    (PWDDESC_ASSERT_XLOCKED(pdp), true));
+}
+struct pwd *pwd_get_smr(void);
 
 #endif /* _KERNEL */
 

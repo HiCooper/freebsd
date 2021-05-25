@@ -142,7 +142,7 @@ PERIPHDRIVER_DECLARE(sg, sgdriver);
 
 static struct cdevsw sg_cdevsw = {
 	.d_version =	D_VERSION,
-	.d_flags =	D_NEEDGIANT | D_TRACKCLOSE,
+	.d_flags =	D_TRACKCLOSE,
 	.d_open =	sgopen,
 	.d_close =	sgclose,
 	.d_ioctl =	sgioctl,
@@ -210,7 +210,6 @@ sgdevgonecb(void *arg)
 	 */
 	mtx_unlock(mtx);
 }
-
 
 static void
 sgoninvalidate(struct cam_periph *periph)
@@ -328,8 +327,8 @@ sgregister(struct cam_periph *periph, void *arg)
 
 	if (cpi.maxio == 0)
 		softc->maxio = DFLTPHYS;	/* traditional default */
-	else if (cpi.maxio > MAXPHYS)
-		softc->maxio = MAXPHYS;		/* for safety */
+	else if (cpi.maxio > maxphys)
+		softc->maxio = maxphys;		/* for safety */
 	else
 		softc->maxio = cpi.maxio;	/* real value */
 
@@ -570,7 +569,7 @@ sgioctl(struct cdev *dev, u_long cmd, caddr_t arg, int flag, struct thread *td)
 			dir = CAM_DIR_IN;
 			break;
 		case SG_DXFER_TO_FROM_DEV:
-			dir = CAM_DIR_IN | CAM_DIR_OUT;
+			dir = CAM_DIR_BOTH;
 			break;
 		case SG_DXFER_NONE:
 		default:
@@ -1015,4 +1014,3 @@ scsi_group_len(u_char cmd)
 	group = (cmd >> 5) & 0x7;
 	return (len[group]);
 }
-

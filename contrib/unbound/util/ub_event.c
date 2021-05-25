@@ -148,7 +148,7 @@ const char* ub_event_get_version(void)
 	return event_get_version();
 }
 
-#if (defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)) && defined(EVBACKEND_SELECT)
+#if (defined(HAVE_EV_LOOP) || defined(HAVE_EV_DEFAULT_LOOP)) && defined(EV_FEATURE_BACKENDS)
 static const char* ub_ev_backend2str(int b)
 {
 	switch(b) {
@@ -184,7 +184,7 @@ ub_get_event_sys(struct ub_event_base* base, const char** n, const char** s,
 	*n = "libev";
 	if (!b)
 		b = (struct event_base*)ev_default_loop(EVFLAG_AUTO);
-#    ifdef EVBACKEND_SELECT
+#    ifdef EV_FEATURE_BACKENDS
 	*m = ub_ev_backend2str(ev_backend((struct ev_loop*)b));
 #    else
 	*m = "not obtainable";
@@ -295,11 +295,18 @@ ub_event_new(struct ub_event_base* base, int fd, short bits,
 	if (!ev)
 		return NULL;
 
+#ifndef HAVE_EVENT_ASSIGN
 	event_set(ev, fd, NATIVE_BITS(bits), NATIVE_BITS_CB(cb), arg);
 	if (event_base_set(AS_EVENT_BASE(base), ev) != 0) {
 		free(ev);
 		return NULL;
 	}
+#else
+	if (event_assign(ev, AS_EVENT_BASE(base), fd, bits, cb, arg) != 0) {
+		free(ev);
+		return NULL;
+	}
+#endif
 	return AS_UB_EVENT(ev);
 }
 
@@ -312,11 +319,18 @@ ub_signal_new(struct ub_event_base* base, int fd,
 	if (!ev)
 		return NULL;
 
+#if !HAVE_DECL_EVSIGNAL_ASSIGN
 	signal_set(ev, fd, NATIVE_BITS_CB(cb), arg);
 	if (event_base_set(AS_EVENT_BASE(base), ev) != 0) {
 		free(ev);
 		return NULL;
 	}
+#else
+	if (evsignal_assign(ev, AS_EVENT_BASE(base), fd, cb, arg) != 0) {
+		free(ev);
+		return NULL;
+	}
+#endif
 	return AS_UB_EVENT(ev);
 }
 
@@ -444,7 +458,9 @@ void ub_comm_base_now(struct comm_base* cb)
 	if(gettimeofday(tv, NULL) < 0) {
 		log_err("gettimeofday: %s", strerror(errno));
 	}
+#ifndef S_SPLINT_S
 	*tt = tv->tv_sec;
+#endif
 #endif /* USE_MINI_EVENT */
 }
 

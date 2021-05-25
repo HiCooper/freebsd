@@ -72,7 +72,7 @@ __FBSDID("$FreeBSD$");
 #   define PP_CISCO IFF_LINK2
 #   include <net/bpf.h>
 #endif
-#include <dev/cx/machdep.h>
+#include <dev/ce/machdep.h>
 #include <dev/ce/ceddk.h>
 #include <machine/cserial.h>
 #include <machine/resource.h>
@@ -2487,7 +2487,7 @@ static int ng_ce_connect (hook_p hook)
 		CE_DEBUG (d, ("Connect\n"));
 		callout_reset (&d->timeout_handle, hz, ce_watchdog_timer, d);
 	}
-	
+
 	return 0;
 }
 

@@ -8,7 +8,7 @@
  *
  * 1. Copyright Notice
  *
- * Some or all of this work - Copyright (c) 1999 - 2019, Intel Corp.
+ * Some or all of this work - Copyright (c) 1999 - 2020, Intel Corp.
  * All rights reserved.
  *
  * 2. License
@@ -195,6 +195,7 @@ enum AcpiExDebuggerCommands
 {
     CMD_NOT_FOUND = 0,
     CMD_NULL,
+    CMD_ALL,
     CMD_ALLOCATIONS,
     CMD_ARGS,
     CMD_ARGUMENTS,
@@ -208,6 +209,7 @@ enum AcpiExDebuggerCommands
     CMD_EVALUATE,
     CMD_EXECUTE,
     CMD_EXIT,
+    CMD_FIELDS,
     CMD_FIND,
     CMD_GO,
     CMD_HANDLERS,
@@ -274,6 +276,7 @@ static const ACPI_DB_COMMAND_INFO   AcpiGbl_DbCommands[] =
 {
     {"<NOT FOUND>",  0},
     {"<NULL>",       0},
+    {"ALL",          1},
     {"ALLOCATIONS",  0},
     {"ARGS",         0},
     {"ARGUMENTS",    0},
@@ -287,6 +290,7 @@ static const ACPI_DB_COMMAND_INFO   AcpiGbl_DbCommands[] =
     {"EVALUATE",     1},
     {"EXECUTE",      1},
     {"EXIT",         0},
+    {"FIELDS",       1},
     {"FIND",         1},
     {"GO",           0},
     {"HANDLERS",     0},
@@ -360,6 +364,7 @@ static const ACPI_DB_COMMAND_HELP   AcpiGbl_DbCommandHelp[] =
     {1, "  Find <AcpiName> (? is wildcard)",    "Find ACPI name(s) with wildcards\n"},
     {1, "  Integrity",                          "Validate namespace integrity\n"},
     {1, "  Methods",                            "Display list of loaded control methods\n"},
+    {1, "  Fields <AddressSpaceId>",            "Display list of loaded field units by space ID\n"},
     {1, "  Namespace [Object] [Depth]",         "Display loaded namespace tree/subtree\n"},
     {1, "  Notify <Object> <Value>",            "Send a notification on Object\n"},
     {1, "  Objects [ObjectType]",               "Display summary of all objects or just given type\n"},
@@ -374,6 +379,7 @@ static const ACPI_DB_COMMAND_HELP   AcpiGbl_DbCommandHelp[] =
     {1, "  Type <Object>",                      "Display object type\n"},
 
     {0, "\nControl Method Execution:",          "\n"},
+    {1, "  All <NameSeg>",                      "Evaluate all objects named NameSeg\n"},
     {1, "  Evaluate <Namepath> [Arguments]",    "Evaluate object or control method\n"},
     {1, "  Execute <Namepath> [Arguments]",     "Synonym for Evaluate\n"},
 #ifdef ACPI_APPLICATION
@@ -596,7 +602,7 @@ AcpiDbDisplayHelp (
     }
     else
     {
-        /* Display help for all commands that match the subtring */
+        /* Display help for all commands that match the substring */
 
         AcpiDbDisplayCommandInfo (Command, TRUE);
     }
@@ -634,19 +640,16 @@ AcpiDbGetNextToken (
         return (NULL);
     }
 
-    /* Remove any spaces at the beginning */
+    /* Remove any spaces at the beginning, ignore blank lines */
 
-    if (*String == ' ')
+    while (*String && isspace (*String))
     {
-        while (*String && (*String == ' '))
-        {
-            String++;
-        }
+        String++;
+    }
 
-        if (!(*String))
-        {
-            return (NULL);
-        }
+    if (!(*String))
+    {
+        return (NULL);
     }
 
     switch (*String)
@@ -678,6 +681,22 @@ AcpiDbGetNextToken (
         /* Find end of buffer */
 
         while (*String && (*String != ')'))
+        {
+            String++;
+        }
+        break;
+
+    case '{':
+
+        /* This is the start of a field unit, scan until closing brace */
+
+        String++;
+        Start = String;
+        Type = ACPI_TYPE_FIELD_UNIT;
+
+        /* Find end of buffer */
+
+        while (*String && (*String != '}'))
         {
             String++;
         }
@@ -735,7 +754,7 @@ AcpiDbGetNextToken (
 
         /* Find end of token */
 
-        while (*String && (*String != ' '))
+        while (*String && !isspace (*String))
         {
             String++;
         }
@@ -785,7 +804,7 @@ AcpiDbGetLine (
     {
         AcpiOsPrintf (
             "Buffer overflow while parsing input line (max %u characters)\n",
-            sizeof (AcpiGbl_DbParsedBuf));
+            (UINT32) sizeof (AcpiGbl_DbParsedBuf));
         return (0);
     }
 
@@ -877,6 +896,7 @@ AcpiDbCommandDispatch (
     ACPI_PARSE_OBJECT       *Op)
 {
     UINT32                  Temp;
+    UINT64                  Temp64;
     UINT32                  CommandIndex;
     UINT32                  ParamCount;
     char                    *CommandLine;
@@ -894,7 +914,6 @@ AcpiDbCommandDispatch (
 
     ParamCount = AcpiDbGetLine (InputBuffer);
     CommandIndex = AcpiDbMatchCommand (AcpiGbl_DbArgs[0]);
-    Temp = 0;
 
     /*
      * We don't want to add the !! command to the history buffer. It
@@ -929,6 +948,13 @@ AcpiDbCommandDispatch (
         {
             return (AE_OK);
         }
+        break;
+
+    case CMD_ALL:
+
+        AcpiOsPrintf ("Executing all objects with NameSeg: %s\n", AcpiGbl_DbArgs[1]);
+        AcpiDbExecute (AcpiGbl_DbArgs[1],
+            &AcpiGbl_DbArgs[2], &AcpiGbl_DbArgTypes[2], EX_NO_SINGLE_STEP | EX_ALL);
         break;
 
     case CMD_ALLOCATIONS:
@@ -991,6 +1017,21 @@ AcpiDbCommandDispatch (
     case CMD_FIND:
 
         Status = AcpiDbFindNameInNamespace (AcpiGbl_DbArgs[1]);
+        break;
+
+    case CMD_FIELDS:
+
+        Status = AcpiUtStrtoul64 (AcpiGbl_DbArgs[1], &Temp64);
+
+        if (ACPI_FAILURE (Status) || Temp64 >= ACPI_NUM_PREDEFINED_REGIONS)
+        {
+            AcpiOsPrintf (
+                "Invalid address space ID: must be between 0 and %u inclusive\n",
+                ACPI_NUM_PREDEFINED_REGIONS - 1);
+            return (AE_OK);
+        }
+
+        Status = AcpiDbDisplayFields ((UINT32) Temp64);
         break;
 
     case CMD_GO:
@@ -1060,10 +1101,10 @@ AcpiDbCommandDispatch (
         if (ParamCount == 0)
         {
             AcpiOsPrintf (
-                "Current debug level for file output is:    %8.8lX\n",
+                "Current debug level for file output is:    %8.8X\n",
                 AcpiGbl_DbDebugLevel);
             AcpiOsPrintf (
-                "Current debug level for console output is: %8.8lX\n",
+                "Current debug level for console output is: %8.8X\n",
                 AcpiGbl_DbConsoleDebugLevel);
         }
         else if (ParamCount == 2)
@@ -1072,7 +1113,7 @@ AcpiDbCommandDispatch (
             AcpiGbl_DbConsoleDebugLevel =
                 strtoul (AcpiGbl_DbArgs[1], NULL, 16);
             AcpiOsPrintf (
-                "Debug Level for console output was %8.8lX, now %8.8lX\n",
+                "Debug Level for console output was %8.8X, now %8.8X\n",
                 Temp, AcpiGbl_DbConsoleDebugLevel);
         }
         else
@@ -1080,7 +1121,7 @@ AcpiDbCommandDispatch (
             Temp = AcpiGbl_DbDebugLevel;
             AcpiGbl_DbDebugLevel = strtoul (AcpiGbl_DbArgs[1], NULL, 16);
             AcpiOsPrintf (
-                "Debug Level for file output was %8.8lX, now %8.8lX\n",
+                "Debug Level for file output was %8.8X, now %8.8X\n",
                 Temp, AcpiGbl_DbDebugLevel);
         }
         break;

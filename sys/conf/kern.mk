@@ -31,18 +31,14 @@ NO_WTAUTOLOGICAL_POINTER_COMPARE= -Wno-tautological-pointer-compare
 CWARNEXTRA?=	-Wno-error-tautological-compare -Wno-error-empty-body \
 		-Wno-error-parentheses-equality -Wno-error-unused-function \
 		-Wno-error-pointer-sign
-.if ${COMPILER_VERSION} >= 30700
 CWARNEXTRA+=	-Wno-error-shift-negative-value
-.endif
-.if ${COMPILER_VERSION} >= 40000
 CWARNEXTRA+=	-Wno-address-of-packed-member
+.if ${COMPILER_VERSION} >= 100000
+NO_WMISLEADING_INDENTATION=	-Wno-misleading-indentation
 .endif
-
-CLANG_NO_IAS= -no-integrated-as
-.endif
+.endif	# clang
 
 .if ${COMPILER_TYPE} == "gcc"
-.if ${COMPILER_VERSION} >= 40800
 # Catch-all for all the things that are in our tree, but for which we're
 # not yet ready for this compiler.
 NO_WUNUSED_BUT_SET_VARIABLE = -Wno-unused-but-set-variable
@@ -54,15 +50,15 @@ CWARNEXTRA?=	-Wno-error=address				\
 		-Wno-error=enum-compare				\
 		-Wno-error=inline				\
 		-Wno-error=maybe-uninitialized			\
+		-Wno-error=misleading-indentation		\
+		-Wno-error=nonnull-compare			\
 		-Wno-error=overflow				\
 		-Wno-error=sequence-point			\
-		-Wno-unused-but-set-variable
-.if ${COMPILER_VERSION} >= 60100
-CWARNEXTRA+=	-Wno-error=misleading-indentation		\
-		-Wno-error=nonnull-compare			\
 		-Wno-error=shift-overflow			\
 		-Wno-error=tautological-compare			\
-		-Wno-format-zero-length
+		-Wno-unused-but-set-variable
+.if ${COMPILER_VERSION} >= 70100
+CWARNEXTRA+=	-Wno-error=stringop-overflow
 .endif
 .if ${COMPILER_VERSION} >= 70200
 CWARNEXTRA+=	-Wno-error=memset-elt-size
@@ -70,20 +66,19 @@ CWARNEXTRA+=	-Wno-error=memset-elt-size
 .if ${COMPILER_VERSION} >= 80000
 CWARNEXTRA+=	-Wno-error=packed-not-aligned
 .endif
-.else
-# For gcc 4.2, eliminate the too-often-wrong warnings about uninitialized vars.
-CWARNEXTRA?=	-Wno-uninitialized
-# GCC 4.2 doesn't have -Wno-error=cast-qual, so just disable the warning for
-# the few files that are already known to generate cast-qual warnings.
-NO_WCAST_QUAL= -Wno-cast-qual
+.if ${COMPILER_VERSION} >= 90100
+CWARNEXTRA+=	-Wno-address-of-packed-member
 .endif
-.endif
+.endif	# gcc
+
+# This warning is utter nonsense
+CWARNFLAGS+=	-Wno-format-zero-length
 
 # External compilers may not support our format extensions.  Allow them
 # to be disabled.  WARNING: format checking is disabled in this case.
 .if ${MK_FORMAT_EXTENSIONS} == "no"
 FORMAT_EXTENSIONS=	-Wno-format
-.elif ${COMPILER_TYPE} == "clang" && ${COMPILER_VERSION} >= 30600
+.elif ${COMPILER_TYPE} == "clang"
 FORMAT_EXTENSIONS=	-D__printf__=__freebsd_kprintf__
 .else
 FORMAT_EXTENSIONS=	-fformat-extensions
@@ -127,21 +122,28 @@ CFLAGS += -ffixed-x18
 INLINE_LIMIT?=	8000
 .endif
 
+#
+# For RISC-V we specify the soft-float ABI (lp64) to avoid the use of floating
+# point registers within the kernel. However, for kernels supporting hardware
+# float (FPE), we have to include that in the march so we can have limited
+# floating point support in context switching needed for that. This is different
+# than userland where we use a hard-float ABI (lp64d).
+#
+# We also specify the "medium" code model, which generates code suitable for a
+# 2GiB addressing range located at any offset, allowing modules to be located
+# anywhere in the 64-bit address space.  Note that clang and GCC refer to this
+# code model as "medium" and "medany" respectively.
+#
 .if ${MACHINE_CPUARCH} == "riscv"
-CFLAGS.gcc+=	-mcmodel=medany -march=rv64imafdc -mabi=lp64
+CFLAGS+=	-march=rv64imafdc
+CFLAGS+=	-mabi=lp64
+CFLAGS.clang+=	-mcmodel=medium
+CFLAGS.gcc+=	-mcmodel=medany
 INLINE_LIMIT?=	8000
-.endif
 
-#
-# For sparc64 we want the medany code model so modules may be located
-# anywhere in the 64-bit address space.  We also tell GCC to use floating
-# point emulation.  This avoids using floating point registers for integer
-# operations which it has a tendency to do.
-#
-.if ${MACHINE_CPUARCH} == "sparc64"
-CFLAGS.clang+=	-mcmodel=large -fno-dwarf2-cfi-asm
-CFLAGS.gcc+=	-mcmodel=medany -msoft-float
-INLINE_LIMIT?=	15000
+.if ${LINKER_FEATURES:Mriscv-relaxations} == ""
+CFLAGS+=	-mno-relax
+.endif
 .endif
 
 #
@@ -183,13 +185,8 @@ CFLAGS.gcc+=	-mno-spe
 # Use dot symbols (or, better, the V2 ELF ABI) on powerpc64 to make
 # DDB happy. ELFv2, if available, has some other efficiency benefits.
 #
-.if ${MACHINE_ARCH} == "powerpc64"
-.if ${COMPILER_VERSION} >= 40900
-CFLAGS.gcc+=	-mabi=elfv2
-.else
-CFLAGS.gcc+=	-mcall-aixdesc
-.endif
-CFLAGS.clang+=	-mabi=elfv2
+.if ${MACHINE_ARCH:Mpowerpc64*} != ""
+CFLAGS+=	-mabi=elfv2
 .endif
 
 #
@@ -231,6 +228,24 @@ CFLAGS+=	-mretpoline
 .endif
 
 #
+# Initialize stack variables on function entry
+#
+.if ${MK_INIT_ALL_ZERO} == "yes"
+.if ${COMPILER_FEATURES:Minit-all}
+CFLAGS+= -ftrivial-auto-var-init=zero \
+    -enable-trivial-auto-var-init-zero-knowing-it-will-be-removed-from-clang
+.else
+.warning InitAll (zeros) requested but not support by compiler
+.endif
+.elif ${MK_INIT_ALL_PATTERN} == "yes"
+.if ${COMPILER_FEATURES:Minit-all}
+CFLAGS+= -ftrivial-auto-var-init=pattern
+.else
+.warning InitAll (pattern) requested but not support by compiler
+.endif
+.endif
+
+#
 # Add -gdwarf-2 when compiling -g. The default starting in clang v3.4
 # and gcc 4.8 is to generate DWARF version 4. However, our tools don't
 # cope well with DWARF 4, so force it to genereate DWARF2, which they
@@ -242,6 +257,7 @@ CFLAGS+=	-gdwarf-2
 .endif
 
 CFLAGS+= ${CWARNFLAGS:M*} ${CWARNFLAGS.${.IMPSRC:T}}
+CFLAGS+= ${CWARNFLAGS.${COMPILER_TYPE}}
 CFLAGS+= ${CFLAGS.${COMPILER_TYPE}} ${CFLAGS.${.IMPSRC:T}}
 
 # Tell bmake not to mistake standard targets for things to be searched for
@@ -272,6 +288,23 @@ CFLAGS+=        -std=iso9899:1999
 CFLAGS+=        -std=${CSTD}
 .endif # CSTD
 
+# Please keep this if in sync with bsd.sys.mk
+.if ${LD} != "ld" && (${CC:[1]:H} != ${LD:[1]:H} || ${LD:[1]:T} != "ld")
+# Add -fuse-ld=${LD} if $LD is in a different directory or not called "ld".
+# Note: Clang 12+ will prefer --ld-path= over -fuse-ld=.
+.if ${COMPILER_TYPE} == "clang"
+# Note: unlike bsd.sys.mk we can't use LDFLAGS here since that is used for the
+# flags required when linking the kernel. We don't need those flags when
+# building the vdsos. However, we do need -fuse-ld, so use ${CCLDFLAGS} instead.
+# Note: Clang does not like relative paths in -fuse-ld so we map ld.lld -> lld.
+CCLDFLAGS+=	-fuse-ld=${LD:[1]:S/^ld.//1W}
+.else
+# GCC does not support an absolute path for -fuse-ld so we just print this
+# warning instead and let the user add the required symlinks.
+.warning LD (${LD}) is not the default linker for ${CC} but -fuse-ld= is not supported
+.endif
+.endif
+
 # Set target-specific linker emulation name.
 LD_EMULATION_aarch64=aarch64elf
 LD_EMULATION_amd64=elf_x86_64_fbsd
@@ -292,6 +325,7 @@ LD_EMULATION_mipsn32el= elf32btsmipn32_fbsd   # I don't think this is a thing th
 LD_EMULATION_powerpc= elf32ppc_fbsd
 LD_EMULATION_powerpcspe= elf32ppc_fbsd
 LD_EMULATION_powerpc64= elf64ppc_fbsd
+LD_EMULATION_powerpc64le= elf64lppc_fbsd
 LD_EMULATION_riscv64= elf64lriscv
-LD_EMULATION_sparc64= elf64_sparc_fbsd
+LD_EMULATION_riscv64sf= elf64lriscv
 LD_EMULATION=${LD_EMULATION_${MACHINE_ARCH}}

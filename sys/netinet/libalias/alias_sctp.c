@@ -75,6 +75,7 @@
 #ifdef _KERNEL
 #include <machine/stdarg.h>
 #include <sys/param.h>
+#include <sys/gsb_crc32.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
 #include <sys/module.h>
@@ -148,7 +149,6 @@ static void sctp_AddTimeOut(struct libalias *la, struct sctp_nat_assoc *assoc);
 static void sctp_RmTimeOut(struct libalias *la, struct sctp_nat_assoc *assoc);
 static void sctp_ResetTimeOut(struct libalias *la, struct sctp_nat_assoc *assoc, int newexp);
 void sctp_CheckTimers(struct libalias *la);
-
 
 /* Logging Functions */
 static void logsctperror(char* errormsg, uint32_t vtag, int error, int direction);
@@ -242,7 +242,6 @@ static MALLOC_DEFINE(M_SCTPNAT, "sctpnat", "sctp nat dbs");
 #define SN_SCTP_ASCONF      0x0100    /**< a packet containing an ASCONF chunk */
 #define SN_SCTP_ASCONFACK   0x0200    /**< a packet containing an ASCONF-ACK chunk */
 #define SN_SCTP_OTHER       0xFFFF    /**< a packet containing a chunk that is not of interest */
-
 /** @}
  * @defgroup state_machine SCTP NAT State Machine
  *
@@ -254,7 +253,6 @@ static MALLOC_DEFINE(M_SCTPNAT, "sctpnat", "sctp nat dbs");
 #define SN_UP  0x0100		/**< Association in UP state */
 #define SN_CL  0x1000		/**< Closing state */
 #define SN_RM  0x2000		/**< Removing state */
-
 /** @}
  * @defgroup Logging Logging Functionality
  *
@@ -269,7 +267,6 @@ static MALLOC_DEFINE(M_SCTPNAT, "sctpnat", "sctp nat dbs");
 #define	SN_LOG_DEBUG_MAX  5
 
 #define	SN_LOG(level, action)	if (sysctl_log_level >= level) { action; } /**< Perform log action ONLY if the current log level meets the specified log level */
-
 /** @}
  * @defgroup Hash Hash Table Macros and Functions
  *
@@ -291,7 +288,6 @@ static MALLOC_DEFINE(M_SCTPNAT, "sctpnat", "sctp nat dbs");
 #define SN_ADD_CLASH              1   /**< Clash when trying to add the assoc. info to the table */
 
 #define SN_TABLE_HASH(vtag, port, size) (((u_int) vtag + (u_int) port) % (u_int) size) /**< Calculate the hash table lookup position */
-
 /** @}
  * @defgroup Timer Timer Queue Macros and Functions
  *
@@ -306,7 +302,6 @@ static MALLOC_DEFINE(M_SCTPNAT, "sctpnat", "sctp nat dbs");
 #define SN_U_T(la) (la->timeStamp + sysctl_up_timer)         /**< UP State expiration time in seconds */
 #define SN_C_T(la) (la->timeStamp + sysctl_shutdown_timer)   /**< CL State expiration time in seconds */
 #define SN_X_T(la) (la->timeStamp + sysctl_holddown_timer)   /**< Wait after a shutdown complete in seconds */
-
 /** @}
  * @defgroup sysctl SysCtl Variable and callback function declarations
  *
@@ -366,47 +361,70 @@ SYSCTL_DECL(_net_inet);
 SYSCTL_DECL(_net_inet_ip);
 SYSCTL_DECL(_net_inet_ip_alias);
 
-static SYSCTL_NODE(_net_inet_ip_alias, OID_AUTO, sctp, CTLFLAG_RW, NULL,
+static SYSCTL_NODE(_net_inet_ip_alias, OID_AUTO, sctp,
+    CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
     "SCTP NAT");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, log_level, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, log_level,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_log_level, 0, sysctl_chg_loglevel, "IU",
     "Level of detail (0 - default, 1 - event, 2 - info, 3 - detail, 4 - debug, 5 - max debug)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, init_timer, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, init_timer,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_init_timer, 0, sysctl_chg_timer, "IU",
     "Timeout value (s) while waiting for (INIT-ACK|AddIP-ACK)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, up_timer, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, up_timer,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_up_timer, 0, sysctl_chg_timer, "IU",
     "Timeout value (s) to keep an association up with no traffic");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, shutdown_timer, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, shutdown_timer,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_shutdown_timer, 0, sysctl_chg_timer, "IU",
     "Timeout value (s) while waiting for SHUTDOWN-COMPLETE");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, holddown_timer, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, holddown_timer,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_holddown_timer, 0, sysctl_chg_timer, "IU",
     "Hold association in table for this many seconds after receiving a SHUTDOWN-COMPLETE");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, hashtable_size, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, hashtable_size,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_hashtable_size, 0, sysctl_chg_hashtable_size, "IU",
     "Size of hash tables used for NAT lookups (100 < prime_number > 1000001)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, error_on_ootb, CTLTYPE_UINT | CTLFLAG_RW,
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, error_on_ootb,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_error_on_ootb, 0, sysctl_chg_error_on_ootb, "IU",
-    "ErrorM sent on receipt of ootb packet:\n\t0 - none,\n\t1 - to local only,\n\t2 - to local and global if a partial association match,\n\t3 - to local and global (DoS risk)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, accept_global_ootb_addip, CTLTYPE_UINT | CTLFLAG_RW,
+    "ErrorM sent on receipt of ootb packet:\n\t0 - none,\n"
+    "\t1 - to local only,\n"
+    "\t2 - to local and global if a partial association match,\n"
+    "\t3 - to local and global (DoS risk)");
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, accept_global_ootb_addip,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_accept_global_ootb_addip, 0, sysctl_chg_accept_global_ootb_addip, "IU",
-    "NAT response to receipt of global OOTB AddIP:\n\t0 - No response,\n\t1 - NAT will accept OOTB global AddIP messages for processing (Security risk)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, initialising_chunk_proc_limit, CTLTYPE_UINT | CTLFLAG_RW,
-    &sysctl_initialising_chunk_proc_limit, 0, sysctl_chg_initialising_chunk_proc_limit, "IU",
-    "Number of chunks that should be processed if there is no current association found:\n\t > 0 (A high value is a DoS risk)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, chunk_proc_limit, CTLTYPE_UINT | CTLFLAG_RW,
+    "NAT response to receipt of global OOTB AddIP:\n"
+    "\t0 - No response,\n"
+    "\t1 - NAT will accept OOTB global AddIP messages for processing (Security risk)");
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, initialising_chunk_proc_limit,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
+    &sysctl_initialising_chunk_proc_limit, 0,
+    sysctl_chg_initialising_chunk_proc_limit, "IU",
+    "Number of chunks that should be processed if there is no current "
+    "association found:\n\t > 0 (A high value is a DoS risk)");
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, chunk_proc_limit,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_chunk_proc_limit, 0, sysctl_chg_chunk_proc_limit, "IU",
-    "Number of chunks that should be processed to find key chunk:\n\t>= initialising_chunk_proc_limit (A high value is a DoS risk)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, param_proc_limit, CTLTYPE_UINT | CTLFLAG_RW,
+    "Number of chunks that should be processed to find key chunk:\n"
+    "\t>= initialising_chunk_proc_limit (A high value is a DoS risk)");
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, param_proc_limit,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_param_proc_limit, 0, sysctl_chg_param_proc_limit, "IU",
-    "Number of parameters (in a chunk) that should be processed to find key parameters:\n\t> 1 (A high value is a DoS risk)");
-SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, track_global_addresses, CTLTYPE_UINT | CTLFLAG_RW,
+    "Number of parameters (in a chunk) that should be processed to find key "
+    "parameters:\n\t> 1 (A high value is a DoS risk)");
+SYSCTL_PROC(_net_inet_ip_alias_sctp, OID_AUTO, track_global_addresses,
+    CTLTYPE_UINT | CTLFLAG_RW | CTLFLAG_NEEDGIANT,
     &sysctl_track_global_addresses, 0, sysctl_chg_track_global_addresses, "IU",
-    "Configures the global address tracking option within the NAT:\n\t0 - Global tracking is disabled,\n\t> 0 - enables tracking but limits the number of global IP addresses to this value");
+    "Configures the global address tracking option within the NAT:\n"
+    "\t0 - Global tracking is disabled,\n"
+    "\t> 0 - enables tracking but limits the number of global IP addresses to this value");
 
 #endif /* SYSCTL_NODE */
-
 /** @}
  * @ingroup sysctl
  * @brief sysctl callback for changing net.inet.ip.fw.sctp.log_level
@@ -566,7 +584,6 @@ int sysctl_chg_chunk_proc_limit(SYSCTL_HANDLER_ARGS)
 	return (0);
 }
 
-
 /** @ingroup sysctl
  * @brief sysctl callback for changing net.inet.ip.alias.sctp.param_proc_limit
  *
@@ -607,7 +624,6 @@ int sysctl_chg_track_global_addresses(SYSCTL_HANDLER_ARGS)
 
 	return (0);
 }
-
 
 /* ----------------------------------------------------------------------
  *                            CODE BEGINS HERE
@@ -2412,7 +2428,6 @@ sctp_RmTimeOut(struct libalias *la, struct sctp_nat_assoc *assoc)
 	LIBALIAS_LOCK_ASSERT(la);
 	LIST_REMOVE(assoc, timer_Q);/* Note this is O(1) */
 }
-
 
 /** @ingroup Timer
  * @brief Reset timer in timer queue

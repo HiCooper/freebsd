@@ -250,14 +250,6 @@ ata_promise_chipinit(device_t dev)
 						    &ctlr->r_rid1, RF_ACTIVE)))
 	    goto failnfree;
 
-#ifdef __sparc64__
-	if (ctlr->chip->cfg2 == PR_SX4X &&
-	    !bus_space_map(rman_get_bustag(ctlr->r_res1),
-	    rman_get_bushandle(ctlr->r_res1), rman_get_size(ctlr->r_res1),
-	    BUS_SPACE_MAP_LINEAR, NULL))
-		goto failnfree;
-#endif
-
 	ctlr->r_type2 = SYS_RES_MEMORY;
 	ctlr->r_rid2 = PCIR_BAR(3);
 	if (!(ctlr->r_res2 = bus_alloc_resource_any(dev, ctlr->r_type2,
@@ -739,7 +731,6 @@ ata_promise_mio_reset(device_t dev)
     case PR_SATA:
 	if ((ctlr->chip->cfg2 == PR_SATA) ||
 	    ((ctlr->chip->cfg2 == PR_CMBO) && (ch->unit < 2))) {
-
 	    /* mask plug/unplug intr */
 	    ATA_OUTL(ctlr->r_res2, 0x06c, (0x00110000 << ch->unit));
 	}
@@ -753,7 +744,6 @@ ata_promise_mio_reset(device_t dev)
 
 	if ((ctlr->chip->cfg2 == PR_SATA) ||
 	    ((ctlr->chip->cfg2 == PR_CMBO) && (ch->unit < 2))) {
-
 	    if (ata_sata_phy_reset(dev, -1, 1))
 		ata_generic_reset(dev);
 	    else
@@ -786,7 +776,6 @@ ata_promise_mio_reset(device_t dev)
 
 	if ((ctlr->chip->cfg2 == PR_SATA2) ||
 	    ((ctlr->chip->cfg2 == PR_CMBO2) && (ch->unit < 2))) {
-
 	    /* set PHY mode to "improved" */
 	    ATA_OUTL(ctlr->r_res2, 0x414 + (ch->unit << 8),
 		     (ATA_INL(ctlr->r_res2, 0x414 + (ch->unit << 8)) &
@@ -795,7 +784,7 @@ ata_promise_mio_reset(device_t dev)
 	    if (ata_sata_phy_reset(dev, -1, 1)) {
 		u_int32_t signature = ch->hw.softreset(dev, ATA_PM);
 
-		if (1 | bootverbose)
+		if (bootverbose)
         	    device_printf(dev, "SIGNATURE: %08x\n", signature);
 
 		switch (signature >> 16) {
@@ -831,7 +820,6 @@ ata_promise_mio_reset(device_t dev)
 	else
 	    ata_generic_reset(dev);
 	break;
-
     }
 }
 

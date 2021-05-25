@@ -270,7 +270,8 @@ static driver_filter_t fdc_intr_fast;
 static void fdc_reset(struct fdc_data *);
 static int fd_probe_disk(struct fd_data *, int *);
 
-static SYSCTL_NODE(_debug, OID_AUTO, fdc, CTLFLAG_RW, 0, "fdc driver");
+static SYSCTL_NODE(_debug, OID_AUTO, fdc, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "fdc driver");
 
 static int fifo_threshold = 8;
 SYSCTL_INT(_debug_fdc, OID_AUTO, fifo, CTLFLAG_RW, &fifo_threshold, 0,
@@ -491,7 +492,7 @@ fdc_cmd(struct fdc_data *fdc, int n_out, ...)
 	n_in = va_arg(ap, int);
 	for (n = 0; n < n_in; n++) {
 		int *ptr = va_arg(ap, int *);
-		if (fdc_in(fdc, ptr) < 0) {
+		if (fdc_in(fdc, ptr) != 0) {
 			char msg[50];
 			snprintf(msg, sizeof(msg),
 				"cmd %02x failed at in byte %d of %d\n",
@@ -586,7 +587,7 @@ fdc_sense_int(struct fdc_data *fdc, int *st0p, int *cylp)
 		return (FD_NOT_VALID);
 	}
 
-	if (fdc_in(fdc, &cyl) < 0)
+	if (fdc_in(fdc, &cyl) != 0)
 		return fdc_err(fdc, "can't get cyl num\n");
 
 	if (cylp)
@@ -1160,10 +1161,8 @@ fdc_thread(void *arg)
 		mtx_unlock(&fdc->fdc_mtx);
 		i = fdc_worker(fdc);
 		if (i && debugflags & 0x20) {
-			if (fdc->bp != NULL) {
-				g_print_bio(fdc->bp);
-				printf("\n");
-			}
+			if (fdc->bp != NULL)
+				g_print_bio("", fdc->bp, "");
 			printf("Retry line %d\n", retry_line);
 		}
 		fdc->retry += i;

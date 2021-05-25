@@ -42,7 +42,6 @@
 #include <sys/module.h>
 #include <sys/sx.h>
 
-
 #include <netsmb/smb.h>
 #include <netsmb/smb_conn.h>
 #include <netsmb/smb_subr.h>
@@ -56,7 +55,8 @@ static int smbfs_debuglevel = 0;
 
 static int smbfs_version = SMBFS_VERSION;
 
-SYSCTL_NODE(_vfs, OID_AUTO, smbfs, CTLFLAG_RW, 0, "SMB/CIFS filesystem");
+SYSCTL_NODE(_vfs, OID_AUTO, smbfs, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "SMB/CIFS filesystem");
 SYSCTL_INT(_vfs_smbfs, OID_AUTO, version, CTLFLAG_RD, &smbfs_version, 0, "");
 SYSCTL_INT(_vfs_smbfs, OID_AUTO, debuglevel, CTLFLAG_RW, &smbfs_debuglevel, 0, "");
 
@@ -80,7 +80,6 @@ static struct vfsops smbfs_vfsops = {
 	.vfs_uninit =		smbfs_uninit,
 	.vfs_unmount =		smbfs_unmount,
 };
-
 
 VFS_SET(smbfs_vfsops, smbfs, VFCF_NETWORK);
 
@@ -154,7 +153,7 @@ smbfs_mount(struct mount *mp)
 
 	scred = smbfs_malloc_scred();
 	smb_makescred(scred, td, td->td_ucred);
-	
+
 	/* Ask userspace of `fd`, the file descriptor of this session */
 	if (1 != vfs_scanopt(mp->mnt_optnew, "fd", "%d", &v)) {
 		vfs_mount_error(mp, "No fd option");
@@ -234,7 +233,7 @@ smbfs_mount(struct mount *mp)
 		vfs_mount_error(mp, "smbfs_root error: %d", error);
 		goto bad;
 	}
-	VOP_UNLOCK(vp, 0);
+	VOP_UNLOCK(vp);
 	SMBVDEBUG("root.v_usecount = %d\n", vrefcnt(vp));
 
 #ifdef DIAGNOSTIC
@@ -328,7 +327,7 @@ smbfs_root(struct mount *mp, int flags, struct vnode **vpp)
 
 	if (smp->sm_root) {
 		*vpp = SMBTOV(smp->sm_root);
-		return vget(*vpp, LK_EXCLUSIVE | LK_RETRY, td);
+		return vget(*vpp, LK_EXCLUSIVE | LK_RETRY);
 	}
 	scred = smbfs_malloc_scred();
 	smb_makescred(scred, td, cred);
@@ -400,7 +399,7 @@ smbfs_statfs(struct mount *mp, struct statfs *sbp)
 		vfs_mount_error(mp, "np == NULL");
 		return EINVAL;
 	}
-	
+
 	sbp->f_iosize = SSTOVC(ssp)->vc_txmax;		/* optimal transfer block size */
 	scred = smbfs_malloc_scred();
 	smb_makescred(scred, td, td->td_ucred);

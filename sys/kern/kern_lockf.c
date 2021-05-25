@@ -441,7 +441,6 @@ lf_advlockasync(struct vop_advlockasync_args *ap, struct lockf **statep,
 	 * Convert the flock structure into a start and end.
 	 */
 	switch (fl->l_whence) {
-
 	case SEEK_SET:
 	case SEEK_CUR:
 		/*
@@ -592,7 +591,7 @@ retry_setlock:
 	 * the vnode interlock.
 	 */
 	VI_LOCK(vp);
-	if (vp->v_iflag & VI_DOOMED) {
+	if (VN_IS_DOOMED(vp)) {
 		VI_UNLOCK(vp);
 		lf_free_lock(lock);
 		return (ENOENT);
@@ -622,7 +621,7 @@ retry_setlock:
 		 * trying to allocate memory.
 		 */
 		VI_LOCK(vp);
-		if (vp->v_iflag & VI_DOOMED) {
+		if (VN_IS_DOOMED(vp)) {
 			VI_UNLOCK(vp);
 			sx_xlock(&lf_lock_states_lock);
 			LIST_REMOVE(ls, ls_link);
@@ -637,6 +636,7 @@ retry_setlock:
 			VI_UNLOCK(vp);
 		} else {
 			state = *statep;
+			MPASS(state->ls_threads >= 0);
 			state->ls_threads++;
 			VI_UNLOCK(vp);
 
@@ -647,6 +647,7 @@ retry_setlock:
 			free(ls, M_LOCKF);
 		}
 	} else {
+		MPASS(state->ls_threads >= 0);
 		state->ls_threads++;
 		VI_UNLOCK(vp);
 	}
@@ -655,10 +656,11 @@ retry_setlock:
 	/*
 	 * Recheck the doomed vnode after state->ls_lock is
 	 * locked. lf_purgelocks() requires that no new threads add
-	 * pending locks when vnode is marked by VI_DOOMED flag.
+	 * pending locks when vnode is marked by VIRF_DOOMED flag.
 	 */
-	VI_LOCK(vp);
-	if (vp->v_iflag & VI_DOOMED) {
+	if (VN_IS_DOOMED(vp)) {
+		VI_LOCK(vp);
+		MPASS(state->ls_threads > 0);
 		state->ls_threads--;
 		wakeup(state);
 		VI_UNLOCK(vp);
@@ -666,7 +668,6 @@ retry_setlock:
 		lf_free_lock(lock);
 		return (ENOENT);
 	}
-	VI_UNLOCK(vp);
 
 	switch (ap->a_op) {
 	case F_SETLK:
@@ -728,15 +729,11 @@ retry_setlock:
 	sx_xunlock(&state->ls_lock);
 
 	VI_LOCK(vp);
-
+	MPASS(state->ls_threads > 0);
 	state->ls_threads--;
-	if (LIST_EMPTY(&state->ls_active) && state->ls_threads == 0) {
-		KASSERT(LIST_EMPTY(&state->ls_pending),
-		    ("freeable state with pending locks"));
-	} else {
+	if (state->ls_threads != 0) {
 		wakeup(state);
 	}
-
 	VI_UNLOCK(vp);
 
 	if (error == EDOOFUS) {
@@ -771,12 +768,12 @@ lf_purgelocks(struct vnode *vp, struct lockf **statep)
 	/*
 	 * For this to work correctly, the caller must ensure that no
 	 * other threads enter the locking system for this vnode,
-	 * e.g. by checking VI_DOOMED. We wake up any threads that are
+	 * e.g. by checking VIRF_DOOMED. We wake up any threads that are
 	 * sleeping waiting for locks on this vnode and then free all
 	 * the remaining locks.
 	 */
 	VI_LOCK(vp);
-	KASSERT(vp->v_iflag & VI_DOOMED,
+	KASSERT(VN_IS_DOOMED(vp),
 	    ("lf_purgelocks: vp %p has not vgone yet", vp));
 	state = *statep;
 	if (state == NULL) {
@@ -790,6 +787,7 @@ lf_purgelocks(struct vnode *vp, struct lockf **statep)
 		VI_UNLOCK(vp);
 		goto out_free;
 	}
+	MPASS(state->ls_threads >= 0);
 	state->ls_threads++;
 	VI_UNLOCK(vp);
 
@@ -885,7 +883,6 @@ lf_free_edge(struct lockf_edge *e)
 
 	free(e, M_LOCKF);
 }
-
 
 /*
  * Ensure that the lock's owner has a corresponding vertex in the
@@ -1954,6 +1951,7 @@ lf_iteratelocks_vnode(struct vnode *vp, lf_iterator *fn, void *arg)
 		VI_UNLOCK(vp);
 		return (0);
 	}
+	MPASS(ls->ls_threads >= 0);
 	ls->ls_threads++;
 	VI_UNLOCK(vp);
 
@@ -1977,6 +1975,7 @@ lf_iteratelocks_vnode(struct vnode *vp, lf_iterator *fn, void *arg)
 	}
 	sx_xunlock(&ls->ls_lock);
 	VI_LOCK(vp);
+	MPASS(ls->ls_threads > 0);
 	ls->ls_threads--;
 	wakeup(ls);
 	VI_UNLOCK(vp);
@@ -2440,7 +2439,7 @@ graph_free_vertex(struct owner_graph *g, struct owner_vertex *v)
 	int i;
 
 	sx_assert(&lf_owner_graph_lock, SX_XLOCKED);
-	
+
 	KASSERT(LIST_EMPTY(&v->v_outedges), ("Freeing vertex with edges"));
 	KASSERT(LIST_EMPTY(&v->v_inedges), ("Freeing vertex with edges"));
 

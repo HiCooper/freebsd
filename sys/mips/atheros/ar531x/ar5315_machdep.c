@@ -42,7 +42,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/boot.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_dumpset.h>
 
 #include <net/ethernet.h>
 
@@ -52,7 +55,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/hwfunc.h>
 #include <machine/md_var.h>
 #include <machine/trap.h>
-#include <machine/vmparam.h>
 
 #include <mips/atheros/ar531x/ar5315reg.h>
 
@@ -108,7 +110,7 @@ ar5315_redboot_get_macaddr(void)
 }
 
 #if defined(SOC_VENDOR) || defined(SOC_MODEL) || defined(SOC_REV)
-static SYSCTL_NODE(_hw, OID_AUTO, soc, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_hw, OID_AUTO, soc, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "System on Chip information");
 #endif
 #if defined(SOC_VENDOR)
@@ -128,7 +130,8 @@ SYSCTL_STRING(_hw_soc, OID_AUTO, revision, CTLFLAG_RD, hw_soc_revision, 0,
 #endif
 
 #if defined(DEVICE_VENDOR) || defined(DEVICE_MODEL) || defined(DEVICE_REV)
-static SYSCTL_NODE(_hw, OID_AUTO, device, CTLFLAG_RD, 0, "Board information");
+static SYSCTL_NODE(_hw, OID_AUTO, device, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "Board information");
 #endif
 #if defined(DEVICE_VENDOR)
 static char hw_device_vendor[] = DEVICE_VENDOR;
@@ -145,8 +148,6 @@ static char hw_device_revision[] = DEVICE_REV;
 SYSCTL_STRING(_hw_device, OID_AUTO, revision, CTLFLAG_RD, hw_device_revision, 0,
 	   "Board revision");
 #endif
-
-extern char cpu_model[];
 
 void
 platform_start(__register_t a0 __unused, __register_t a1 __unused, 
@@ -240,7 +241,6 @@ platform_start(__register_t a0 __unused, __register_t a1 __unused,
 //	boothowto |= (RB_SINGLE);
 
 	/* Detect the system type - this is needed for subsequent chipset-specific calls */
-
 
 	ar531x_device_soc_init();
 	ar531x_detect_sys_frequency();

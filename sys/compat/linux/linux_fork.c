@@ -92,7 +92,6 @@ linux_fork(struct thread *td, struct linux_fork_args *args)
 	thread_lock(td2);
 	TD_SET_CAN_RUN(td2);
 	sched_add(td2, SRQ_BORING);
-	thread_unlock(td2);
 
 	return (0);
 }
@@ -123,7 +122,6 @@ linux_vfork(struct thread *td, struct linux_vfork_args *args)
 	thread_lock(td2);
 	TD_SET_CAN_RUN(td2);
 	sched_add(td2, SRQ_BORING);
-	thread_unlock(td2);
 
 	return (0);
 }
@@ -133,12 +131,13 @@ static int
 linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 {
 	struct fork_req fr;
-	int error, ff = RFPROC | RFSTOPPED;
+	int error, ff = RFPROC | RFSTOPPED, f2;
 	struct proc *p2;
 	struct thread *td2;
 	int exit_signal;
 	struct linux_emuldata *em;
 
+	f2 = 0;
 	exit_signal = args->flags & 0x000000ff;
 	if (LINUX_SIG_VALID(exit_signal)) {
 		exit_signal = linux_to_bsd_signal(exit_signal);
@@ -149,14 +148,14 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 		ff |= RFMEM;
 	if (args->flags & LINUX_CLONE_SIGHAND)
 		ff |= RFSIGSHARE;
-	/*
-	 * XXX: In Linux, sharing of fs info (chroot/cwd/umask)
-	 * and open files is independent.  In FreeBSD, its in one
-	 * structure but in reality it does not cause any problems
-	 * because both of these flags are usually set together.
-	 */
-	if (!(args->flags & (LINUX_CLONE_FILES | LINUX_CLONE_FS)))
+	if (args->flags & LINUX_CLONE_FILES) {
+		if (!(args->flags & LINUX_CLONE_FS))
+			f2 |= FR2_SHARE_PATHS;
+	} else {
 		ff |= RFFDG;
+		if (args->flags & LINUX_CLONE_FS)
+			f2 |= FR2_SHARE_PATHS;
+	}
 
 	if (args->flags & LINUX_CLONE_PARENT_SETTID)
 		if (args->parent_tidptr == NULL)
@@ -167,6 +166,7 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 
 	bzero(&fr, sizeof(fr));
 	fr.fr_flags = ff;
+	fr.fr_flags2 = f2;
 	fr.fr_procp = &p2;
 	error = fork1(td, &fr);
 	if (error)
@@ -228,7 +228,6 @@ linux_clone_proc(struct thread *td, struct linux_clone_args *args)
 	thread_lock(td2);
 	TD_SET_CAN_RUN(td2);
 	sched_add(td2, SRQ_BORING);
-	thread_unlock(td2);
 
 	td->td_retval[0] = p2->p_pid;
 
@@ -247,6 +246,8 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	    td->td_tid, (unsigned)args->flags,
 	    args->parent_tidptr, args->child_tidptr);
 
+	if ((args->flags & LINUX_CLONE_PARENT) != 0)
+		return (EINVAL);
 	if (args->flags & LINUX_CLONE_PARENT_SETTID)
 		if (args->parent_tidptr == NULL)
 			return (EINVAL);
@@ -307,12 +308,8 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 
 	PROC_LOCK(p);
 	p->p_flag |= P_HADTHREADS;
+	thread_link(newtd, p);
 	bcopy(p->p_comm, newtd->td_name, sizeof(newtd->td_name));
-
-	if (args->flags & LINUX_CLONE_PARENT)
-		thread_link(newtd, p->p_pptr);
-	else
-		thread_link(newtd, p);
 
 	thread_lock(td);
 	/* let the scheduler know about these things. */
@@ -343,7 +340,6 @@ linux_clone_thread(struct thread *td, struct linux_clone_args *args)
 	thread_lock(newtd);
 	TD_SET_CAN_RUN(newtd);
 	sched_add(newtd, SRQ_BORING);
-	thread_unlock(newtd);
 
 	td->td_retval[0] = newtd->td_tid;
 
@@ -429,7 +425,6 @@ linux_thread_detach(struct thread *td)
 	child_clear_tid = em->child_clear_tid;
 
 	if (child_clear_tid != NULL) {
-
 		LINUX_CTR2(thread_detach, "thread(%d) %p",
 		    em->em_tid, child_clear_tid);
 

@@ -278,7 +278,6 @@ typedef enum {
 	/* SCSI Bus Busy */
 	CAM_SCSI_BUSY		= 0x3f,
 
-
 	/*
 	 * Flags
 	 */
@@ -304,7 +303,7 @@ typedef enum {
 	/*
 	 * Target Specific Adjunct Status
 	 */
-	
+
 	/* sent sense with status */
 	CAM_SENT_SENSE		= 0x40000000
 } cam_status;
@@ -403,11 +402,9 @@ void	cam_error_print(struct cam_device *device, union ccb *ccb,
 __END_DECLS
 
 #ifdef _KERNEL
-static __inline void cam_init_pinfo(cam_pinfo *pinfo);
-
 static __inline void cam_init_pinfo(cam_pinfo *pinfo)
 {
-	pinfo->priority = CAM_PRIORITY_NONE;	
+	pinfo->priority = CAM_PRIORITY_NONE;
 	pinfo->index = CAM_UNQUEUED_INDEX;
 }
 #endif

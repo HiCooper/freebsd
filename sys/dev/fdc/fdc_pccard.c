@@ -1,8 +1,7 @@
 /*-
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
- * Copyright (c) 2004-2005 M. Warner Losh.
- * All rights reserved.
+ * Copyright (c) 2004-2005 M. Warner Losh <imp@FreeBSD.org>
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -111,9 +110,10 @@ fdc_pccard_attach(device_t dev)
 		device_set_flags(child, 0x24);
 		error = bus_generic_attach(dev);
 	}
-	if (error == 0)
+	if (error == 0) {
+		gone_in_dev(dev, 13, "pccard removed");
 		fdc_start_worker(dev);
-	else
+	} else
 		fdc_release_resources(fdc);
 	return (error);
 }

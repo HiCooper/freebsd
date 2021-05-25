@@ -43,7 +43,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/lock.h>
 #include <sys/mutex.h>
 #include <sys/sysproto.h>
-#include <sys/eventhandler.h>
 #include <sys/resourcevar.h>
 #include <sys/signalvar.h>
 #include <sys/kernel.h>
@@ -99,8 +98,6 @@ static void	itimer_enter(struct itimer *);
 static void	itimer_leave(struct itimer *);
 static struct itimer *itimer_find(struct proc *, int);
 static void	itimers_alloc(struct proc *);
-static void	itimers_event_hook_exec(void *arg, struct proc *p, struct image_params *imgp);
-static void	itimers_event_hook_exit(void *arg, struct proc *p);
 static int	realtimer_create(struct itimer *);
 static int	realtimer_gettime(struct itimer *, struct itimerspec *);
 static int	realtimer_settime(struct itimer *, int,
@@ -109,7 +106,7 @@ static int	realtimer_delete(struct itimer *);
 static void	realtimer_clocktime(clockid_t, struct timespec *);
 static void	realtimer_expire(void *);
 
-int		register_posix_clock(int, struct kclock *);
+static int	register_posix_clock(int, const struct kclock *);
 void		itimer_fire(struct itimer *it);
 int		itimespecfix(struct timespec *ts);
 
@@ -117,7 +114,6 @@ int		itimespecfix(struct timespec *ts);
 	((*posix_clocks[clock].call) arglist)
 
 SYSINIT(posix_timer, SI_SUB_P1003_1B, SI_ORDER_FIRST+4, itimer_start, NULL);
-
 
 static int
 settime(struct thread *td, struct timeval *tv)
@@ -243,7 +239,7 @@ sys_clock_gettime(struct thread *td, struct clock_gettime_args *uap)
 	return (error);
 }
 
-static inline void 
+static inline void
 cputick2timespec(uint64_t runtime, struct timespec *ats)
 {
 	runtime = cputick2usec(runtime);
@@ -251,8 +247,8 @@ cputick2timespec(uint64_t runtime, struct timespec *ats)
 	ats->tv_nsec = runtime % 1000000 * 1000;
 }
 
-static void
-get_thread_cputime(struct thread *targettd, struct timespec *ats)
+void
+kern_thread_cputime(struct thread *targettd, struct timespec *ats)
 {
 	uint64_t runtime, curtime, switchtime;
 
@@ -264,6 +260,7 @@ get_thread_cputime(struct thread *targettd, struct timespec *ats)
 		critical_exit();
 		runtime += curtime - switchtime;
 	} else {
+		PROC_LOCK_ASSERT(targettd->td_proc, MA_OWNED);
 		thread_lock(targettd);
 		runtime = targettd->td_runtime;
 		thread_unlock(targettd);
@@ -271,12 +268,13 @@ get_thread_cputime(struct thread *targettd, struct timespec *ats)
 	cputick2timespec(runtime, ats);
 }
 
-static void
-get_process_cputime(struct proc *targetp, struct timespec *ats)
+void
+kern_process_cputime(struct proc *targetp, struct timespec *ats)
 {
 	uint64_t runtime;
 	struct rusage ru;
 
+	PROC_LOCK_ASSERT(targetp, MA_OWNED);
 	PROC_STATLOCK(targetp);
 	rufetch(targetp, &ru);
 	runtime = targetp->p_rux.rux_runtime;
@@ -301,14 +299,14 @@ get_cputime(struct thread *td, clockid_t clock_id, struct timespec *ats)
 		td2 = tdfind(tid, p->p_pid);
 		if (td2 == NULL)
 			return (EINVAL);
-		get_thread_cputime(td2, ats);
+		kern_thread_cputime(td2, ats);
 		PROC_UNLOCK(td2->td_proc);
 	} else {
 		pid = clock_id & CPUCLOCK_ID_MASK;
 		error = pget(pid, PGET_CANSEE, &p2);
 		if (error != 0)
 			return (EINVAL);
-		get_process_cputime(p2, ats);
+		kern_process_cputime(p2, ats);
 		PROC_UNLOCK(p2);
 	}
 	return (0);
@@ -361,11 +359,11 @@ kern_clock_gettime(struct thread *td, clockid_t clock_id, struct timespec *ats)
 		ats->tv_nsec = 0;
 		break;
 	case CLOCK_THREAD_CPUTIME_ID:
-		get_thread_cputime(NULL, ats);
+		kern_thread_cputime(NULL, ats);
 		break;
 	case CLOCK_PROCESS_CPUTIME_ID:
 		PROC_LOCK(p);
-		get_process_cputime(p, ats);
+		kern_process_cputime(p, ats);
 		PROC_UNLOCK(p);
 		break;
 	default:
@@ -624,20 +622,15 @@ user_clock_nanosleep(struct thread *td, clockid_t clock_id, int flags,
     const struct timespec *ua_rqtp, struct timespec *ua_rmtp)
 {
 	struct timespec rmt, rqt;
-	int error;
+	int error, error2;
 
 	error = copyin(ua_rqtp, &rqt, sizeof(rqt));
 	if (error)
 		return (error);
-	if (ua_rmtp != NULL && (flags & TIMER_ABSTIME) == 0 &&
-	    !useracc(ua_rmtp, sizeof(rmt), VM_PROT_WRITE))
-		return (EFAULT);
 	error = kern_clock_nanosleep(td, clock_id, flags, &rqt, &rmt);
 	if (error == EINTR && ua_rmtp != NULL && (flags & TIMER_ABSTIME) == 0) {
-		int error2;
-
 		error2 = copyout(&rmt, ua_rmtp, sizeof(rmt));
-		if (error2)
+		if (error2 != 0)
 			error = error2;
 	}
 	return (error);
@@ -1090,12 +1083,11 @@ ppsratecheck(struct timeval *lasttime, int *curpps, int maxpps)
 static void
 itimer_start(void)
 {
-	struct kclock rt_clock = {
+	static const struct kclock rt_clock = {
 		.timer_create  = realtimer_create,
 		.timer_delete  = realtimer_delete,
 		.timer_settime = realtimer_settime,
 		.timer_gettime = realtimer_gettime,
-		.event_hook    = NULL
 	};
 
 	itimer_zone = uma_zcreate("itimer", sizeof(struct itimer),
@@ -1105,14 +1097,10 @@ itimer_start(void)
 	p31b_setcfg(CTL_P1003_1B_TIMERS, 200112L);
 	p31b_setcfg(CTL_P1003_1B_DELAYTIMER_MAX, INT_MAX);
 	p31b_setcfg(CTL_P1003_1B_TIMER_MAX, TIMER_MAX);
-	EVENTHANDLER_REGISTER(process_exit, itimers_event_hook_exit,
-		(void *)ITIMER_EV_EXIT, EVENTHANDLER_PRI_ANY);
-	EVENTHANDLER_REGISTER(process_exec, itimers_event_hook_exec,
-		(void *)ITIMER_EV_EXEC, EVENTHANDLER_PRI_ANY);
 }
 
-int
-register_posix_clock(int clockid, struct kclock *clk)
+static int
+register_posix_clock(int clockid, const struct kclock *clk)
 {
 	if ((unsigned)clockid >= MAX_CLOCKS) {
 		printf("%s: invalid clockid\n", __func__);
@@ -1216,10 +1204,10 @@ kern_ktimer_create(struct thread *td, clockid_t clock_id, struct sigevent *evp,
 			!_SIG_VALID(evp->sigev_signo))
 			return (EINVAL);
 	}
-	
+
 	if (p->p_itimers == NULL)
 		itimers_alloc(p);
-	
+
 	it = uma_zalloc(itimer_zone, M_WAITOK);
 	it->it_flags = 0;
 	it->it_usecount = 0;
@@ -1495,7 +1483,7 @@ static int
 realtimer_delete(struct itimer *it)
 {
 	mtx_assert(&it->it_mtx, MA_OWNED);
-	
+
 	/*
 	 * clear timer's value and interval to tell realtimer_expire
 	 * to not rearm the timer.
@@ -1549,7 +1537,7 @@ realtimer_settime(struct itimer *it, int flags,
 	} else {
 		timespecclear(&val.it_interval);
 	}
-	
+
 	if (ovalue != NULL)
 		realtimer_gettime(it, ovalue);
 
@@ -1718,46 +1706,41 @@ itimers_alloc(struct proc *p)
 	}
 }
 
-static void
-itimers_event_hook_exec(void *arg, struct proc *p, struct image_params *imgp __unused)
-{
-	itimers_event_hook_exit(arg, p);
-}
-
 /* Clean up timers when some process events are being triggered. */
 static void
-itimers_event_hook_exit(void *arg, struct proc *p)
+itimers_event_exit_exec(int start_idx, struct proc *p)
 {
 	struct itimers *its;
 	struct itimer *it;
-	int event = (int)(intptr_t)arg;
 	int i;
 
-	if (p->p_itimers != NULL) {
-		its = p->p_itimers;
-		for (i = 0; i < MAX_CLOCKS; ++i) {
-			if (posix_clocks[i].event_hook != NULL)
-				CLOCK_CALL(i, event_hook, (p, i, event));
-		}
-		/*
-		 * According to susv3, XSI interval timers should be inherited
-		 * by new image.
-		 */
-		if (event == ITIMER_EV_EXEC)
-			i = 3;
-		else if (event == ITIMER_EV_EXIT)
-			i = 0;
-		else
-			panic("unhandled event");
-		for (; i < TIMER_MAX; ++i) {
-			if ((it = its->its_timers[i]) != NULL)
-				kern_ktimer_delete(curthread, i);
-		}
-		if (its->its_timers[0] == NULL &&
-		    its->its_timers[1] == NULL &&
-		    its->its_timers[2] == NULL) {
-			free(its, M_SUBPROC);
-			p->p_itimers = NULL;
-		}
+	its = p->p_itimers;
+	if (its == NULL)
+		return;
+
+	for (i = start_idx; i < TIMER_MAX; ++i) {
+		if ((it = its->its_timers[i]) != NULL)
+			kern_ktimer_delete(curthread, i);
 	}
+	if (its->its_timers[0] == NULL && its->its_timers[1] == NULL &&
+	    its->its_timers[2] == NULL) {
+		free(its, M_SUBPROC);
+		p->p_itimers = NULL;
+	}
+}
+
+void
+itimers_exec(struct proc *p)
+{
+	/*
+	 * According to susv3, XSI interval timers should be inherited
+	 * by new image.
+	 */
+	itimers_event_exit_exec(3, p);
+}
+
+void
+itimers_exit(struct proc *p)
+{
+	itimers_event_exit_exec(0, p);
 }

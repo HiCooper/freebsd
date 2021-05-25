@@ -44,11 +44,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/malloc.h>
 #include <sys/eventhandler.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <geom/mountver/g_mountver.h>
 
-
 SYSCTL_DECL(_kern_geom);
-static SYSCTL_NODE(_kern_geom, OID_AUTO, mountver, CTLFLAG_RW,
+static SYSCTL_NODE(_kern_geom, OID_AUTO, mountver, CTLFLAG_RW | CTLFLAG_MPSAFE,
     0, "GEOM_MOUNTVER stuff");
 static u_int g_mountver_debug = 0;
 static u_int g_mountver_check_ident = 1;
@@ -84,14 +84,29 @@ struct g_class g_mountver_class = {
 };
 
 static void
+g_mountver_detach(void *arg, int flags __unused)
+{
+	struct g_consumer *cp = arg;
+
+	g_topology_assert();
+	if (cp->acr > 0 || cp->acw > 0 || cp->ace > 0)
+		g_access(cp, -cp->acr, -cp->acw, -cp->ace);
+	g_detach(cp);
+}
+
+static void
 g_mountver_done(struct bio *bp)
 {
+	struct g_mountver_softc *sc;
 	struct g_geom *gp;
+	struct g_consumer *cp;
 	struct bio *pbp;
 
+	cp = bp->bio_from;
+	gp = cp->geom;
 	if (bp->bio_error != ENXIO) {
 		g_std_done(bp);
-		return;
+		goto done;
 	}
 
 	/*
@@ -100,32 +115,45 @@ g_mountver_done(struct bio *bp)
 	 * gets called.  To work around that, we have to queue requests
 	 * that failed with ENXIO, in order to send them later.
 	 */
-	gp = bp->bio_from->geom;
-
 	pbp = bp->bio_parent;
 	KASSERT(pbp->bio_to == LIST_FIRST(&gp->provider),
 	    ("parent request was for someone else"));
 	g_destroy_bio(bp);
 	pbp->bio_inbed++;
 	g_mountver_queue(pbp);
+
+done:
+	sc = gp->softc;
+	mtx_lock(&sc->sc_mtx);
+	if (--cp->index == 0 && sc->sc_orphaned)
+		g_post_event(g_mountver_detach, cp, M_NOWAIT, NULL);
+	mtx_unlock(&sc->sc_mtx);
 }
 
+/*
+ * Send the BIO down.  The function is called with sc_mtx held to cover
+ * the race with orphan, but drops it before external calls.
+ */
 static void
-g_mountver_send(struct bio *bp)
+g_mountver_send(struct g_geom *gp, struct bio *bp)
 {
-	struct g_geom *gp;
+	struct g_mountver_softc *sc = gp->softc;
+	struct g_consumer *cp;
 	struct bio *cbp;
 
-	gp = bp->bio_to->geom;
-
+	mtx_assert(&sc->sc_mtx, MA_OWNED);
 	cbp = g_clone_bio(bp);
 	if (cbp == NULL) {
+		mtx_unlock(&sc->sc_mtx);
 		g_io_deliver(bp, ENOMEM);
 		return;
 	}
+	cp = LIST_FIRST(&gp->consumer);
+	cp->index++;
+	mtx_unlock(&sc->sc_mtx);
 
 	cbp->bio_done = g_mountver_done;
-	g_io_request(cbp, LIST_FIRST(&gp->consumer));
+	g_io_request(cbp, cp);
 }
 
 static void
@@ -151,10 +179,12 @@ g_mountver_send_queued(struct g_geom *gp)
 	sc = gp->softc;
 
 	mtx_lock(&sc->sc_mtx);
-	while ((bp = TAILQ_FIRST(&sc->sc_queue)) != NULL) {
+	while ((bp = TAILQ_FIRST(&sc->sc_queue)) != NULL && !sc->sc_orphaned) {
 		TAILQ_REMOVE(&sc->sc_queue, bp, bio_queue);
 		G_MOUNTVER_LOGREQ(bp, "Sending queued request.");
-		g_mountver_send(bp);
+		/* sc_mtx is dropped inside */
+		g_mountver_send(gp, bp);
+		mtx_lock(&sc->sc_mtx);
 	}
 	mtx_unlock(&sc->sc_mtx);
 }
@@ -170,8 +200,10 @@ g_mountver_discard_queued(struct g_geom *gp)
 	mtx_lock(&sc->sc_mtx);
 	while ((bp = TAILQ_FIRST(&sc->sc_queue)) != NULL) {
 		TAILQ_REMOVE(&sc->sc_queue, bp, bio_queue);
+		mtx_unlock(&sc->sc_mtx);
 		G_MOUNTVER_LOGREQ(bp, "Discarding queued request.");
 		g_io_deliver(bp, ENXIO);
+		mtx_lock(&sc->sc_mtx);
 	}
 	mtx_unlock(&sc->sc_mtx);
 }
@@ -191,7 +223,9 @@ g_mountver_start(struct bio *bp)
 	 * orphaning didn't happen yet.  In that case, queue all subsequent
 	 * requests in order to maintain ordering.
 	 */
+	mtx_lock(&sc->sc_mtx);
 	if (sc->sc_orphaned || !TAILQ_EMPTY(&sc->sc_queue)) {
+		mtx_unlock(&sc->sc_mtx);
 		if (sc->sc_shutting_down) {
 			G_MOUNTVER_LOGREQ(bp, "Discarding request due to shutdown.");
 			g_io_deliver(bp, ENXIO);
@@ -203,7 +237,8 @@ g_mountver_start(struct bio *bp)
 			g_mountver_send_queued(gp);
 	} else {
 		G_MOUNTVER_LOGREQ(bp, "Sending request.");
-		g_mountver_send(bp);
+		/* sc_mtx is dropped inside */
+		g_mountver_send(gp, bp);
 	}
 }
 
@@ -240,6 +275,7 @@ g_mountver_create(struct gctl_req *req, struct g_class *mp, struct g_provider *p
 	struct g_geom *gp;
 	struct g_provider *newpp;
 	struct g_consumer *cp;
+	struct g_geom_alias *gap;
 	char name[64];
 	int error;
 	int identsize = DISK_IDENT_SIZE;
@@ -273,6 +309,8 @@ g_mountver_create(struct gctl_req *req, struct g_class *mp, struct g_provider *p
 	newpp->mediasize = pp->mediasize;
 	newpp->sectorsize = pp->sectorsize;
 	newpp->flags |= G_PF_DIRECT_SEND | G_PF_DIRECT_RECEIVE;
+	LIST_FOREACH(gap, &pp->aliases, ga_next)
+		g_provider_add_alias(newpp, "%s%s", gap->ga_alias, G_MOUNTVER_SUFFIX);
 
 	if ((pp->flags & G_PF_ACCEPT_UNMAPPED) != 0) {
 		G_MOUNTVER_DEBUG(0, "Unmapped supported for %s.", gp->name);
@@ -365,7 +403,6 @@ static void
 g_mountver_ctl_create(struct gctl_req *req, struct g_class *mp)
 {
 	struct g_provider *pp;
-	const char *name;
 	char param[16];
 	int i, *nargs;
 
@@ -382,19 +419,9 @@ g_mountver_ctl_create(struct gctl_req *req, struct g_class *mp)
 	}
 	for (i = 0; i < *nargs; i++) {
 		snprintf(param, sizeof(param), "arg%d", i);
-		name = gctl_get_asciiparam(req, param);
-		if (name == NULL) {
-			gctl_error(req, "No 'arg%d' argument", i);
+		pp = gctl_get_provider(req, param);
+		if (pp == NULL)
 			return;
-		}
-		if (strncmp(name, "/dev/", strlen("/dev/")) == 0)
-			name += strlen("/dev/");
-		pp = g_provider_by_name(name);
-		if (pp == NULL) {
-			G_MOUNTVER_DEBUG(1, "Provider %s is invalid.", name);
-			gctl_error(req, "Provider %s is invalid.", name);
-			return;
-		}
 		if (g_mountver_create(req, mp, pp) != 0)
 			return;
 	}
@@ -444,8 +471,8 @@ g_mountver_ctl_destroy(struct gctl_req *req, struct g_class *mp)
 			gctl_error(req, "No 'arg%d' argument", i);
 			return;
 		}
-		if (strncmp(name, "/dev/", strlen("/dev/")) == 0)
-			name += strlen("/dev/");
+		if (strncmp(name, _PATH_DEV, strlen(_PATH_DEV)) == 0)
+			name += strlen(_PATH_DEV);
 		gp = g_mountver_find_geom(mp, name);
 		if (gp == NULL) {
 			G_MOUNTVER_DEBUG(1, "Device %s is invalid.", name);
@@ -465,14 +492,17 @@ static void
 g_mountver_orphan(struct g_consumer *cp)
 {
 	struct g_mountver_softc *sc;
+	int done;
 
 	g_topology_assert();
 
 	sc = cp->geom->softc;
+	mtx_lock(&sc->sc_mtx);
 	sc->sc_orphaned = 1;
-	if (cp->acr > 0 || cp->acw > 0 || cp->ace > 0)
-		g_access(cp, -cp->acr, -cp->acw, -cp->ace);
-	g_detach(cp);
+	done = (cp->index == 0);
+	mtx_unlock(&sc->sc_mtx);
+	if (done)
+		g_mountver_detach(cp, 0);
 	G_MOUNTVER_DEBUG(0, "%s is offline.  Mount verification in progress.", sc->sc_provider_name);
 }
 
@@ -524,7 +554,7 @@ g_mountver_ident_matches(struct g_geom *gp)
 
 	return (0);
 }
-	
+
 static struct g_geom *
 g_mountver_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 {
@@ -556,7 +586,12 @@ g_mountver_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 		return (NULL);
 
 	cp = LIST_FIRST(&gp->consumer);
-	g_attach(cp, pp);
+	error = g_attach(cp, pp);
+	if (error != 0) {
+		G_MOUNTVER_DEBUG(0, "Cannot attach to %s; error = %d.", pp->name, error);
+		return (NULL);
+	}
+
 	error = g_mountver_ident_matches(gp);
 	if (error != 0) {
 		g_detach(cp);
@@ -570,8 +605,8 @@ g_mountver_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 			return (NULL);
 		}
 	}
-	g_mountver_send_queued(gp);
 	sc->sc_orphaned = 0;
+	g_mountver_send_queued(gp);
 	G_MOUNTVER_DEBUG(0, "%s has completed mount verification.", sc->sc_provider_name);
 
 	return (gp);

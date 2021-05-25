@@ -3,8 +3,6 @@
 
 .include <src.opts.mk>
 
-PACKAGE=runtime-manuals
-
 #MISSING: eqnchar.7 ms.7 term.7
 MAN=	arch.7 \
 	ascii.7 \
@@ -23,11 +21,13 @@ MAN=	arch.7 \
 	intro.7 \
 	maclabel.7 \
 	operator.7 \
+	orders.7 \
 	ports.7 \
 	release.7 \
 	sdoc.7 \
 	security.7 \
 	sprog.7 \
+	stats.7 \
 	stdint.7 \
 	sticky.7 \
 	tests.7 \

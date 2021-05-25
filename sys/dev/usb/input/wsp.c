@@ -67,7 +67,8 @@ __FBSDID("$FreeBSD$");
 } while (0)
 
 /* Tunables */
-static	SYSCTL_NODE(_hw_usb, OID_AUTO, wsp, CTLFLAG_RW, 0, "USB wsp");
+static	SYSCTL_NODE(_hw_usb, OID_AUTO, wsp, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB wsp");
 
 #ifdef USB_DEBUG
 enum wsp_log_level {
@@ -456,7 +457,6 @@ static const struct wsp_dev_params wsp_dev_params[WSP_FLAG_MAX] = {
 		.um_switch_off = 0x00,
 	},
 };
-
 #define	WSP_DEV(v,p,i) { USB_VPI(USB_VENDOR_##v, USB_PRODUCT_##v##_##p, i) }
 
 static const STRUCT_USB_HOST_ID wsp_devs[] = {
@@ -1003,7 +1003,6 @@ wsp_intr_callback(struct usb_xfer *xfer, usb_error_t error)
 			}
 			if ((sc->dt_sum / tun.scr_hor_threshold) != 0 &&
 			    sc->ntaps == 2 && sc->scr_mode == WSP_SCR_HOR) {
-
 				/*
 				 * translate T-axis into button presses
 				 * until further
@@ -1150,7 +1149,6 @@ wsp_intr_callback(struct usb_xfer *xfer, usb_error_t error)
 				sc->dz_sum = 0;
 				sc->rdz = 0;
 			}
-
 		}
 		sc->pre_pos_x = sc->pos_x[0];
 		sc->pre_pos_y = sc->pos_y[0];
@@ -1258,7 +1256,6 @@ wsp_stop_read(struct usb_fifo *fifo)
 
 	usbd_transfer_stop(sc->sc_xfer[WSP_INTR_DT]);
 }
-
 
 static int
 wsp_open(struct usb_fifo *fifo, int fflags)

@@ -75,7 +75,6 @@ MALLOC_DEFINE(SCTP_M_MCORE, "sctp_mcore", "sctp mcore queue");
 /* Global NON-VNET structure that controls the iterator */
 struct iterator_control sctp_it_ctl;
 
-
 void
 sctp_wakeup_iterator(void)
 {
@@ -144,7 +143,6 @@ sctp_gather_internal_ifa_flags(struct sctp_ifa *ifa)
 }
 #endif				/* INET6 */
 
-
 static uint32_t
 sctp_is_desired_interface_type(struct ifnet *ifn)
 {
@@ -187,9 +185,6 @@ sctp_is_desired_interface_type(struct ifnet *ifn)
 	return (result);
 }
 
-
-
-
 static void
 sctp_init_ifns_for_vrf(int vrfid)
 {
@@ -198,6 +193,7 @@ sctp_init_ifns_for_vrf(int vrfid)
 	 * make sure we lock any IFA that exists as we float through the
 	 * list of IFA's
 	 */
+	struct epoch_tracker et;
 	struct ifnet *ifn;
 	struct ifaddr *ifa;
 	struct sctp_ifa *sctp_ifa;
@@ -207,14 +203,12 @@ sctp_init_ifns_for_vrf(int vrfid)
 #endif
 
 	IFNET_RLOCK();
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifn, &MODULE_GLOBAL(ifnet), if_link) {
-		struct epoch_tracker et;
-
 		if (sctp_is_desired_interface_type(ifn) == 0) {
 			/* non desired type */
 			continue;
 		}
-		NET_EPOCH_ENTER(et);
 		CK_STAILQ_FOREACH(ifa, &ifn->if_addrhead, ifa_link) {
 			if (ifa->ifa_addr == NULL) {
 				continue;
@@ -267,8 +261,8 @@ sctp_init_ifns_for_vrf(int vrfid)
 				sctp_ifa->localifa_flags &= ~SCTP_ADDR_DEFER_USE;
 			}
 		}
-		NET_EPOCH_EXIT(et);
 	}
+	NET_EPOCH_EXIT(et);
 	IFNET_RUNLOCK();
 }
 
@@ -346,7 +340,6 @@ sctp_addr_change(struct ifaddr *ifa, int cmd)
 		    ifa->ifa_ifp->if_index, ifa->ifa_ifp->if_type, ifa->ifa_ifp->if_xname,
 		    (void *)ifa, ifa->ifa_addr, ifa_flags, 1);
 	} else {
-
 		sctp_del_addr_from_vrf(SCTP_DEFAULT_VRFID, ifa->ifa_addr,
 		    ifa->ifa_ifp->if_index,
 		    ifa->ifa_ifp->if_xname);
@@ -359,20 +352,9 @@ sctp_addr_change(struct ifaddr *ifa, int cmd)
 }
 
 void
-     sctp_add_or_del_interfaces(int (*pred) (struct ifnet *), int add){
-	struct ifnet *ifn;
-	struct ifaddr *ifa;
-
-	IFNET_RLOCK();
-	CK_STAILQ_FOREACH(ifn, &MODULE_GLOBAL(ifnet), if_link) {
-		if (!(*pred) (ifn)) {
-			continue;
-		}
-		CK_STAILQ_FOREACH(ifa, &ifn->if_addrhead, ifa_link) {
-			sctp_addr_change(ifa, add ? RTM_ADD : RTM_DELETE);
-		}
-	}
-	IFNET_RUNLOCK();
+sctp_addr_change_event_handler(void *arg __unused, struct ifaddr *ifa, int cmd)
+{
+	sctp_addr_change(ifa, cmd);
 }
 
 struct mbuf *
@@ -391,7 +373,7 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header,
 			m_freem(m);
 			return (NULL);
 		}
-		KASSERT(SCTP_BUF_NEXT(m) == NULL, ("%s: no chain allowed", __FUNCTION__));
+		KASSERT(SCTP_BUF_NEXT(m) == NULL, ("%s: no chain allowed", __func__));
 	}
 #ifdef SCTP_MBUF_LOGGING
 	if (SCTP_BASE_SYSCTL(sctp_logging_level) & SCTP_MBUF_LOGGING_ENABLE) {
@@ -400,7 +382,6 @@ sctp_get_mbuf_for_msg(unsigned int space_needed, int want_header,
 #endif
 	return (m);
 }
-
 
 #ifdef SCTP_PACKET_LOGGING
 void
@@ -473,7 +454,6 @@ again_locked:
 		    SCTP_BASE_VAR(packet_log_end));
 		SCTP_BASE_VAR(packet_log_end) = 0;
 		goto no_log;
-
 	}
 	lenat = (int *)&SCTP_BASE_VAR(packet_log_buffer)[thisbegin];
 	*lenat = total_len;
@@ -498,7 +478,6 @@ no_log:
 	}
 	atomic_subtract_int(&SCTP_BASE_VAR(packet_log_writers), 1);
 }
-
 
 int
 sctp_copy_out_packet_log(uint8_t *target, int length)

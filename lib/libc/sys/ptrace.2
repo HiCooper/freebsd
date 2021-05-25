@@ -2,7 +2,7 @@
 .\"	$NetBSD: ptrace.2,v 1.2 1995/02/27 12:35:37 cgd Exp $
 .\"
 .\" This file is in the public domain.
-.Dd June 2, 2018
+.Dd July 15, 2019
 .Dt PTRACE 2
 .Os
 .Sh NAME
@@ -577,7 +577,7 @@ Only valid when
 or
 .Dv PL_FLAG_SCX
 is set in
-.Va pl_flags.
+.Va pl_flags .
 .It Va pl_syscall_narg
 The number of arguments passed to the current system call not counting
 the system call identifier.
@@ -588,7 +588,7 @@ Only valid when
 or
 .Dv PL_FLAG_SCX
 is set in
-.Va pl_flags.
+.Va pl_flags .
 .El
 .It Dv PT_GETNUMLWPS
 This request returns the number of kernel threads associated with the
@@ -622,7 +622,7 @@ The
 and
 .Fa data
 arguments are used the same as for
-.Dv PT_CONTINUE.
+.Dv PT_CONTINUE .
 .It Dv PT_TO_SCX
 This request will set the
 .Dv PTRACE_SCX
@@ -632,7 +632,7 @@ The
 and
 .Fa data
 arguments are used the same as for
-.Dv PT_CONTINUE.
+.Dv PT_CONTINUE .
 .It Dv PT_SYSCALL
 This request will set the
 .Dv PTRACE_SYSCALL
@@ -643,7 +643,7 @@ The
 and
 .Fa data
 arguments are used the same as for
-.Dv PT_CONTINUE.
+.Dv PT_CONTINUE .
 .It Dv PT_GET_SC_ARGS
 For the thread which is stopped in either
 .Dv PL_FLAG_SCE
@@ -664,6 +664,51 @@ member of the
 but not more than the
 .Fa data
 bytes in total are copied.
+.It Dv PT_GET_SC_RET
+Fetch the system call return values on exit from a syscall.
+This request is only valid for threads stopped in a syscall
+exit (the
+.Dv PL_FLAG_SCX
+state).
+The
+.Fa addr
+argument specifies a pointer to a
+.Vt "struct ptrace_sc_ret" ,
+which is defined as follows:
+.Bd -literal
+struct ptrace_sc_ret {
+	register_t	sr_retval[2];
+	int		sr_error;
+};
+.Ed
+.Pp
+The
+.Fa data
+argument is set to the size of the structure.
+.Pp
+If the system call completed successfully,
+.Va sr_error
+is set to zero and the return values of the system call are saved in
+.Va sr_retval .
+If the system call failed to execute,
+.Va sr_error
+field is set to a positive
+.Xr errno 2
+value.
+If the system call completed in an unusual fashion,
+.Va sr_error
+is set to a negative value:
+.Bl -tag -width Dv EJUSTRETURN -compact
+.It Dv ERESTART
+System call will be restarted.
+.It Dv EJUSTRETURN
+System call completed sucessfully but did not set a return value
+.Po for example,
+.Xr setcontext 2
+and
+.Xr sigreturn 2
+.Pc .
+.El
 .It Dv PT_FOLLOW_FORK
 This request controls tracing for new child processes of a traced process.
 If
@@ -784,7 +829,6 @@ The
 .Fa data
 argument is ignored.
 .El
-.Pp
 .Sh x86 MACHINE-SPECIFIC REQUESTS
 .Bl -tag -width "Dv PT_GETXSTATE_INFO"
 .It Dv PT_GETXMMREGS
@@ -814,7 +858,7 @@ machine instruction
 .Dv FXRSTOR .
 .Pp
 As with
-.Dv PT_GETXMMREGS,
+.Dv PT_GETXMMREGS ,
 this request is only valid for i386 programs.
 .Pp
 The

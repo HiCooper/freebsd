@@ -7,9 +7,9 @@
 **************************************************************************
 **************************************************************************
 
-                            Less, version 530
+                            Less, version 563
 
-    This is the distribution of less, version 530, released 05 Dec 2017.
+    This is the distribution of less, version 563, released 13 Jun 2020.
     This program is part of the GNU project (http://www.gnu.org).
 
     This program is free software.  You may redistribute it and/or
@@ -34,6 +34,14 @@ The manual page nroff source is in less.nro.
 Major changes made since the last posted version are in NEWS.
 
 =======================================================================
+PRE-INSTALLATION (when using git)
+
+If you are building from a clone of a git repository,
+type "make -f Makefile.aut".
+If you are building from a numbered release package (a tar or zip file 
+with a name like less-999.tar.gz or less-999.zip), you should skip this step. 
+
+=======================================================================
 INSTALLATION (Unix systems only):
 
 1. Move the distributed source to its own directory and unpack it,
@@ -56,6 +64,7 @@ INSTALLATION (Unix systems only):
      finds a regular expression library automatically.  Other values are:
         gnu            Use the GNU regex library.
         pcre           Use the PCRE library.
+        pcre2          Use the PCRE2 library.
         posix          Use the POSIX-compatible regcomp.
         regcmp         Use the regcmp library.
         re_comp        Use the re_comp library.
@@ -63,6 +72,7 @@ INSTALLATION (Unix systems only):
         regcomp-local  Use Henry Spencer's V8-compatible regcomp
                        (source is supplied with less).
         none           No regular expressions, only simple string matching.
+
    --with-secure
      Builds a "secure" version of less, with some features disabled
      to prevent users from viewing other files, accessing shell

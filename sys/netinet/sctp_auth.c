@@ -51,7 +51,6 @@ __FBSDID("$FreeBSD$");
 #define SCTP_AUTH_DEBUG2	(SCTP_BASE_SYSCTL(sctp_debug_on) & SCTP_DEBUG_AUTH2)
 #endif				/* SCTP_DEBUG */
 
-
 void
 sctp_clear_chunklist(sctp_auth_chklist_t *chklist)
 {
@@ -98,7 +97,6 @@ sctp_copy_chunklist(sctp_auth_chklist_t *list)
 
 	return (new_list);
 }
-
 
 /*
  * add a chunk to the required chunks list
@@ -238,7 +236,6 @@ sctp_unpack_auth_chunks(const uint8_t *ptr, uint8_t num_chunks,
 	}
 	return (size);
 }
-
 
 /*
  * allocate structure space for a key of length keylen
@@ -456,7 +453,6 @@ sctp_compute_hashkey(sctp_key_t *key1, sctp_key_t *key2, sctp_key_t *shared)
 	return (new_key);
 }
 
-
 sctp_sharedkey_t *
 sctp_alloc_sharedkey(void)
 {
@@ -523,7 +519,7 @@ sctp_insert_sharedkey(struct sctp_keyhead *shared_keys,
 		} else if (new_skey->keyid == skey->keyid) {
 			/* replace the existing key */
 			/* verify this key *can* be replaced */
-			if ((skey->deactivated) && (skey->refcount > 1)) {
+			if ((skey->deactivated) || (skey->refcount > 1)) {
 				SCTPDBG(SCTP_DEBUG_AUTH1,
 				    "can't replace shared key id %u\n",
 				    new_skey->keyid);
@@ -565,11 +561,7 @@ sctp_auth_key_acquire(struct sctp_tcb *stcb, uint16_t key_id)
 }
 
 void
-sctp_auth_key_release(struct sctp_tcb *stcb, uint16_t key_id, int so_locked
-#if !defined(__APPLE__) && !defined(SCTP_SO_LOCK_TESTING)
-    SCTP_UNUSED
-#endif
-)
+sctp_auth_key_release(struct sctp_tcb *stcb, uint16_t key_id, int so_locked)
 {
 	sctp_sharedkey_t *skey;
 
@@ -634,7 +626,6 @@ sctp_copy_skeylist(const struct sctp_keyhead *src, struct sctp_keyhead *dest)
 	return (count);
 }
 
-
 sctp_hmaclist_t *
 sctp_alloc_hmaclist(uint16_t num_hmacs)
 {
@@ -658,7 +649,6 @@ sctp_free_hmaclist(sctp_hmaclist_t *list)
 {
 	if (list != NULL) {
 		SCTP_FREE(list, SCTP_M_AUTH_HL);
-		list = NULL;
 	}
 }
 
@@ -819,7 +809,6 @@ sctp_free_authinfo(sctp_authinfo_t *authinfo)
 	/* We are NOT dynamically allocating authinfo's right now... */
 	/* SCTP_FREE(authinfo, SCTP_M_AUTH_??); */
 }
-
 
 uint32_t
 sctp_get_auth_chunk_len(uint16_t hmac_algo)
@@ -1147,7 +1136,6 @@ sctp_auth_is_supported_hmac(sctp_hmaclist_t *list, uint16_t id)
 	return (0);
 }
 
-
 /*-
  * clear any cached key(s) if they match the given key id on an association.
  * the cached key(s) will be recomputed and re-cached at next use.
@@ -1397,7 +1385,8 @@ sctp_auth_get_cookie_params(struct sctp_tcb *stcb, struct mbuf *m,
 		ptype = ntohs(phdr->param_type);
 		plen = ntohs(phdr->param_length);
 
-		if ((plen == 0) || (offset + plen > length))
+		if ((plen < sizeof(struct sctp_paramhdr)) ||
+		    (offset + plen > length))
 			break;
 
 		if (ptype == SCTP_RANDOM) {
@@ -1559,7 +1548,6 @@ sctp_fill_hmac_digest_m(struct mbuf *m, uint32_t auth_offset,
 	    m, auth_offset, auth->hmac);
 }
 
-
 static void
 sctp_zero_m(struct mbuf *m, uint32_t m_offset, uint32_t size)
 {
@@ -1720,11 +1708,7 @@ sctp_handle_auth(struct sctp_tcb *stcb, struct sctp_auth_chunk *auth,
  */
 void
 sctp_notify_authentication(struct sctp_tcb *stcb, uint32_t indication,
-    uint16_t keyid, uint16_t alt_keyid, int so_locked
-#if !defined(__APPLE__) && !defined(SCTP_SO_LOCK_TESTING)
-    SCTP_UNUSED
-#endif
-)
+    uint16_t keyid, uint16_t alt_keyid, int so_locked)
 {
 	struct mbuf *m_notify;
 	struct sctp_authkey_event *auth;
@@ -1778,7 +1762,6 @@ sctp_notify_authentication(struct sctp_tcb *stcb, uint32_t indication,
 	sctp_add_to_readq(stcb->sctp_ep, stcb, control,
 	    &stcb->sctp_socket->so_rcv, 1, SCTP_READ_LOCK_NOT_HELD, so_locked);
 }
-
 
 /*-
  * validates the AUTHentication related parameters in an INIT/INIT-ACK
@@ -1894,7 +1877,6 @@ sctp_validate_init_auth_params(struct mbuf *m, int offset, int limit)
 					saw_asconf = 1;
 				if (chunks->chunk_types[i] == SCTP_ASCONF_ACK)
 					saw_asconf_ack = 1;
-
 			}
 			if (num_chunks)
 				got_chklist = 1;

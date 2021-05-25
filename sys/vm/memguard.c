@@ -64,7 +64,8 @@ __FBSDID("$FreeBSD$");
 #include <vm/uma_int.h>
 #include <vm/memguard.h>
 
-static SYSCTL_NODE(_vm, OID_AUTO, memguard, CTLFLAG_RW, NULL, "MemGuard data");
+static SYSCTL_NODE(_vm, OID_AUTO, memguard, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    "MemGuard data");
 /*
  * The vm_memguard_divisor variable controls how much of kernel_arena should be
  * reserved for MemGuard.
@@ -157,7 +158,6 @@ SYSCTL_UINT(_vm_memguard, OID_AUTO, frequency, CTLFLAG_RWTUN,
 SYSCTL_ULONG(_vm_memguard, OID_AUTO, frequency_hits, CTLFLAG_RD,
     &memguard_frequency_hits, 0, "# times MemGuard randomly chose");
 
-
 /*
  * Return a fudged value to be used for vm_kmem_size for allocating
  * the kernel_arena.
@@ -237,7 +237,7 @@ memguard_sysinit(void)
 	    CTLFLAG_RD, &memguard_mapsize,
 	    "MemGuard KVA size");
 	SYSCTL_ADD_PROC(NULL, parent, OID_AUTO, "mapused",
-	    CTLFLAG_RD | CTLTYPE_ULONG, NULL, 0, memguard_sysctl_mapused, "LU",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE | CTLTYPE_ULONG, NULL, 0, memguard_sysctl_mapused, "LU",
 	    "MemGuard KVA used");
 }
 SYSINIT(memguard, SI_SUB_KLD, SI_ORDER_ANY, memguard_sysinit, NULL);
@@ -262,7 +262,7 @@ v2sizep(vm_offset_t va)
 	if (pa == 0)
 		panic("MemGuard detected double-free of %p", (void *)va);
 	p = PHYS_TO_VM_PAGE(pa);
-	KASSERT(p->wire_count != 0 && p->queue == PQ_NONE,
+	KASSERT(vm_page_wired(p) && p->a.queue == PQ_NONE,
 	    ("MEMGUARD: Expected wired page %p in vtomgfifo!", p));
 	return (&p->plinks.memguard.p);
 }
@@ -277,7 +277,7 @@ v2sizev(vm_offset_t va)
 	if (pa == 0)
 		panic("MemGuard detected double-free of %p", (void *)va);
 	p = PHYS_TO_VM_PAGE(pa);
-	KASSERT(p->wire_count != 0 && p->queue == PQ_NONE,
+	KASSERT(vm_page_wired(p) && p->a.queue == PQ_NONE,
 	    ("MEMGUARD: Expected wired page %p in vtomgfifo!", p));
 	return (&p->plinks.memguard.v);
 }
@@ -311,7 +311,7 @@ memguard_alloc(unsigned long req_size, int flags)
 	 * When we pass our memory limit, reject sub-page allocations.
 	 * Page-size and larger allocations will use the same amount
 	 * of physical memory whether we allocate or hand off to
-	 * uma_large_alloc(), so keep those.
+	 * malloc_large(), so keep those.
 	 */
 	if (vmem_size(memguard_arena, VMEM_ALLOC) >= memguard_physlimit &&
 	    req_size < PAGE_SIZE) {
@@ -502,4 +502,10 @@ memguard_cmp_zone(uma_zone_t zone)
 	 * but it is also the slowest way.
 	 */
 	return (strcmp(zone->uz_name, vm_memguard_desc) == 0);
+}
+
+unsigned long
+memguard_get_req_size(const void *addr)
+{
+	return (*v2sizep(trunc_page((uintptr_t)addr)));
 }

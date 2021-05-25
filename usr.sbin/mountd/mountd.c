@@ -48,7 +48,9 @@ static char sccsid[] = "@(#)mountd.c	8.15 (Berkeley) 5/1/95";
 __FBSDID("$FreeBSD$");
 
 #include <sys/param.h>
+#include <sys/conf.h>
 #include <sys/fcntl.h>
+#include <sys/fnv_hash.h>
 #include <sys/linker.h>
 #include <sys/module.h>
 #include <sys/mount.h>
@@ -111,6 +113,19 @@ struct dirlist {
 #define	DP_DEFSET	0x1
 #define DP_HOSTSET	0x2
 
+/*
+ * maproot/mapall credentials.
+ * cr_smallgrps can be used for a group list up to SMALLNGROUPS in size.
+ * Larger group lists are malloc'd/free'd.
+ */
+#define	SMALLNGROUPS	32
+struct expcred {
+	uid_t		cr_uid;
+	int		cr_ngroups;
+	gid_t		cr_smallgrps[SMALLNGROUPS];
+	gid_t		*cr_groups;
+};
+
 struct exportlist {
 	struct dirlist	*ex_dirl;
 	struct dirlist	*ex_defdir;
@@ -119,6 +134,8 @@ struct exportlist {
 	fsid_t		ex_fs;
 	char		*ex_fsdir;
 	char		*ex_indexfile;
+	struct expcred	ex_defanon;
+	uint64_t	ex_defexflags;
 	int		ex_numsecflavors;
 	int		ex_secflavors[MAXSECFLAVORS];
 	int		ex_defnumsecflavors;
@@ -128,6 +145,9 @@ struct exportlist {
 };
 /* ex_flag bits */
 #define	EX_LINKED	0x1
+#define	EX_DONE		0x2
+#define	EX_DEFSET	0x4
+#define	EX_PUBLICFH	0x8
 
 SLIST_HEAD(exportlisthead, exportlist);
 
@@ -146,6 +166,9 @@ struct grouplist {
 	int gr_type;
 	union grouptypes gr_ptr;
 	struct grouplist *gr_next;
+	struct expcred gr_anon;
+	uint64_t gr_exflags;
+	int gr_flag;
 	int gr_numsecflavors;
 	int gr_secflavors[MAXSECFLAVORS];
 };
@@ -155,6 +178,9 @@ struct grouplist {
 #define	GT_NET		0x2
 #define	GT_DEFAULT	0x3
 #define GT_IGNORE	0x5
+
+/* Group flags */
+#define	GR_FND		0x1
 
 struct hostlist {
 	int		 ht_flag;	/* Uses DP_xx bits */
@@ -172,10 +198,17 @@ struct fhreturn {
 
 #define	GETPORT_MAXTRY	20	/* Max tries to get a port # */
 
+/*
+ * How long to delay a reload of exports when there are RPC request(s)
+ * to process, in usec.  Must be less than 1second.
+ */
+#define	RELOADDELAY	250000
+
 /* Global defs */
 static char	*add_expdir(struct dirlist **, char *, int);
 static void	add_dlist(struct dirlist **, struct dirlist *,
-		    struct grouplist *, int, struct exportlist *);
+		    struct grouplist *, int, struct exportlist *,
+		    struct expcred *, uint64_t);
 static void	add_mlist(char *, char *);
 static int	check_dirpath(char *);
 static int	check_options(struct dirlist *);
@@ -188,20 +221,27 @@ static void	complete_service(struct netconfig *nconf, char *port_str);
 static void	clearout_service(void);
 static void	del_mlist(char *hostp, char *dirp);
 static struct dirlist	*dirp_search(struct dirlist *, char *);
-static int	do_mount(struct exportlist *, struct grouplist *, int,
-		    struct xucred *, char *, int, struct statfs *);
+static int	do_export_mount(struct exportlist *, struct statfs *);
+static int	do_mount(struct exportlist *, struct grouplist *, uint64_t,
+		    struct expcred *, char *, int, struct statfs *, int, int *);
 static int	do_opt(char **, char **, struct exportlist *,
-		    struct grouplist *, int *, int *, struct xucred *);
+		    struct grouplist *, int *, uint64_t *, struct expcred *);
 static struct exportlist	*ex_search(fsid_t *, struct exportlisthead *);
 static struct exportlist	*get_exp(void);
 static void	free_dir(struct dirlist *);
 static void	free_exp(struct exportlist *);
 static void	free_grp(struct grouplist *);
 static void	free_host(struct hostlist *);
-static void	get_exportlist(void);
+static void	free_v4rootexp(void);
+static void	get_exportlist_one(int);
+static void	get_exportlist(int);
 static void	insert_exports(struct exportlist *, struct exportlisthead *);
 static void	free_exports(struct exportlisthead *);
-static void	read_exportfile(void);
+static void	read_exportfile(int);
+static int	compare_nmount_exportlist(struct iovec *, int, char *);
+static int	compare_export(struct exportlist *, struct exportlist *);
+static int	compare_cred(struct expcred *, struct expcred *);
+static int	compare_secflavor(int *, int *, int);
 static void	delete_export(struct iovec *, int, struct statfs *, char *);
 static int	get_host(char *, struct grouplist *, struct grouplist *);
 static struct hostlist *get_ht(void);
@@ -211,13 +251,13 @@ static int	get_net(char *, struct netmsk *, int);
 static void	getexp_err(struct exportlist *, struct grouplist *, const char *);
 static struct grouplist	*get_grp(void);
 static void	hang_dirp(struct dirlist *, struct grouplist *,
-				struct exportlist *, int);
+		    struct exportlist *, int, struct expcred *, uint64_t);
 static void	huphandler(int sig);
 static int	makemask(struct sockaddr_storage *ssp, int bitlen);
 static void	mntsrv(struct svc_req *, SVCXPRT *);
 static void	nextfield(char **, char **);
 static void	out_of_mem(void);
-static void	parsecred(char *, struct xucred *);
+static void	parsecred(char *, struct expcred *);
 static int	parsesec(char *, struct exportlist *);
 static int	put_exlist(struct dirlist *, XDR *, struct dirlist *,
 		    int *, int);
@@ -233,19 +273,16 @@ static int	xdr_explist_common(XDR *, caddr_t, int);
 static int	xdr_fhs(XDR *, caddr_t);
 static int	xdr_mlist(XDR *, caddr_t);
 static void	terminate(int);
+static void	cp_cred(struct expcred *, struct expcred *);
 
-static struct exportlisthead exphead = SLIST_HEAD_INITIALIZER(&exphead);
+#define	EXPHASH(f)	(fnv_32_buf((f), sizeof(fsid_t), 0) % exphashsize)
+static struct exportlisthead *exphead = NULL;
+static struct exportlisthead *oldexphead = NULL;
+static int exphashsize = 0;
 static SLIST_HEAD(, mountlist) mlhead = SLIST_HEAD_INITIALIZER(&mlhead);
 static char *exnames_default[2] = { _PATH_EXPORTS, NULL };
 static char **exnames;
 static char **hosts = NULL;
-static struct xucred def_anon = {
-	XUCRED_VERSION,
-	(uid_t)65534,
-	1,
-	{ (gid_t)65533 },
-	NULL
-};
 static int force_v2 = 0;
 static int resvport_only = 1;
 static int nhosts = 0;
@@ -266,7 +303,9 @@ static int have_v6 = 1;
 
 static int v4root_phase = 0;
 static char v4root_dirpath[PATH_MAX + 1];
+static struct exportlist *v4root_ep = NULL;
 static int has_publicfh = 0;
+static int has_set_publicfh = 0;
 
 static struct pidfh *pfh = NULL;
 /* Bits for opt_flags above */
@@ -288,6 +327,15 @@ static void	SYSLOG(int, const char *, ...) __printflike(2, 3);
 #else
 static int debug = 0;
 #endif
+
+/*
+ * The LOGDEBUG() syslog() calls are always compiled into the daemon.
+ * To enable them, create a file at _PATH_MOUNTDDEBUG. This file can be empty.
+ * To disable the logging, just delete the file at _PATH_MOUNTDDEBUG.
+ */
+static int logdebug = 0;
+#define	LOGDEBUG(format, ...)						\
+    (logdebug ? syslog(LOG_DEBUG, format, ## __VA_ARGS__) : 0)
 
 /*
  * Similar to strsep(), but it allows for quoted strings
@@ -351,8 +399,8 @@ strsep_quote(char **stringp, const char *delim)
 		*dstptr++ = *srcptr++;
 	}
 
-	*dstptr = 0; /* Terminate the string */
 	*stringp = (*srcptr == '\0') ? NULL : srcptr + 1;
+	*dstptr = 0; /* Terminate the string */
 	return (retval);
 }
 
@@ -376,7 +424,13 @@ main(int argc, char **argv)
 	int maxrec = RPC_MAXDATASIZE;
 	int attempt_cnt, port_len, port_pos, ret;
 	char **port_list;
+	uint64_t curtime, nexttime;
+	struct timeval tv;
+	struct timespec tp;
+	sigset_t sig_mask, sighup_mask;
+	int enable_rpcbind;
 
+	enable_rpcbind = 1;
 	/* Check that another mountd isn't already running. */
 	pfh = pidfile_open(_PATH_MOUNTDPID, 0600, &otherpid);
 	if (pfh == NULL) {
@@ -391,7 +445,7 @@ main(int argc, char **argv)
 	else
 		close(s);
 
-	while ((c = getopt(argc, argv, "2deh:lnp:rS")) != -1)
+	while ((c = getopt(argc, argv, "2deh:lnp:RrS")) != -1)
 		switch (c) {
 		case '2':
 			force_v2 = 1;
@@ -401,6 +455,10 @@ main(int argc, char **argv)
 			break;
 		case 'n':
 			resvport_only = 0;
+			break;
+		case 'R':
+			/* Do not support Mount protocol */
+			enable_rpcbind = 0;
 			break;
 		case 'r':
 			dir_only = 0;
@@ -446,6 +504,21 @@ main(int argc, char **argv)
 		default:
 			usage();
 		}
+	if (enable_rpcbind == 0) {
+		if (svcport_str != NULL) {
+			warnx("-p option not compatible with -R, ignored");
+			free(svcport_str);
+			svcport_str = NULL;
+		}
+		if (nhosts > 0) {
+			warnx("-h option not compatible with -R, ignored");
+			for (k = 0; k < nhosts; k++) 
+				free(hosts[k]);
+			free(hosts);
+			hosts = NULL;
+			nhosts = 0;
+		}
+	}
 
 	if (modfind("nfsd") < 0) {
 		/* Not present in kernel, try loading it */
@@ -462,7 +535,7 @@ main(int argc, char **argv)
 	openlog("mountd", LOG_PID, LOG_DAEMON);
 	if (debug)
 		warnx("getting export list");
-	get_exportlist();
+	get_exportlist(0);
 	if (debug)
 		warnx("getting mount list");
 	get_mountlist();
@@ -479,58 +552,61 @@ main(int argc, char **argv)
 
 	pidfile_write(pfh);
 
-	rpcb_unset(MOUNTPROG, MOUNTVERS, NULL);
-	rpcb_unset(MOUNTPROG, MOUNTVERS3, NULL);
-	rpc_control(RPC_SVC_CONNMAXREC_SET, &maxrec);
+	if (enable_rpcbind != 0) {
+		rpcb_unset(MOUNTPROG, MOUNTVERS, NULL);
+		rpcb_unset(MOUNTPROG, MOUNTVERS3, NULL);
+		rpc_control(RPC_SVC_CONNMAXREC_SET, &maxrec);
 
-	if (!resvport_only) {
-		if (sysctlbyname("vfs.nfsd.nfs_privport", NULL, NULL,
-		    &resvport_only, sizeof(resvport_only)) != 0 &&
-		    errno != ENOENT) {
-			syslog(LOG_ERR, "sysctl: %m");
-			exit(1);
-		}
-	}
-
-	/*
-	 * If no hosts were specified, add a wildcard entry to bind to
-	 * INADDR_ANY. Otherwise make sure 127.0.0.1 and ::1 are added to the
-	 * list.
-	 */
-	if (nhosts == 0) {
-		hosts = malloc(sizeof(char *));
-		if (hosts == NULL)
-			out_of_mem();
-		hosts[0] = "*";
-		nhosts = 1;
-	} else {
-		hosts_bak = hosts;
-		if (have_v6) {
-			hosts_bak = realloc(hosts, (nhosts + 2) *
-			    sizeof(char *));
-			if (hosts_bak == NULL) {
-				for (k = 0; k < nhosts; k++)
-					free(hosts[k]);
-		    		free(hosts);
-		    		out_of_mem();
-			} else
-				hosts = hosts_bak;
-			nhosts += 2;
-			hosts[nhosts - 2] = "::1";
-		} else {
-			hosts_bak = realloc(hosts, (nhosts + 1) * sizeof(char *));
-			if (hosts_bak == NULL) {
-				for (k = 0; k < nhosts; k++)
-					free(hosts[k]);
-				free(hosts);
-				out_of_mem();
-			} else {
-				nhosts += 1;
-				hosts = hosts_bak;
+		if (!resvport_only) {
+			if (sysctlbyname("vfs.nfsd.nfs_privport", NULL, NULL,
+			    &resvport_only, sizeof(resvport_only)) != 0 &&
+			    errno != ENOENT) {
+				syslog(LOG_ERR, "sysctl: %m");
+				exit(1);
 			}
 		}
 
-		hosts[nhosts - 1] = "127.0.0.1";
+		/*
+		 * If no hosts were specified, add a wildcard entry to bind to
+		 * INADDR_ANY. Otherwise make sure 127.0.0.1 and ::1 are added
+		 * to the list.
+		 */
+		if (nhosts == 0) {
+			hosts = malloc(sizeof(char *));
+			if (hosts == NULL)
+				out_of_mem();
+			hosts[0] = "*";
+			nhosts = 1;
+		} else {
+			hosts_bak = hosts;
+			if (have_v6) {
+				hosts_bak = realloc(hosts, (nhosts + 2) *
+				    sizeof(char *));
+				if (hosts_bak == NULL) {
+					for (k = 0; k < nhosts; k++)
+						free(hosts[k]);
+			    		free(hosts);
+			    		out_of_mem();
+				} else
+					hosts = hosts_bak;
+				nhosts += 2;
+				hosts[nhosts - 2] = "::1";
+			} else {
+				hosts_bak = realloc(hosts, (nhosts + 1) *
+				    sizeof(char *));
+				if (hosts_bak == NULL) {
+					for (k = 0; k < nhosts; k++)
+						free(hosts[k]);
+					free(hosts);
+					out_of_mem();
+				} else {
+					nhosts += 1;
+					hosts = hosts_bak;
+				}
+			}
+
+			hosts[nhosts - 1] = "127.0.0.1";
+		}
 	}
 
 	attempt_cnt = 1;
@@ -538,115 +614,164 @@ main(int argc, char **argv)
 	sock_fd = NULL;
 	port_list = NULL;
 	port_len = 0;
-	nc_handle = setnetconfig();
-	while ((nconf = getnetconfig(nc_handle))) {
-		if (nconf->nc_flag & NC_VISIBLE) {
-			if (have_v6 == 0 && strcmp(nconf->nc_protofmly,
-			    "inet6") == 0) {
-				/* DO NOTHING */
-			} else {
-				ret = create_service(nconf);
-				if (ret == 1)
-					/* Ignore this call */
-					continue;
-				if (ret < 0) {
-					/*
-					 * Failed to bind port, so close off
-					 * all sockets created and try again
-					 * if the port# was dynamically
-					 * assigned via bind(2).
-					 */
-					clearout_service();
-					if (mallocd_svcport != 0 &&
-					    attempt_cnt < GETPORT_MAXTRY) {
-						free(svcport_str);
+	if (enable_rpcbind != 0) {
+		nc_handle = setnetconfig();
+		while ((nconf = getnetconfig(nc_handle))) {
+			if (nconf->nc_flag & NC_VISIBLE) {
+				if (have_v6 == 0 && strcmp(nconf->nc_protofmly,
+				    "inet6") == 0) {
+					/* DO NOTHING */
+				} else {
+					ret = create_service(nconf);
+					if (ret == 1)
+						/* Ignore this call */
+						continue;
+					if (ret < 0) {
+						/*
+						 * Failed to bind port, so close
+						 * off all sockets created and
+						 * try again if the port# was
+						 * dynamically assigned via
+						 * bind(2).
+						 */
+						clearout_service();
+						if (mallocd_svcport != 0 &&
+						    attempt_cnt <
+						    GETPORT_MAXTRY) {
+							free(svcport_str);
+							svcport_str = NULL;
+							mallocd_svcport = 0;
+						} else {
+							errno = EADDRINUSE;
+							syslog(LOG_ERR,
+							    "bindresvport_sa:"
+							    " %m");
+							exit(1);
+						}
+
+						/*
+						 * Start over at the first
+						 * service.
+						 */
+						free(sock_fd);
+						sock_fdcnt = 0;
+						sock_fd = NULL;
+						nc_handle = setnetconfig();
+						attempt_cnt++;
+					} else if (mallocd_svcport != 0 &&
+					    attempt_cnt == GETPORT_MAXTRY) {
+						/*
+						 * For the last attempt, allow
+						 * different port #s for each
+						 * nconf by saving the
+						 * svcport_str setting it back
+						 * to NULL.
+						 */
+						port_list = realloc(port_list,
+						    (port_len + 1) *
+						    sizeof(char *));
+						if (port_list == NULL)
+							out_of_mem();
+						port_list[port_len++] =
+						    svcport_str;
 						svcport_str = NULL;
 						mallocd_svcport = 0;
-					} else {
-						errno = EADDRINUSE;
-						syslog(LOG_ERR,
-						    "bindresvport_sa: %m");
-						exit(1);
 					}
-
-					/* Start over at the first service. */
-					free(sock_fd);
-					sock_fdcnt = 0;
-					sock_fd = NULL;
-					nc_handle = setnetconfig();
-					attempt_cnt++;
-				} else if (mallocd_svcport != 0 &&
-				    attempt_cnt == GETPORT_MAXTRY) {
-					/*
-					 * For the last attempt, allow
-					 * different port #s for each nconf
-					 * by saving the svcport_str and
-					 * setting it back to NULL.
-					 */
-					port_list = realloc(port_list,
-					    (port_len + 1) * sizeof(char *));
-					if (port_list == NULL)
-						out_of_mem();
-					port_list[port_len++] = svcport_str;
-					svcport_str = NULL;
-					mallocd_svcport = 0;
 				}
 			}
 		}
-	}
 
-	/*
-	 * Successfully bound the ports, so call complete_service() to
-	 * do the rest of the setup on the service(s).
-	 */
-	sock_fdpos = 0;
-	port_pos = 0;
-	nc_handle = setnetconfig();
-	while ((nconf = getnetconfig(nc_handle))) {
-		if (nconf->nc_flag & NC_VISIBLE) {
-			if (have_v6 == 0 && strcmp(nconf->nc_protofmly,
-			    "inet6") == 0) {
-				/* DO NOTHING */
-			} else if (port_list != NULL) {
-				if (port_pos >= port_len) {
-					syslog(LOG_ERR, "too many port#s");
-					exit(1);
-				}
-				complete_service(nconf, port_list[port_pos++]);
-			} else
-				complete_service(nconf, svcport_str);
+		/*
+		 * Successfully bound the ports, so call complete_service() to
+		 * do the rest of the setup on the service(s).
+		 */
+		sock_fdpos = 0;
+		port_pos = 0;
+		nc_handle = setnetconfig();
+		while ((nconf = getnetconfig(nc_handle))) {
+			if (nconf->nc_flag & NC_VISIBLE) {
+				if (have_v6 == 0 && strcmp(nconf->nc_protofmly,
+				    "inet6") == 0) {
+					/* DO NOTHING */
+				} else if (port_list != NULL) {
+					if (port_pos >= port_len) {
+						syslog(LOG_ERR, "too many"
+						    " port#s");
+						exit(1);
+					}
+					complete_service(nconf,
+					    port_list[port_pos++]);
+				} else
+					complete_service(nconf, svcport_str);
+			}
 		}
-	}
-	endnetconfig(nc_handle);
-	free(sock_fd);
-	if (port_list != NULL) {
-		for (port_pos = 0; port_pos < port_len; port_pos++)
-			free(port_list[port_pos]);
-		free(port_list);
-	}
+		endnetconfig(nc_handle);
+		free(sock_fd);
+		if (port_list != NULL) {
+			for (port_pos = 0; port_pos < port_len; port_pos++)
+				free(port_list[port_pos]);
+			free(port_list);
+		}
 
-	if (xcreated == 0) {
-		syslog(LOG_ERR, "could not create any services");
-		exit(1);
+		if (xcreated == 0) {
+			syslog(LOG_ERR, "could not create any services");
+			exit(1);
+		}
 	}
 
 	/* Expand svc_run() here so that we can call get_exportlist(). */
+	curtime = nexttime = 0;
+	sigemptyset(&sighup_mask);
+	sigaddset(&sighup_mask, SIGHUP);
 	for (;;) {
-		if (got_sighup) {
-			get_exportlist();
+		clock_gettime(CLOCK_MONOTONIC, &tp);
+		curtime = tp.tv_sec;
+		curtime = curtime * 1000000 + tp.tv_nsec / 1000;
+		sigprocmask(SIG_BLOCK, &sighup_mask, &sig_mask);
+		if (got_sighup && curtime >= nexttime) {
 			got_sighup = 0;
-		}
-		readfds = svc_fdset;
-		switch (select(svc_maxfd + 1, &readfds, NULL, NULL, NULL)) {
-		case -1:
-			if (errno == EINTR)
-                                continue;
-			syslog(LOG_ERR, "mountd died: select: %m");
-			exit(1);
-		case 0:
-			continue;
-		default:
-			svc_getreqset(&readfds);
+			sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
+			get_exportlist(1);
+			clock_gettime(CLOCK_MONOTONIC, &tp);
+			nexttime = tp.tv_sec;
+			nexttime = nexttime * 1000000 + tp.tv_nsec / 1000 +
+			    RELOADDELAY;
+		} else
+			sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
+
+		/*
+		 * If a reload is pending, poll for received request(s),
+		 * otherwise set a RELOADDELAY timeout, since a SIGHUP
+		 * could be processed between the got_sighup test and
+		 * the select() system call.
+		 */
+		tv.tv_sec = 0;
+		if (got_sighup)
+			tv.tv_usec = 0;
+		else
+			tv.tv_usec = RELOADDELAY;
+		if (enable_rpcbind != 0) {
+			readfds = svc_fdset;
+			switch (select(svc_maxfd + 1, &readfds, NULL, NULL,
+			    &tv)) {
+			case -1:
+				if (errno == EINTR) {
+					/* Allow a reload now. */
+					nexttime = 0;
+					continue;
+				}
+				syslog(LOG_ERR, "mountd died: select: %m");
+				exit(1);
+			case 0:
+				/* Allow a reload now. */
+				nexttime = 0;
+				continue;
+			default:
+				svc_getreqset(&readfds);
+			}
+		} else {
+			/* Simply wait for a signal. */
+			sigsuspend(&sig_mask);
 		}
 	}
 } 
@@ -1013,7 +1138,8 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 	struct sockaddr *saddr;
 	u_short sport;
 	char rpcpath[MNTPATHLEN + 1], dirpath[MAXPATHLEN];
-	int bad = 0, defset, hostset;
+	int defset, hostset;
+	long bad = 0;
 	sigset_t sighup_mask;
 	int numsecflavors, *secflavorsp;
 
@@ -1092,7 +1218,7 @@ mntsrv(struct svc_req *rqstp, SVCXPRT *transp)
 		if (bad)
 			ep = NULL;
 		else
-			ep = ex_search(&fsb.f_fsid, &exphead);
+			ep = ex_search(&fsb.f_fsid, exphead);
 		hostset = defset = 0;
 		if (ep && (chk_host(ep->ex_defdir, saddr, &defset, &hostset,
 		    &numsecflavors, &secflavorsp) ||
@@ -1307,21 +1433,23 @@ xdr_explist_common(XDR *xdrsp, caddr_t cp __unused, int brief)
 	int false = 0;
 	int putdef;
 	sigset_t sighup_mask;
+	int i;
 
 	sigemptyset(&sighup_mask);
 	sigaddset(&sighup_mask, SIGHUP);
 	sigprocmask(SIG_BLOCK, &sighup_mask, NULL);
 
-	SLIST_FOREACH(ep, &exphead, entries) {
-		putdef = 0;
-		if (put_exlist(ep->ex_dirl, xdrsp, ep->ex_defdir,
-			       &putdef, brief))
-			goto errout;
-		if (ep->ex_defdir && putdef == 0 &&
-			put_exlist(ep->ex_defdir, xdrsp, (struct dirlist *)NULL,
-			&putdef, brief))
-			goto errout;
-	}
+	for (i = 0; i < exphashsize; i++)
+		SLIST_FOREACH(ep, &exphead[i], entries) {
+			putdef = 0;
+			if (put_exlist(ep->ex_dirl, xdrsp, ep->ex_defdir,
+				       &putdef, brief))
+				goto errout;
+			if (ep->ex_defdir && putdef == 0 &&
+				put_exlist(ep->ex_defdir, xdrsp, NULL,
+				&putdef, brief))
+				goto errout;
+		}
 	sigprocmask(SIG_UNBLOCK, &sighup_mask, NULL);
 	if (!xdr_bool(xdrsp, &false))
 		return (0);
@@ -1421,17 +1549,19 @@ static FILE *exp_file;
  * Get the export list from one, currently open file
  */
 static void
-get_exportlist_one(void)
+get_exportlist_one(int passno)
 {
 	struct exportlist *ep;
-	struct grouplist *grp, *tgrp;
+	struct grouplist *grp, *tgrp, *savgrp;
 	struct dirlist *dirhead;
 	struct statfs fsb;
-	struct xucred anon;
+	struct expcred anon;
 	char *cp, *endcp, *dirp, *hst, *usr, *dom, savedc;
-	int len, has_host, exflags, got_nondir, dirplen, netgrp;
+	int len, has_host, got_nondir, dirplen, netgrp;
+	uint64_t exflags;
 
 	v4root_phase = 0;
+	anon.cr_groups = NULL;
 	dirhead = (struct dirlist *)NULL;
 	while (get_line()) {
 		if (debug)
@@ -1445,7 +1575,10 @@ get_exportlist_one(void)
 		 * Set defaults.
 		 */
 		has_host = FALSE;
-		anon = def_anon;
+		anon.cr_groups = anon.cr_smallgrps;
+		anon.cr_uid = UID_NOBODY;
+		anon.cr_ngroups = 1;
+		anon.cr_groups[0] = GID_NOGROUP;
 		exflags = MNT_EXPORTED;
 		got_nondir = 0;
 		opt_flags = 0;
@@ -1532,10 +1665,8 @@ get_exportlist_one(void)
 				    ep = get_exp();
 				} else {
 				    if (ep) {
-					if (ep->ex_fs.val[0] !=
-					    fsb.f_fsid.val[0] ||
-					    ep->ex_fs.val[1] !=
-					    fsb.f_fsid.val[1]) {
+					if (fsidcmp(&ep->ex_fs, &fsb.f_fsid)
+					    != 0) {
 						getexp_err(ep, tgrp,
 						    "fsid mismatch");
 						goto nextline;
@@ -1545,7 +1676,7 @@ get_exportlist_one(void)
 					 * See if this directory is already
 					 * in the list.
 					 */
-					ep = ex_search(&fsb.f_fsid, &exphead);
+					ep = ex_search(&fsb.f_fsid, exphead);
 					if (ep == (struct exportlist *)NULL) {
 					    ep = get_exp();
 					    ep->ex_fs = fsb.f_fsid;
@@ -1658,11 +1789,18 @@ get_exportlist_one(void)
 		 * Loop through hosts, pushing the exports into the kernel.
 		 * After loop, tgrp points to the start of the list and
 		 * grp points to the last entry in the list.
+		 * Do not do the do_mount() for passno == 1, since the
+		 * second pass will do it, as required.
 		 */
 		grp = tgrp;
 		do {
-			if (do_mount(ep, grp, exflags, &anon, dirp, dirplen,
-			    &fsb)) {
+			grp->gr_exflags = exflags;
+			cp_cred(&grp->gr_anon, &anon);
+			if (v4root_phase == 2 && passno == 0)
+				LOGDEBUG("do_mount v4root");
+			if (passno == 0 && do_mount(ep, grp, exflags, &anon,
+			    dirp, dirplen, &fsb, ep->ex_numsecflavors,
+			    ep->ex_secflavors)) {
 				getexp_err(ep, tgrp, NULL);
 				goto nextline;
 			}
@@ -1673,9 +1811,32 @@ get_exportlist_one(void)
 		 */
 		if (v4root_phase > 0 && v4root_phase <= 2) {
 			/*
-			 * Since these structures aren't used by mountd,
+			 * These structures are used for the reload,
+			 * so save them for that case.  Otherwise, just
 			 * free them up now.
 			 */
+			if (passno == 1 && ep != NULL) {
+				savgrp = tgrp;
+				while (tgrp != NULL) {
+					/*
+					 * Save the security flavors and exflags
+					 * for this host set in the groups.
+					 */
+					tgrp->gr_numsecflavors =
+					    ep->ex_numsecflavors;
+					if (ep->ex_numsecflavors > 0)
+						memcpy(tgrp->gr_secflavors,
+						    ep->ex_secflavors,
+						    sizeof(ep->ex_secflavors));
+					tgrp = tgrp->gr_next;
+				}
+				if (v4root_ep == NULL) {
+					v4root_ep = ep;
+					ep = NULL;	/* Don't free below. */
+				}
+				grp->gr_next = v4root_ep->ex_grphead;
+				v4root_ep->ex_grphead = savgrp;
+			}
 			if (ep != NULL)
 				free_exp(ep);
 			while (tgrp != NULL) {
@@ -1690,17 +1851,17 @@ get_exportlist_one(void)
 		 * Success. Update the data structures.
 		 */
 		if (has_host) {
-			hang_dirp(dirhead, tgrp, ep, opt_flags);
+			hang_dirp(dirhead, tgrp, ep, opt_flags, &anon, exflags);
 			grp->gr_next = ep->ex_grphead;
 			ep->ex_grphead = tgrp;
 		} else {
 			hang_dirp(dirhead, (struct grouplist *)NULL, ep,
-				opt_flags);
+				opt_flags, &anon, exflags);
 			free_grp(grp);
 		}
 		dirhead = (struct dirlist *)NULL;
 		if ((ep->ex_flag & EX_LINKED) == 0) {
-			insert_exports(ep, &exphead);
+			insert_exports(ep, exphead);
 
 			ep->ex_flag |= EX_LINKED;
 		}
@@ -1710,6 +1871,10 @@ nextline:
 			free_dir(dirhead);
 			dirhead = (struct dirlist *)NULL;
 		}
+		if (anon.cr_groups != anon.cr_smallgrps) {
+			free(anon.cr_groups);
+			anon.cr_groups = NULL;
+		}
 	}
 }
 
@@ -1717,7 +1882,7 @@ nextline:
  * Get the export list from all specified files
  */
 static void
-get_exportlist(void)
+get_exportlist(int passno)
 {
 	struct export_args export;
 	struct iovec *iov;
@@ -1726,53 +1891,129 @@ get_exportlist(void)
 	int num, i;
 	int iovlen;
 	struct nfsex_args eargs;
+	FILE *debug_file;
 
-	if (suspend_nfsd != 0)
-		(void)nfssvc(NFSSVC_SUSPENDNFSD, NULL);
+	if ((debug_file = fopen(_PATH_MOUNTDDEBUG, "r")) != NULL) {
+		fclose(debug_file);
+		logdebug = 1;
+	} else
+		logdebug = 0;
+	LOGDEBUG("passno=%d", passno);
 	v4root_dirpath[0] = '\0';
+	free_v4rootexp();
+	if (passno == 1) {
+		/*
+		 * Save the current lists as old ones, so that the new lists
+		 * can be compared with the old ones in the 2nd pass.
+		 */
+		for (i = 0; i < exphashsize; i++) {
+			SLIST_FIRST(&oldexphead[i]) = SLIST_FIRST(&exphead[i]);
+			SLIST_INIT(&exphead[i]);
+		}
+
+		/* Note that the public fh has not yet been set. */
+		has_set_publicfh = 0;
+
+		/* Read the export file(s) and process them */
+		read_exportfile(passno);
+	} else {
+		/*
+		 * Just make the old lists empty.
+		 * exphashsize == 0 for the first call, before oldexphead
+		 * has been initialized-->loop won't be executed.
+		 */
+		for (i = 0; i < exphashsize; i++)
+			SLIST_INIT(&oldexphead[i]);
+	}
+
 	bzero(&export, sizeof(export));
 	export.ex_flags = MNT_DELEXPORT;
 	iov = NULL;
 	iovlen = 0;
 	bzero(errmsg, sizeof(errmsg));
 
+	if (suspend_nfsd != 0)
+		(void)nfssvc(NFSSVC_SUSPENDNFSD, NULL);
 	/*
-	 * First, get rid of the old list
-	 */
-	free_exports(&exphead);
-
-	/*
-	 * and the old V4 root dir.
+	 * Delete the old V4 root dir.
 	 */
 	bzero(&eargs, sizeof (eargs));
 	eargs.export.ex_flags = MNT_DELEXPORT;
-	if (nfssvc(NFSSVC_V4ROOTEXPORT, (caddr_t)&eargs) < 0 &&
+	if (nfssvc(NFSSVC_V4ROOTEXPORT | NFSSVC_NEWSTRUCT, (caddr_t)&eargs) < 0 &&
 	    errno != ENOENT)
 		syslog(LOG_ERR, "Can't delete exports for V4:");
 
-	/*
-	 * and clear flag that notes if a public fh has been exported.
-	 */
-	has_publicfh = 0;
+	build_iovec(&iov, &iovlen, "fstype", NULL, 0);
+	build_iovec(&iov, &iovlen, "fspath", NULL, 0);
+	build_iovec(&iov, &iovlen, "from", NULL, 0);
+	build_iovec(&iov, &iovlen, "update", NULL, 0);
+	build_iovec(&iov, &iovlen, "export", &export,
+	    sizeof(export));
+	build_iovec(&iov, &iovlen, "errmsg", errmsg,
+	    sizeof(errmsg));
 
 	/*
-	 * And delete exports that are in the kernel for all local
-	 * filesystems.
-	 * XXX: Should know how to handle all local exportable filesystems.
+	 * For passno == 1, compare the old and new lists updating the kernel
+	 * exports for any cases that have changed.
+	 * This call is doing the second pass through the lists.
+	 * If it fails, fall back on the bulk reload.
 	 */
-	num = getmntinfo(&mntbufp, MNT_NOWAIT);
+	if (passno == 1 && compare_nmount_exportlist(iov, iovlen, errmsg) ==
+	    0) {
+		LOGDEBUG("compareok");
+		/* Free up the old lists. */
+		free_exports(oldexphead);
+	} else {
+		LOGDEBUG("doing passno=0");
+		/*
+		 * Clear flag that notes if a public fh has been exported.
+		 * It is set by do_mount() if MNT_EXPUBLIC is set for the entry.
+		 */
+		has_publicfh = 0;
 
-	if (num > 0) {
-		build_iovec(&iov, &iovlen, "fstype", NULL, 0);
-		build_iovec(&iov, &iovlen, "fspath", NULL, 0);
-		build_iovec(&iov, &iovlen, "from", NULL, 0);
-		build_iovec(&iov, &iovlen, "update", NULL, 0);
-		build_iovec(&iov, &iovlen, "export", &export, sizeof(export));
-		build_iovec(&iov, &iovlen, "errmsg", errmsg, sizeof(errmsg));
+		/* exphead == NULL if not yet allocated (first call). */
+		if (exphead != NULL) {
+			/*
+			 * First, get rid of the old lists.
+			 */
+			free_exports(exphead);
+			free_exports(oldexphead);
+		}
+
+		/*
+		 * And delete exports that are in the kernel for all local
+		 * filesystems.
+		 * XXX: Should know how to handle all local exportable
+		 * filesystems.
+		 */
+		num = getmntinfo(&mntbufp, MNT_NOWAIT);
+
+		/* Allocate hash tables, for first call. */
+		if (exphead == NULL) {
+			/* Target an average linked list length of 10. */
+			exphashsize = num / 10;
+			if (exphashsize < 1)
+				exphashsize = 1;
+			else if (exphashsize > 100000)
+				exphashsize = 100000;
+			exphead = malloc(exphashsize * sizeof(*exphead));
+			oldexphead = malloc(exphashsize * sizeof(*oldexphead));
+			if (exphead == NULL || oldexphead == NULL)
+				errx(1, "Can't malloc hash tables");
+
+			for (i = 0; i < exphashsize; i++) {
+				SLIST_INIT(&exphead[i]);
+				SLIST_INIT(&oldexphead[i]);
+			}
+		}
+	
+		for (i = 0; i < num; i++)
+			delete_export(iov, iovlen, &mntbufp[i], errmsg);
+
+
+		/* Read the export file(s) and process them */
+		read_exportfile(0);
 	}
-
-	for (i = 0; i < num; i++)
-		delete_export(iov, iovlen, &mntbufp[i], errmsg);
 
 	if (iov != NULL) {
 		/* Free strings allocated by strdup() in getmntopts.c */
@@ -1788,16 +2029,17 @@ get_exportlist(void)
 		iovlen = 0;
 	}
 
-	read_exportfile();
-
 	/*
 	 * If there was no public fh, clear any previous one set.
 	 */
-	if (has_publicfh == 0)
+	if (has_publicfh == 0) {
+		LOGDEBUG("clear public fh");
 		(void) nfssvc(NFSSVC_NOPUBLICFH, NULL);
+	}
 
 	/* Resume the nfsd. If they weren't suspended, this is harmless. */
 	(void)nfssvc(NFSSVC_RESUMENFSD, NULL);
+	LOGDEBUG("eo get_exportlist");
 }
 
 /*
@@ -1806,8 +2048,11 @@ get_exportlist(void)
 static void
 insert_exports(struct exportlist *ep, struct exportlisthead *exhp)
 {
+	uint32_t i;
 
-	SLIST_INSERT_HEAD(exhp, ep, entries);
+	i = EXPHASH(&ep->ex_fs);
+	LOGDEBUG("fs=%s hash=%i", ep->ex_fsdir, i);
+	SLIST_INSERT_HEAD(&exhp[i], ep, entries);
 }
 
 /*
@@ -1817,19 +2062,22 @@ static void
 free_exports(struct exportlisthead *exhp)
 {
 	struct exportlist *ep, *ep2;
+	int i;
 
-	SLIST_FOREACH_SAFE(ep, exhp, entries, ep2) {
-		SLIST_REMOVE(exhp, ep, exportlist, entries);
-		free_exp(ep);
+	for (i = 0; i < exphashsize; i++) {
+		SLIST_FOREACH_SAFE(ep, &exhp[i], entries, ep2) {
+			SLIST_REMOVE(&exhp[i], ep, exportlist, entries);
+			free_exp(ep);
+		}
+		SLIST_INIT(&exhp[i]);
 	}
-	SLIST_INIT(exhp);
 }
 
 /*
  * Read the exports file(s) and call get_exportlist_one() for each line.
  */
 static void
-read_exportfile(void)
+read_exportfile(int passno)
 {
 	int done, i;
 
@@ -1845,7 +2093,7 @@ read_exportfile(void)
 			syslog(LOG_WARNING, "can't open %s", exnames[i]);
 			continue;
 		}
-		get_exportlist_one();
+		get_exportlist_one(passno);
 		fclose(exp_file);
 		done++;
 	}
@@ -1853,6 +2101,243 @@ read_exportfile(void)
 		syslog(LOG_ERR, "can't open any exports file");
 		exit(2);
 	}
+}
+
+/*
+ * Compare the export lists against the old ones and do nmount() operations
+ * for any cases that have changed.  This avoids doing nmount() for entries
+ * that have not changed.
+ * Return 0 upon success, 1 otherwise.
+ */
+static int
+compare_nmount_exportlist(struct iovec *iov, int iovlen, char *errmsg)
+{
+	struct exportlist *ep, *oep;
+	struct grouplist *grp;
+	struct statfs fs, ofs;
+	int i, ret;
+
+	/*
+	 * Loop through the current list and look for an entry in the old
+	 * list.
+	 * If found, check to see if it the same.
+	 *        If it is not the same, delete and re-export.
+	 *        Then mark it done on the old list.
+	 * else (not found)
+	 *        export it.
+	 * Any entries left in the old list after processing must have their
+	 * exports deleted.
+	 */
+	for (i = 0; i < exphashsize; i++)
+		SLIST_FOREACH(ep, &exphead[i], entries) {
+			LOGDEBUG("foreach ep=%s", ep->ex_fsdir);
+			oep = ex_search(&ep->ex_fs, oldexphead);
+			if (oep != NULL) {
+				/*
+				 * Check the mount paths are the same.
+				 * If not, return 1 so that the reload of the
+				 * exports will be done in bulk, the
+				 * passno == 0 way.
+				 */
+				LOGDEBUG("found old exp");
+				if (strcmp(ep->ex_fsdir, oep->ex_fsdir) != 0)
+					return (1);
+				LOGDEBUG("same fsdir");
+				/*
+				 * Test to see if the entry is the same.
+				 * If not the same delete exports and
+				 * re-export.
+				 */
+				if (compare_export(ep, oep) != 0) {
+					/*
+					 * Clear has_publicfh if if was set
+					 * in the old exports, but only if it
+					 * has not been set during processing of
+					 * the exports for this pass, as
+					 * indicated by has_set_publicfh.
+					 */
+					if (has_set_publicfh == 0 &&
+					    (oep->ex_flag & EX_PUBLICFH) != 0)
+						has_publicfh = 0;
+
+					/* Delete and re-export. */
+					if (statfs(ep->ex_fsdir, &fs) < 0)
+						return (1);
+					delete_export(iov, iovlen, &fs, errmsg);
+					ret = do_export_mount(ep, &fs);
+					if (ret != 0)
+						return (ret);
+				}
+				oep->ex_flag |= EX_DONE;
+				LOGDEBUG("exdone");
+			} else {
+				LOGDEBUG("not found so export");
+				/* Not found, so do export. */
+				if (statfs(ep->ex_fsdir, &fs) < 0)
+					return (1);
+				ret = do_export_mount(ep, &fs);
+				if (ret != 0)
+					return (ret);
+			}
+		}
+
+	/* Delete exports not done. */
+	for (i = 0; i < exphashsize; i++)
+		SLIST_FOREACH(oep, &oldexphead[i], entries) {
+			if ((oep->ex_flag & EX_DONE) == 0) {
+				LOGDEBUG("not done delete=%s", oep->ex_fsdir);
+				if (statfs(oep->ex_fsdir, &ofs) >= 0 &&
+				    fsidcmp(&oep->ex_fs, &ofs.f_fsid) == 0) {
+					LOGDEBUG("do delete");
+					/*
+					 * Clear has_publicfh if if was set
+					 * in the old exports, but only if it
+					 * has not been set during processing of
+					 * the exports for this pass, as
+					 * indicated by has_set_publicfh.
+					 */
+					if (has_set_publicfh == 0 &&
+					    (oep->ex_flag & EX_PUBLICFH) != 0)
+						has_publicfh = 0;
+
+					delete_export(iov, iovlen, &ofs,
+					    errmsg);
+				}
+			}
+		}
+
+	/* Do the V4 root exports, as required. */
+	grp = NULL;
+	if (v4root_ep != NULL)
+		grp = v4root_ep->ex_grphead;
+	v4root_phase = 2;
+	while (v4root_ep != NULL && grp != NULL) {
+		LOGDEBUG("v4root expath=%s", v4root_dirpath);
+		ret = do_mount(v4root_ep, grp, grp->gr_exflags, &grp->gr_anon,
+		    v4root_dirpath, strlen(v4root_dirpath), &fs,
+		    grp->gr_numsecflavors, grp->gr_secflavors);
+		if (ret != 0) {
+			v4root_phase = 0;
+			return (ret);
+		}
+		grp = grp->gr_next;
+	}
+	v4root_phase = 0;
+	free_v4rootexp();
+	return (0);
+}
+
+/*
+ * Compare old and current exportlist entries for the fsid and return 0
+ * if they are the same, 1 otherwise.
+ */
+static int
+compare_export(struct exportlist *ep, struct exportlist *oep)
+{
+	struct grouplist *grp, *ogrp;
+
+	if (strcmp(ep->ex_fsdir, oep->ex_fsdir) != 0)
+		return (1);
+	if ((ep->ex_flag & EX_DEFSET) != (oep->ex_flag & EX_DEFSET))
+		return (1);
+	if ((ep->ex_defdir != NULL && oep->ex_defdir == NULL) ||
+	    (ep->ex_defdir == NULL && oep->ex_defdir != NULL))
+		return (1);
+	if (ep->ex_defdir != NULL && (ep->ex_defdir->dp_flag & DP_DEFSET) !=
+	    (oep->ex_defdir->dp_flag & DP_DEFSET))
+		return (1);
+	if ((ep->ex_flag & EX_DEFSET) != 0 && (ep->ex_defnumsecflavors !=
+	    oep->ex_defnumsecflavors || ep->ex_defexflags !=
+	    oep->ex_defexflags || compare_cred(&ep->ex_defanon,
+	    &oep->ex_defanon) != 0 || compare_secflavor(ep->ex_defsecflavors,
+	    oep->ex_defsecflavors, ep->ex_defnumsecflavors) != 0))
+		return (1);
+
+	/* Now, check all the groups. */
+	for (ogrp = oep->ex_grphead; ogrp != NULL; ogrp = ogrp->gr_next)
+		ogrp->gr_flag = 0;
+	for (grp = ep->ex_grphead; grp != NULL; grp = grp->gr_next) {
+		for (ogrp = oep->ex_grphead; ogrp != NULL; ogrp =
+		    ogrp->gr_next)
+			if ((ogrp->gr_flag & GR_FND) == 0 &&
+			    grp->gr_numsecflavors == ogrp->gr_numsecflavors &&
+			    grp->gr_exflags == ogrp->gr_exflags &&
+			    compare_cred(&grp->gr_anon, &ogrp->gr_anon) == 0 &&
+			    compare_secflavor(grp->gr_secflavors,
+			    ogrp->gr_secflavors, grp->gr_numsecflavors) == 0)
+				break;
+		if (ogrp != NULL)
+			ogrp->gr_flag |= GR_FND;
+		else
+			return (1);
+	}
+	for (ogrp = oep->ex_grphead; ogrp != NULL; ogrp = ogrp->gr_next)
+		if ((ogrp->gr_flag & GR_FND) == 0)
+			return (1);
+	return (0);
+}
+
+/*
+ * This algorithm compares two arrays of "n" items. It returns 0 if they are
+ * the "same" and 1 otherwise.  Although suboptimal, it is always safe to
+ * return 1, which makes compare_nmount_export() reload the exports entry.
+ * "same" refers to having the same set of values in the two arrays.
+ * The arrays are in no particular order and duplicates (multiple entries
+ * in an array with the same value) is allowed.
+ * The algorithm is inefficient, but the common case of indentical arrays is
+ * handled first and "n" is normally fairly small.
+ * Since the two functions need the same algorithm but for arrays of
+ * different types (gid_t vs int), this is done as a macro.
+ */
+#define	COMPARE_ARRAYS(a1, a2, n)					\
+	do {								\
+		int fnd, fndarray[(n)], i, j;				\
+		/* Handle common case of identical arrays. */		\
+		for (i = 0; i < (n); i++)				\
+			if ((a1)[i] != (a2)[i])				\
+				break;					\
+		if (i == (n))						\
+			return (0);					\
+		for (i = 0; i < (n); i++)				\
+			fndarray[i] = 0;				\
+		for (i = 0; i < (n); i++) {				\
+			fnd = 0;					\
+			for (j = 0; j < (n); j++) {			\
+				if ((a1)[i] == (a2)[j]) {		\
+					fndarray[j] = 1;		\
+					fnd = 1;			\
+				}					\
+			}						\
+			if (fnd == 0)					\
+				return (1);				\
+		}							\
+		for (i = 0; i < (n); i++)				\
+			if (fndarray[i] == 0)				\
+				return (1);				\
+		return (0);						\
+	} while (0)
+
+/*
+ * Compare two struct expcred's.  Return 0 if the same and 1 otherwise.
+ */
+static int
+compare_cred(struct expcred *cr0, struct expcred *cr1)
+{
+
+	if (cr0->cr_uid != cr1->cr_uid || cr0->cr_ngroups != cr1->cr_ngroups)
+		return (1);
+
+	COMPARE_ARRAYS(cr0->cr_groups, cr1->cr_groups, cr0->cr_ngroups);
+}
+
+/*
+ * Compare two lists of security flavors.  Return 0 if the same and 1 otherwise.
+ */
+static int
+compare_secflavor(int *sec1, int *sec2, int nsec)
+{
+
+	COMPARE_ARRAYS(sec1, sec2, nsec);
 }
 
 /*
@@ -1962,10 +2447,11 @@ static struct exportlist *
 ex_search(fsid_t *fsid, struct exportlisthead *exhp)
 {
 	struct exportlist *ep;
+	uint32_t i;
 
-	SLIST_FOREACH(ep, exhp, entries) {
-		if (ep->ex_fs.val[0] == fsid->val[0] &&
-		    ep->ex_fs.val[1] == fsid->val[1])
+	i = EXPHASH(fsid);
+	SLIST_FOREACH(ep, &exhp[i], entries) {
+		if (fsidcmp(&ep->ex_fs, fsid) == 0)
 			return (ep);
 	}
 
@@ -2000,7 +2486,7 @@ add_expdir(struct dirlist **dpp, char *cp, int len)
  */
 static void
 hang_dirp(struct dirlist *dp, struct grouplist *grp, struct exportlist *ep,
-	int flags)
+	int flags, struct expcred *anoncrp, uint64_t exflags)
 {
 	struct hostlist *hp;
 	struct dirlist *dp2;
@@ -2011,12 +2497,15 @@ hang_dirp(struct dirlist *dp, struct grouplist *grp, struct exportlist *ep,
 		else
 			ep->ex_defdir = dp;
 		if (grp == (struct grouplist *)NULL) {
+			ep->ex_flag |= EX_DEFSET;
 			ep->ex_defdir->dp_flag |= DP_DEFSET;
 			/* Save the default security flavors list. */
 			ep->ex_defnumsecflavors = ep->ex_numsecflavors;
 			if (ep->ex_numsecflavors > 0)
 				memcpy(ep->ex_defsecflavors, ep->ex_secflavors,
 				    sizeof(ep->ex_secflavors));
+			cp_cred(&ep->ex_defanon, anoncrp);
+			ep->ex_defexflags = exflags;
 		} else while (grp) {
 			hp = get_ht();
 			hp->ht_grp = grp;
@@ -2036,7 +2525,8 @@ hang_dirp(struct dirlist *dp, struct grouplist *grp, struct exportlist *ep,
 		 */
 		while (dp) {
 			dp2 = dp->dp_left;
-			add_dlist(&ep->ex_dirl, dp, grp, flags, ep);
+			add_dlist(&ep->ex_dirl, dp, grp, flags, ep, anoncrp,
+			    exflags);
 			dp = dp2;
 		}
 	}
@@ -2048,7 +2538,8 @@ hang_dirp(struct dirlist *dp, struct grouplist *grp, struct exportlist *ep,
  */
 static void
 add_dlist(struct dirlist **dpp, struct dirlist *newdp, struct grouplist *grp,
-	int flags, struct exportlist *ep)
+	int flags, struct exportlist *ep, struct expcred *anoncrp,
+	uint64_t exflags)
 {
 	struct dirlist *dp;
 	struct hostlist *hp;
@@ -2058,10 +2549,12 @@ add_dlist(struct dirlist **dpp, struct dirlist *newdp, struct grouplist *grp,
 	if (dp) {
 		cmp = strcmp(dp->dp_dirp, newdp->dp_dirp);
 		if (cmp > 0) {
-			add_dlist(&dp->dp_left, newdp, grp, flags, ep);
+			add_dlist(&dp->dp_left, newdp, grp, flags, ep, anoncrp,
+			    exflags);
 			return;
 		} else if (cmp < 0) {
-			add_dlist(&dp->dp_right, newdp, grp, flags, ep);
+			add_dlist(&dp->dp_right, newdp, grp, flags, ep, anoncrp,
+			    exflags);
 			return;
 		} else
 			free((caddr_t)newdp);
@@ -2088,12 +2581,15 @@ add_dlist(struct dirlist **dpp, struct dirlist *newdp, struct grouplist *grp,
 			grp = grp->gr_next;
 		} while (grp);
 	} else {
+		ep->ex_flag |= EX_DEFSET;
 		dp->dp_flag |= DP_DEFSET;
 		/* Save the default security flavors list. */
 		ep->ex_defnumsecflavors = ep->ex_numsecflavors;
 		if (ep->ex_numsecflavors > 0)
 			memcpy(ep->ex_defsecflavors, ep->ex_secflavors,
 			    sizeof(ep->ex_secflavors));
+		cp_cred(&ep->ex_defanon, anoncrp);
+		ep->ex_defexflags = exflags;
 	}
 }
 
@@ -2264,7 +2760,7 @@ parsesec(char *seclist, struct exportlist *ep)
  */
 static int
 do_opt(char **cpp, char **endcpp, struct exportlist *ep, struct grouplist *grp,
-	int *has_hostp, int *exflagsp, struct xucred *cr)
+	int *has_hostp, uint64_t *exflagsp, struct expcred *cr)
 {
 	char *cpoptarg, *cpoptend;
 	char *cp, *endcp, *cpopt, savedc, savedc2;
@@ -2352,6 +2848,13 @@ do_opt(char **cpp, char **endcpp, struct exportlist *ep, struct grouplist *grp,
 				return (1);
 			opt_flags |= OP_SEC;
 			usedarg++;
+		} else if (!strcmp(cpopt, "tls")) {
+			*exflagsp |= MNT_EXTLS;
+		} else if (!strcmp(cpopt, "tlscert")) {
+			*exflagsp |= (MNT_EXTLS | MNT_EXTLSCERT);
+		} else if (!strcmp(cpopt, "tlscertuser")) {
+			*exflagsp |= (MNT_EXTLS | MNT_EXTLSCERT |
+			    MNT_EXTLSCERTUSER);
 		} else {
 			syslog(LOG_ERR, "bad opt %s", cpopt);
 			return (1);
@@ -2455,7 +2958,22 @@ free_exp(struct exportlist *ep)
 		grp = grp->gr_next;
 		free_grp(tgrp);
 	}
+	if (ep->ex_defanon.cr_groups != ep->ex_defanon.cr_smallgrps)
+		free(ep->ex_defanon.cr_groups);
 	free((caddr_t)ep);
+}
+
+/*
+ * Free up the v4root exports.
+ */
+static void
+free_v4rootexp(void)
+{
+
+	if (v4root_ep != NULL) {
+		free_exp(v4root_ep);
+		v4root_ep = NULL;
+	}
 }
 
 /*
@@ -2498,12 +3016,52 @@ out_of_mem(void)
 }
 
 /*
+ * Call do_mount() from the struct exportlist, for each case needed.
+ */
+static int
+do_export_mount(struct exportlist *ep, struct statfs *fsp)
+{
+	struct grouplist *grp, defgrp;
+	int ret;
+	size_t dirlen;
+
+	LOGDEBUG("do_export_mount=%s", ep->ex_fsdir);
+	dirlen = strlen(ep->ex_fsdir);
+	if ((ep->ex_flag & EX_DEFSET) != 0) {
+		defgrp.gr_type = GT_DEFAULT;
+		defgrp.gr_next = NULL;
+		/* We have an entry for all other hosts/nets. */
+		LOGDEBUG("ex_defexflags=0x%jx", (uintmax_t)ep->ex_defexflags);
+		ret = do_mount(ep, &defgrp, ep->ex_defexflags, &ep->ex_defanon,
+		    ep->ex_fsdir, dirlen, fsp, ep->ex_defnumsecflavors,
+		    ep->ex_defsecflavors);
+		if (ret != 0)
+			return (ret);
+	}
+
+	/* Do a mount for each group. */
+	grp = ep->ex_grphead;
+	while (grp != NULL) {
+		LOGDEBUG("do mount gr_type=0x%x gr_exflags=0x%jx",
+		    grp->gr_type, (uintmax_t)grp->gr_exflags);
+		ret = do_mount(ep, grp, grp->gr_exflags, &grp->gr_anon,
+		    ep->ex_fsdir, dirlen, fsp, grp->gr_numsecflavors,
+		    grp->gr_secflavors);
+		if (ret != 0)
+			return (ret);
+		grp = grp->gr_next;
+	}
+	return (0);
+}
+
+/*
  * Do the nmount() syscall with the update flag to push the export info into
  * the kernel.
  */
 static int
-do_mount(struct exportlist *ep, struct grouplist *grp, int exflags,
-    struct xucred *anoncrp, char *dirp, int dirplen, struct statfs *fsb)
+do_mount(struct exportlist *ep, struct grouplist *grp, uint64_t exflags,
+    struct expcred *anoncrp, char *dirp, int dirplen, struct statfs *fsb,
+    int numsecflavors, int *secflavors)
 {
 	struct statfs fsb1;
 	struct addrinfo *ai;
@@ -2528,15 +3086,23 @@ do_mount(struct exportlist *ep, struct grouplist *grp, int exflags,
 	bzero(eap, sizeof (struct export_args));
 	bzero(errmsg, sizeof(errmsg));
 	eap->ex_flags = exflags;
-	eap->ex_anon = *anoncrp;
+	eap->ex_uid = anoncrp->cr_uid;
+	eap->ex_ngroups = anoncrp->cr_ngroups;
+	if (eap->ex_ngroups > 0) {
+		eap->ex_groups = malloc(eap->ex_ngroups * sizeof(gid_t));
+		memcpy(eap->ex_groups, anoncrp->cr_groups, eap->ex_ngroups *
+		    sizeof(gid_t));
+	}
+	LOGDEBUG("do_mount exflags=0x%jx", (uintmax_t)exflags);
 	eap->ex_indexfile = ep->ex_indexfile;
 	if (grp->gr_type == GT_HOST)
 		ai = grp->gr_ptr.gt_addrinfo;
 	else
 		ai = NULL;
-	eap->ex_numsecflavors = ep->ex_numsecflavors;
+	eap->ex_numsecflavors = numsecflavors;
+	LOGDEBUG("do_mount numsec=%d", numsecflavors);
 	for (i = 0; i < eap->ex_numsecflavors; i++)
-		eap->ex_secflavors[i] = ep->ex_secflavors[i];
+		eap->ex_secflavors[i] = secflavors[i];
 	if (eap->ex_numsecflavors == 0) {
 		eap->ex_numsecflavors = 1;
 		eap->ex_secflavors[0] = AUTH_SYS;
@@ -2597,9 +3163,11 @@ do_mount(struct exportlist *ep, struct grouplist *grp, int exflags,
 		 */
 		if (v4root_phase == 2) {
 			nfsea.fspec = v4root_dirpath;
-			if (nfssvc(NFSSVC_V4ROOTEXPORT, (caddr_t)&nfsea) < 0) {
+			if (nfssvc(NFSSVC_V4ROOTEXPORT | NFSSVC_NEWSTRUCT,
+			    (caddr_t)&nfsea) < 0) {
 				syslog(LOG_ERR, "Exporting V4: failed");
-				return (2);
+				ret = 2;
+				goto error_exit;
 			}
 		} else {
 			/*
@@ -2650,9 +3218,9 @@ do_mount(struct exportlist *ep, struct grouplist *grp, int exflags,
 					goto error_exit;
 				}
 				/* back up over the last component */
-				while (*cp == '/' && cp > dirp)
+				while (cp > dirp && *cp == '/')
 					cp--;
-				while (*(cp - 1) != '/' && cp > dirp)
+				while (cp > dirp && *(cp - 1) != '/')
 					cp--;
 				if (cp == dirp) {
 					if (debug)
@@ -2669,8 +3237,7 @@ do_mount(struct exportlist *ep, struct grouplist *grp, int exflags,
 				 * filesystem.
 				 */
 				if (statfs(dirp, &fsb1) != 0 ||
-				    bcmp(&fsb1.f_fsid, &fsb->f_fsid,
-				    sizeof (fsb1.f_fsid)) != 0) {
+				    fsidcmp(&fsb1.f_fsid, &fsb->f_fsid) != 0) {
 					*cp = savedc;
 					syslog(LOG_ERR,
 					    "can't export %s %s", dirp,
@@ -2700,8 +3267,11 @@ do_mount(struct exportlist *ep, struct grouplist *grp, int exflags,
 			else if (nfssvc(NFSSVC_PUBLICFH, (caddr_t)&fh) < 0)
 				syslog(LOG_ERR,
 				    "Can't set public fh for %s", public_name);
-			else
+			else {
 				has_publicfh = 1;
+				has_set_publicfh = 1;
+				ep->ex_flag |= EX_PUBLICFH;
+			}
 		}
 skip:
 		if (ai != NULL)
@@ -2712,6 +3282,7 @@ skip:
 	if (cp)
 		*cp = savedc;
 error_exit:
+	free(eap->ex_groups);
 	/* free strings allocated by strdup() in getmntopts.c */
 	if (iov != NULL) {
 		free(iov[0].iov_base); /* fstype */
@@ -2938,22 +3509,22 @@ get_line(void)
  * Parse a description of a credential.
  */
 static void
-parsecred(char *namelist, struct xucred *cr)
+parsecred(char *namelist, struct expcred *cr)
 {
 	char *name;
-	int cnt;
+	int inpos;
 	char *names;
 	struct passwd *pw;
 	struct group *gr;
-	gid_t groups[XU_NGROUPS + 1];
+	gid_t groups[NGROUPS_MAX + 1];
 	int ngroups;
 
-	cr->cr_version = XUCRED_VERSION;
 	/*
 	 * Set up the unprivileged user.
 	 */
-	cr->cr_uid = 65534;
-	cr->cr_groups[0] = 65533;
+	cr->cr_groups = cr->cr_smallgrps;
+	cr->cr_uid = UID_NOBODY;
+	cr->cr_groups[0] = GID_NOGROUP;
 	cr->cr_ngroups = 1;
 	/*
 	 * Get the user's password table entry.
@@ -2974,19 +3545,28 @@ parsecred(char *namelist, struct xucred *cr)
 			return;
 		}
 		cr->cr_uid = pw->pw_uid;
-		ngroups = XU_NGROUPS + 1;
+		ngroups = NGROUPS_MAX + 1;
 		if (getgrouplist(pw->pw_name, pw->pw_gid, groups, &ngroups)) {
 			syslog(LOG_ERR, "too many groups");
-			ngroups = XU_NGROUPS + 1;
+			ngroups = NGROUPS_MAX + 1;
 		}
 
 		/*
 		 * Compress out duplicate.
 		 */
-		cr->cr_ngroups = ngroups - 1;
+		if (ngroups > 1 && groups[0] == groups[1]) {
+			ngroups--;
+			inpos = 2;
+		} else
+			inpos = 1;
+		if (ngroups > NGROUPS_MAX)
+			ngroups = NGROUPS_MAX;
+		if (ngroups > SMALLNGROUPS)
+			cr->cr_groups = malloc(ngroups * sizeof(gid_t));
+		cr->cr_ngroups = ngroups;
 		cr->cr_groups[0] = groups[0];
-		for (cnt = 2; cnt < ngroups; cnt++)
-			cr->cr_groups[cnt - 1] = groups[cnt];
+		memcpy(&cr->cr_groups[1], &groups[inpos], (ngroups - 1) *
+		    sizeof(gid_t));
 		return;
 	}
 	/*
@@ -3002,20 +3582,23 @@ parsecred(char *namelist, struct xucred *cr)
 		return;
 	}
 	cr->cr_ngroups = 0;
-	while (names != NULL && *names != '\0' && cr->cr_ngroups < XU_NGROUPS) {
+	while (names != NULL && *names != '\0' && cr->cr_ngroups < NGROUPS_MAX) {
 		name = strsep_quote(&names, ":");
 		if (isdigit(*name) || *name == '-') {
-			cr->cr_groups[cr->cr_ngroups++] = atoi(name);
+			groups[cr->cr_ngroups++] = atoi(name);
 		} else {
 			if ((gr = getgrnam(name)) == NULL) {
 				syslog(LOG_ERR, "unknown group: %s", name);
 				continue;
 			}
-			cr->cr_groups[cr->cr_ngroups++] = gr->gr_gid;
+			groups[cr->cr_ngroups++] = gr->gr_gid;
 		}
 	}
-	if (names != NULL && *names != '\0' && cr->cr_ngroups == XU_NGROUPS)
+	if (names != NULL && *names != '\0' && cr->cr_ngroups == NGROUPS_MAX)
 		syslog(LOG_ERR, "too many groups");
+	if (cr->cr_ngroups > SMALLNGROUPS)
+		cr->cr_groups = malloc(cr->cr_ngroups * sizeof(gid_t));
+	memcpy(cr->cr_groups, groups, cr->cr_ngroups * sizeof(gid_t));
 }
 
 #define	STRSIZ	(MNTNAMLEN+MNTPATHLEN+50)
@@ -3124,6 +3707,8 @@ free_grp(struct grouplist *grp)
 		if (grp->gr_ptr.gt_net.nt_name)
 			free(grp->gr_ptr.gt_net.nt_name);
 	}
+	if (grp->gr_anon.cr_groups != grp->gr_anon.cr_smallgrps)
+		free(grp->gr_anon.cr_groups);
 	free((caddr_t)grp);
 }
 
@@ -3334,4 +3919,18 @@ terminate(int sig __unused)
 	rpcb_unset(MOUNTPROG, MOUNTVERS, NULL);
 	rpcb_unset(MOUNTPROG, MOUNTVERS3, NULL);
 	exit (0);
+}
+
+static void
+cp_cred(struct expcred *outcr, struct expcred *incr)
+{
+
+	outcr->cr_uid = incr->cr_uid;
+	outcr->cr_ngroups = incr->cr_ngroups;
+	if (outcr->cr_ngroups > SMALLNGROUPS)
+		outcr->cr_groups = malloc(outcr->cr_ngroups * sizeof(gid_t));
+	else
+		outcr->cr_groups = outcr->cr_smallgrps;
+	memcpy(outcr->cr_groups, incr->cr_groups, incr->cr_ngroups *
+	    sizeof(gid_t));
 }

@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2017 Kyle J. Kneitinger <kyle@kneit.in>
- * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -64,6 +63,7 @@ typedef struct prop_data {
 	nvlist_t *list;
 	libbe_handle_t *lbh;
 	bool single_object;	/* list will contain props directly */
+	char *bootonce;
 } prop_data_t;
 
 int prop_list_builder_cb(zfs_handle_t *, void *);

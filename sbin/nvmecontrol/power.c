@@ -32,10 +32,12 @@ __FBSDID("$FreeBSD$");
 #include <ctype.h>
 #include <err.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sysexits.h>
 #include <unistd.h>
 
 #include "nvmecontrol.h"
@@ -43,8 +45,19 @@ __FBSDID("$FreeBSD$");
 _Static_assert(sizeof(struct nvme_power_state) == 256 / NBBY,
 	       "nvme_power_state size wrong");
 
-#define POWER_USAGE							       \
-	"power [-l] [-p new-state [-w workload-hint]] <controller id>\n"
+#define POWER_NONE 0xffffffffu
+
+static struct options {
+	bool		list;
+	uint32_t	power;
+	uint32_t	workload;
+	const char	*dev;
+} opt = {
+	.list = false,
+	.power = POWER_NONE,
+	.workload = 0,
+	.dev = NULL,
+};
 
 static void
 power_list_one(int i, struct nvme_power_state *nps)
@@ -103,10 +116,10 @@ power_set(int fd, int power_val, int workload, int perm)
 	pt.cmd.cdw11 = htole32(power_val | (workload << 5));
 
 	if (ioctl(fd, NVME_PASSTHROUGH_CMD, &pt) < 0)
-		err(1, "set feature power mgmt request failed");
+		err(EX_IOERR, "set feature power mgmt request failed");
 
 	if (nvme_completion_is_error(&pt.cpl))
-		errx(1, "set feature power mgmt request returned error");
+		errx(EX_IOERR, "set feature power mgmt request returned error");
 }
 
 static void
@@ -119,66 +132,47 @@ power_show(int fd)
 	pt.cmd.cdw10 = htole32(NVME_FEAT_POWER_MANAGEMENT);
 
 	if (ioctl(fd, NVME_PASSTHROUGH_CMD, &pt) < 0)
-		err(1, "set feature power mgmt request failed");
+		err(EX_IOERR, "set feature power mgmt request failed");
 
 	if (nvme_completion_is_error(&pt.cpl))
-		errx(1, "set feature power mgmt request returned error");
+		errx(EX_IOERR, "set feature power mgmt request returned error");
 
 	printf("Current Power Mode is %d\n", pt.cpl.cdw0);
 }
 
 static void
-power(const struct nvme_function *nf, int argc, char *argv[])
+power(const struct cmd *f, int argc, char *argv[])
 {
 	struct nvme_controller_data	cdata;
-	int				ch, listflag = 0, powerflag = 0, power_val = 0, fd;
-	int				workload = 0;
-	char				*end;
+	int				fd;
+	char				*path;
+	uint32_t			nsid;
 
-	while ((ch = getopt(argc, argv, "lp:w:")) != -1) {
-		switch ((char)ch) {
-		case 'l':
-			listflag = 1;
-			break;
-		case 'p':
-			powerflag = 1;
-			power_val = strtol(optarg, &end, 0);
-			if (*end != '\0') {
-				fprintf(stderr, "Invalid power state number: %s\n", optarg);
-				usage(nf);
-			}
-			break;
-		case 'w':
-			workload = strtol(optarg, &end, 0);
-			if (*end != '\0') {
-				fprintf(stderr, "Invalid workload hint: %s\n", optarg);
-				usage(nf);
-			}
-			break;
-		default:
-			usage(nf);
-		}
-	}
+	if (arg_parse(argc, argv, f))
+		return;
 
-	/* Check that a controller was specified. */
-	if (optind >= argc)
-		usage(nf);
-
-	if (listflag && powerflag) {
+	if (opt.list && opt.power != POWER_NONE) {
 		fprintf(stderr, "Can't set power and list power states\n");
-		usage(nf);
+		arg_help(argc, argv, f);
 	}
 
-	open_dev(argv[optind], &fd, 1, 1);
-	read_controller_data(fd, &cdata);
+	open_dev(opt.dev, &fd, 1, 1);
+	get_nsid(fd, &path, &nsid);
+	if (nsid != 0) {
+		close(fd);
+		open_dev(path, &fd, 1, 1);
+	}
+	free(path);
 
-	if (listflag) {
+	if (opt.list) {
+		if (read_controller_data(fd, &cdata))
+			errx(EX_IOERR, "Identify request failed");
 		power_list(&cdata);
 		goto out;
 	}
 
-	if (powerflag) {
-		power_set(fd, power_val, workload, 0);
+	if (opt.power != POWER_NONE) {
+		power_set(fd, opt.power, opt.workload, 0);
 		goto out;
 	}
 	power_show(fd);
@@ -188,4 +182,30 @@ out:
 	exit(0);
 }
 
-NVME_COMMAND(top, power, power, POWER_USAGE);
+static const struct opts power_opts[] = {
+#define OPT(l, s, t, opt, addr, desc) { l, s, t, &opt.addr, desc }
+	OPT("list", 'l', arg_none, opt, list,
+	    "List the valid power states"),
+	OPT("power", 'p', arg_uint32, opt, power,
+	    "Set the power state"),
+	OPT("workload", 'w', arg_uint32, opt, workload,
+	    "Set the workload"),
+	{ NULL, 0, arg_none, NULL, NULL }
+};
+#undef OPT
+
+static const struct args power_args[] = {
+	{ arg_string, &opt.dev, "controller-id|namespace-id" },
+	{ arg_none, NULL, NULL },
+};
+
+static struct cmd power_cmd = {
+	.name = "power",
+	.fn = power,
+	.descr = "Manage power states for the drive",
+	.ctx_size = sizeof(opt),
+	.opts = power_opts,
+	.args = power_args,
+};
+
+CMD_COMMAND(power_cmd);

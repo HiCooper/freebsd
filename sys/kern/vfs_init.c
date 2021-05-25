@@ -201,6 +201,17 @@ vfs_root_sigdefer(struct mount *mp, int flags, struct vnode **vpp)
 }
 
 static int
+vfs_cachedroot_sigdefer(struct mount *mp, int flags, struct vnode **vpp)
+{
+	int prev_stops, rc;
+
+	prev_stops = sigdeferstop(SIGDEFERSTOP_SILENT);
+	rc = (*mp->mnt_vfc->vfc_vfsops_sd->vfs_cachedroot)(mp, flags, vpp);
+	sigallowstop(prev_stops);
+	return (rc);
+}
+
+static int
 vfs_quotactl_sigdefer(struct mount *mp, int cmd, uid_t uid, void *arg)
 {
 	int prev_stops, rc;
@@ -257,8 +268,8 @@ vfs_fhtovp_sigdefer(struct mount *mp, struct fid *fidp, int flags,
 }
 
 static int
-vfs_checkexp_sigdefer(struct mount *mp, struct sockaddr *nam, int *exflg,
-    struct ucred **credp, int *numsecflavors, int **secflavors)
+vfs_checkexp_sigdefer(struct mount *mp, struct sockaddr *nam, uint64_t *exflg,
+    struct ucred **credp, int *numsecflavors, int *secflavors)
 {
 	int prev_stops, rc;
 
@@ -343,6 +354,7 @@ static struct vfsops vfsops_sigdefer = {
 	.vfs_mount =		vfs_mount_sigdefer,
 	.vfs_unmount =		vfs_unmount_sigdefer,
 	.vfs_root =		vfs_root_sigdefer,
+	.vfs_cachedroot =	vfs_cachedroot_sigdefer,
 	.vfs_quotactl =		vfs_quotactl_sigdefer,
 	.vfs_statfs =		vfs_statfs_sigdefer,
 	.vfs_sync =		vfs_sync_sigdefer,
@@ -373,7 +385,7 @@ vfs_register(struct vfsconf *vfc)
 		vattr_null(&va_null);
 		once = 1;
 	}
-	
+
 	if (vfc->vfc_version != VFS_VERSION) {
 		printf("ERROR: filesystem %s, unsupported ABI version %x\n",
 		    vfc->vfc_name, vfc->vfc_version);
@@ -510,7 +522,6 @@ vfs_register(struct vfsconf *vfc)
 
 	return (0);
 }
-
 
 /* Remove registration of a filesystem type */
 static int

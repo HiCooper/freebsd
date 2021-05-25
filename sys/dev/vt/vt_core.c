@@ -39,9 +39,11 @@ __FBSDID("$FreeBSD$");
 #include <sys/consio.h>
 #include <sys/eventhandler.h>
 #include <sys/fbio.h>
+#include <sys/font.h>
 #include <sys/kbio.h>
 #include <sys/kdb.h>
 #include <sys/kernel.h>
+#include <sys/linker.h>
 #include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/mutex.h>
@@ -120,7 +122,8 @@ const struct terminal_class vt_termclass = {
 #define	VT_UNIT(vw)	((vw)->vw_device->vd_unit * VT_MAXWINDOWS + \
 			(vw)->vw_number)
 
-static SYSCTL_NODE(_kern, OID_AUTO, vt, CTLFLAG_RD, 0, "vt(9) parameters");
+static SYSCTL_NODE(_kern, OID_AUTO, vt, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
+    "vt(9) parameters");
 static VT_SYSCTL_INT(enable_altgr, 1, "Enable AltGr key (Do not assume R.Alt as Alt)");
 static VT_SYSCTL_INT(enable_bell, 1, "Enable bell");
 static VT_SYSCTL_INT(debug, 0, "vt(9) debug level");
@@ -162,8 +165,15 @@ extern unsigned char vt_logo_image[];
 const unsigned int vt_logo_sprite_height;
 #endif
 
-/* Font. */
+/*
+ * Console font. vt_font_loader will be filled with font data passed
+ * by loader. If there is no font passed by boot loader, we use built in
+ * default.
+ */
 extern struct vt_font vt_font_default;
+static struct vt_font vt_font_loader;
+static struct vt_font *vt_font_assigned = &vt_font_default;
+
 #ifndef SC_NO_CUTPASTE
 extern struct vt_mouse_cursor vt_default_mouse_pointer;
 #endif
@@ -335,7 +345,7 @@ static void
 vt_switch_timer(void *arg)
 {
 
-	vt_late_window_switch((struct vt_window *)arg);
+	(void)vt_late_window_switch((struct vt_window *)arg);
 }
 
 static int
@@ -453,17 +463,26 @@ vt_window_postswitch(struct vt_window *vw)
 	return (0);
 }
 
-/* vt_late_window_switch will done VT switching for regular case. */
+/* vt_late_window_switch will do VT switching for regular case. */
 static int
 vt_late_window_switch(struct vt_window *vw)
 {
+	struct vt_window *curvw;
 	int ret;
 
 	callout_stop(&vw->vw_proc_dead_timer);
 
 	ret = vt_window_switch(vw);
-	if (ret)
+	if (ret != 0) {
+		/*
+		 * If the switch hasn't happened, then return the VT
+		 * to the current owner, if any.
+		 */
+		curvw = vw->vw_device->vd_curwindow;
+		if (curvw->vw_smode.mode == VT_PROCESS)
+			(void)vt_window_postswitch(curvw);
 		return (ret);
+	}
 
 	/* Notify owner process about terminal availability. */
 	if (vw->vw_smode.mode == VT_PROCESS) {
@@ -508,6 +527,19 @@ vt_proc_window_switch(struct vt_window *vw)
 		DPRINTF(30, "%s: Cannot switch: vw == curvw.", __func__);
 		return (0);	/* success */
 	}
+
+	/*
+	 * Early check for an attempt to switch to a non-functional VT.
+	 * The same check is done in vt_window_switch(), but it's better
+	 * to fail as early as possible to avoid needless pre-switch
+	 * actions.
+	 */
+	VT_LOCK(vd);
+	if ((vw->vw_flags & (VWF_OPENED|VWF_CONSOLE)) == 0) {
+		VT_UNLOCK(vd);
+		return (EINVAL);
+	}
+	VT_UNLOCK(vd);
 
 	/* Ask current process permission to switch away. */
 	if (curvw->vw_smode.mode == VT_PROCESS) {
@@ -583,8 +615,7 @@ vt_window_switch(struct vt_window *vw)
 
 	/* Restore per-window keyboard mode. */
 	mtx_lock(&Giant);
-	kbd = kbd_get_keyboard(vd->vd_keyboard);
-	if (kbd != NULL) {
+	if ((kbd = vd->vd_keyboard) != NULL) {
 		if (curvw->vw_kbdmode == K_XLATE)
 			vt_save_kbd_state(curvw, kbd);
 
@@ -703,13 +734,22 @@ vt_scroll(struct vt_window *vw, int offset, int whence)
 }
 
 static int
-vt_machine_kbdevent(int c)
+vt_machine_kbdevent(struct vt_device *vd, int c)
 {
 
 	switch (c) {
 	case SPCLKEY | DBG: /* kbdmap(5) keyword `debug`. */
-		if (vt_kbd_debug)
+		if (vt_kbd_debug) {
 			kdb_enter(KDB_WHY_BREAK, "manual escape to debugger");
+#if VT_ALT_TO_ESC_HACK
+			/*
+			 * There's an unfortunate conflict between SPCLKEY|DBG
+			 * and VT_ALT_TO_ESC_HACK.  Just assume they didn't mean
+			 * it if we got to here.
+			 */
+			vd->vd_kbstate &= ~ALKED;
+#endif
+		}
 		return (1);
 	case SPCLKEY | HALT: /* kbdmap(5) keyword `halt`. */
 		if (vt_kbd_halt)
@@ -842,7 +882,7 @@ vt_processkey(keyboard_t *kbd, struct vt_device *vd, int c)
 		return (0);
 #endif
 
-	if (vt_machine_kbdevent(c))
+	if (vt_machine_kbdevent(vd, c))
 		return (0);
 
 	if (vw->vw_flags & VWF_SCROLL) {
@@ -960,7 +1000,7 @@ vt_kbdevent(keyboard_t *kbd, int event, void *arg)
 		break;
 	case KBDIO_UNLOADING:
 		mtx_lock(&Giant);
-		vd->vd_keyboard = -1;
+		vd->vd_keyboard = NULL;
 		kbd_release(kbd, (void *)vd);
 		mtx_unlock(&Giant);
 		return (0);
@@ -1020,9 +1060,11 @@ vt_allocate_keyboard(struct vt_device *vd)
 			DPRINTF(10, "%s: No keyboard found.\n", __func__);
 			return (-1);
 		}
+		k0 = kbd_get_keyboard(idx0);
 	}
-	vd->vd_keyboard = idx0;
-	DPRINTF(20, "%s: vd_keyboard = %d\n", __func__, vd->vd_keyboard);
+	vd->vd_keyboard = k0;
+	DPRINTF(20, "%s: vd_keyboard = %d\n", __func__,
+	    vd->vd_keyboard->kb_index);
 
 	if (vd->vd_curwindow == &vt_conswindow) {
 		for (i = 0; i < grabbed; ++i)
@@ -1219,7 +1261,7 @@ vt_mark_mouse_position_as_dirty(struct vt_device *vd, int locked)
 
 static void
 vt_set_border(struct vt_device *vd, const term_rect_t *area,
-    const term_color_t c)
+    term_color_t c)
 {
 	vd_drawrect_t *drawrect = vd->vd_driver->vd_drawrect;
 
@@ -1278,7 +1320,7 @@ vt_flush(struct vt_device *vd)
 	/* Check if the cursor should be displayed or not. */
 	if ((vd->vd_flags & VDF_MOUSECURSOR) && /* Mouse support enabled. */
 	    !(vw->vw_flags & VWF_MOUSE_HIDE) && /* Cursor displayed.      */
-	    !kdb_active && panicstr == NULL) {  /* DDB inactive.          */
+	    !kdb_active && !KERNEL_PANICKED()) {  /* DDB inactive.          */
 		vd->vd_mshown = 1;
 	} else {
 		vd->vd_mshown = 0;
@@ -1312,9 +1354,12 @@ vt_flush(struct vt_device *vd)
 
 	/* Force a full redraw when the screen contents might be invalid. */
 	if (vd->vd_flags & (VDF_INVALID | VDF_SUSPENDED)) {
+		const teken_attr_t *a;
+
 		vd->vd_flags &= ~VDF_INVALID;
 
-		vt_set_border(vd, &vw->vw_draw_area, TC_BLACK);
+		a = teken_get_curattr(&vw->vw_terminal->tm_emulator);
+		vt_set_border(vd, &vw->vw_draw_area, a->ta_bgcolor);
 		vt_termrect(vd, vf, &tarea);
 		if (vd->vd_driver->vd_invalidate_text)
 			vd->vd_driver->vd_invalidate_text(vd, &tarea);
@@ -1372,7 +1417,7 @@ vtterm_done(struct terminal *tm)
 	struct vt_window *vw = tm->tm_softc;
 	struct vt_device *vd = vw->vw_device;
 
-	if (kdb_active || panicstr != NULL) {
+	if (kdb_active || KERNEL_PANICKED()) {
 		/* Switch to the debugger. */
 		if (vd->vd_curwindow != vw) {
 			vd->vd_curwindow = vw;
@@ -1395,7 +1440,6 @@ vtterm_splash(struct vt_device *vd)
 
 	/* Display a nice boot splash. */
 	if (!(vd->vd_flags & VDF_TEXTMODE) && (boothowto & RB_MUTE)) {
-
 		top = (vd->vd_height - vt_logo_height) / 2;
 		left = (vd->vd_width - vt_logo_width) / 2;
 		switch (vt_logo_depth) {
@@ -1410,6 +1454,129 @@ vtterm_splash(struct vt_device *vd)
 }
 #endif
 
+static struct vt_font *
+parse_font_info_static(struct font_info *fi)
+{
+	struct vt_font *vfp;
+	uintptr_t ptr;
+	uint32_t checksum;
+
+	if (fi == NULL)
+		return (NULL);
+
+	ptr = (uintptr_t)fi;
+	/*
+	 * Compute and verify checksum. The total sum of all the fields
+	 * must be 0.
+	 */
+	checksum = fi->fi_width;
+	checksum += fi->fi_height;
+	checksum += fi->fi_bitmap_size;
+	for (unsigned i = 0; i < VFNT_MAPS; i++)
+		checksum += fi->fi_map_count[i];
+
+	if (checksum + fi->fi_checksum != 0)
+		return (NULL);
+
+	ptr += sizeof(struct font_info);
+	ptr = roundup2(ptr, 8);
+
+	vfp = &vt_font_loader;
+	vfp->vf_height = fi->fi_height;
+	vfp->vf_width = fi->fi_width;
+	for (unsigned i = 0; i < VFNT_MAPS; i++) {
+		if (fi->fi_map_count[i] == 0)
+			continue;
+		vfp->vf_map_count[i] = fi->fi_map_count[i];
+		vfp->vf_map[i] = (vfnt_map_t *)ptr;
+		ptr += (fi->fi_map_count[i] * sizeof(vfnt_map_t));
+		ptr = roundup2(ptr, 8);
+	}
+	vfp->vf_bytes = (uint8_t *)ptr;
+	return (vfp);
+}
+
+static struct vt_font *
+parse_font_info(struct font_info *fi)
+{
+	struct vt_font *vfp;
+	uintptr_t ptr;
+	uint32_t checksum;
+	size_t size;
+
+	if (fi == NULL)
+		return (NULL);
+
+	ptr = (uintptr_t)fi;
+	/*
+	 * Compute and verify checksum. The total sum of all the fields
+	 * must be 0.
+	 */
+	checksum = fi->fi_width;
+	checksum += fi->fi_height;
+	checksum += fi->fi_bitmap_size;
+	for (unsigned i = 0; i < VFNT_MAPS; i++)
+		checksum += fi->fi_map_count[i];
+
+	if (checksum + fi->fi_checksum != 0)
+		return (NULL);
+
+	ptr += sizeof(struct font_info);
+	ptr = roundup2(ptr, 8);
+
+	vfp = &vt_font_loader;
+	vfp->vf_height = fi->fi_height;
+	vfp->vf_width = fi->fi_width;
+	for (unsigned i = 0; i < VFNT_MAPS; i++) {
+		if (fi->fi_map_count[i] == 0)
+			continue;
+		vfp->vf_map_count[i] = fi->fi_map_count[i];
+		size = fi->fi_map_count[i] * sizeof(vfnt_map_t);
+		vfp->vf_map[i] = malloc(size, M_VT, M_WAITOK | M_ZERO);
+		bcopy((vfnt_map_t *)ptr, vfp->vf_map[i], size);
+		ptr += size;
+		ptr = roundup2(ptr, 8);
+	}
+	vfp->vf_bytes = malloc(fi->fi_bitmap_size, M_VT, M_WAITOK | M_ZERO);
+	bcopy((uint8_t *)ptr, vfp->vf_bytes, fi->fi_bitmap_size);
+	return (vfp);
+}
+
+static void
+vt_init_font(void *arg)
+{
+	caddr_t kmdp;
+	struct font_info *fi;
+	struct vt_font *font;
+
+	kmdp = preload_search_by_type("elf kernel");
+	if (kmdp == NULL)
+		kmdp = preload_search_by_type("elf64 kernel");
+	fi = MD_FETCH(kmdp, MODINFOMD_FONT, struct font_info *);
+
+	font = parse_font_info(fi);
+	if (font != NULL)
+		vt_font_assigned = font;
+}
+
+SYSINIT(vt_init_font, SI_SUB_KMEM, SI_ORDER_ANY, vt_init_font, &vt_consdev);
+
+static void
+vt_init_font_static(void)
+{
+	caddr_t kmdp;
+	struct font_info *fi;
+	struct vt_font *font;
+
+	kmdp = preload_search_by_type("elf kernel");
+	if (kmdp == NULL)
+		kmdp = preload_search_by_type("elf64 kernel");
+	fi = MD_FETCH(kmdp, MODINFOMD_FONT, struct font_info *);
+
+	font = parse_font_info_static(fi);
+	if (font != NULL)
+		vt_font_assigned = font;
+}
 
 static void
 vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
@@ -1418,8 +1585,7 @@ vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
 	struct vt_window *vw = tm->tm_softc;
 	struct vt_device *vd = vw->vw_device;
 	struct winsize wsz;
-	term_attr_t attr;
-	term_char_t c;
+	const term_attr_t *a;
 
 	if (!vty_enabled(VTY_VT))
 		return;
@@ -1458,9 +1624,11 @@ vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
 	vd->vd_windows[VT_CONSWINDOW] = vw;
 	sprintf(cp->cn_name, "ttyv%r", VT_UNIT(vw));
 
+	vt_init_font_static();
+
 	/* Attach default font if not in TEXTMODE. */
 	if ((vd->vd_flags & VDF_TEXTMODE) == 0) {
-		vw->vw_font = vtfont_ref(&vt_font_default);
+		vw->vw_font = vtfont_ref(vt_font_assigned);
 		vt_compute_drawable_area(vw);
 	}
 
@@ -1472,14 +1640,12 @@ vtterm_cnprobe(struct terminal *tm, struct consdev *cp)
 	if (vd->vd_width != 0 && vd->vd_height != 0)
 		vt_termsize(vd, vw->vw_font, &vw->vw_buf.vb_scr_size);
 
+	/* We need to access terminal attributes from vtbuf */
+	vw->vw_buf.vb_terminal = tm;
 	vtbuf_init_early(&vw->vw_buf);
 	vt_winsize(vd, vw->vw_font, &wsz);
-	c = (boothowto & RB_MUTE) == 0 ? TERMINAL_KERN_ATTR :
-	    TERMINAL_NORM_ATTR;
-	attr.ta_format = TCHAR_FORMAT(c);
-	attr.ta_fgcolor = TCHAR_FGCOLOR(c);
-	attr.ta_bgcolor = TCHAR_BGCOLOR(c);
-	terminal_set_winsize_blank(tm, &wsz, 1, &attr);
+	a = teken_get_curattr(&tm->tm_emulator);
+	terminal_set_winsize_blank(tm, &wsz, 1, a);
 
 	if (vtdbest != NULL) {
 #ifdef DEV_SPLASH
@@ -1511,8 +1677,7 @@ vtterm_cngetc(struct terminal *tm)
 	}
 
 	/* Stripped down keyboard handler. */
-	kbd = kbd_get_keyboard(vd->vd_keyboard);
-	if (kbd == NULL)
+	if ((kbd = vd->vd_keyboard) == NULL)
 		return (-1);
 
 	/* Force keyboard input mode to K_XLATE */
@@ -1588,8 +1753,7 @@ vtterm_cngrab(struct terminal *tm)
 	if (!cold)
 		vt_window_switch(vw);
 
-	kbd = kbd_get_keyboard(vd->vd_keyboard);
-	if (kbd == NULL)
+	if ((kbd = vd->vd_keyboard) == NULL)
 		return;
 
 	if (vw->vw_grabbed++ > 0)
@@ -1619,8 +1783,7 @@ vtterm_cnungrab(struct terminal *tm)
 	vw = tm->tm_softc;
 	vd = vw->vw_device;
 
-	kbd = kbd_get_keyboard(vd->vd_keyboard);
-	if (kbd == NULL)
+	if ((kbd = vd->vd_keyboard) == NULL)
 		return;
 
 	if (--vw->vw_grabbed > 0)
@@ -1792,7 +1955,7 @@ finish_vt_rel(struct vt_window *vw, int release, int *s)
 		vw->vw_flags &= ~VWF_SWWAIT_REL;
 		if (release) {
 			callout_drain(&vw->vw_proc_dead_timer);
-			vt_late_window_switch(vw->vw_switch_to);
+			(void)vt_late_window_switch(vw->vw_switch_to);
 		}
 		return (0);
 	}
@@ -2160,8 +2323,7 @@ skip_thunk:
 		error = 0;
 
 		mtx_lock(&Giant);
-		kbd = kbd_get_keyboard(vd->vd_keyboard);
-		if (kbd != NULL)
+		if ((kbd = vd->vd_keyboard) != NULL)
 			error = kbdd_ioctl(kbd, cmd, data);
 		mtx_unlock(&Giant);
 		if (error == ENOIOCTL) {
@@ -2179,8 +2341,7 @@ skip_thunk:
 
 		if (vw == vd->vd_curwindow) {
 			mtx_lock(&Giant);
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd != NULL)
+			if ((kbd = vd->vd_keyboard) != NULL)
 				error = vt_save_kbd_state(vw, kbd);
 			mtx_unlock(&Giant);
 
@@ -2205,8 +2366,7 @@ skip_thunk:
 		error = 0;
 		if (vw == vd->vd_curwindow) {
 			mtx_lock(&Giant);
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd != NULL)
+			if ((kbd = vd->vd_keyboard) != NULL)
 				error = vt_update_kbd_state(vw, kbd);
 			mtx_unlock(&Giant);
 		}
@@ -2218,8 +2378,7 @@ skip_thunk:
 
 		if (vw == vd->vd_curwindow) {
 			mtx_lock(&Giant);
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd != NULL)
+			if ((kbd = vd->vd_keyboard) != NULL)
 				error = vt_save_kbd_leds(vw, kbd);
 			mtx_unlock(&Giant);
 
@@ -2244,8 +2403,7 @@ skip_thunk:
 		error = 0;
 		if (vw == vd->vd_curwindow) {
 			mtx_lock(&Giant);
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd != NULL)
+			if ((kbd = vd->vd_keyboard) != NULL)
 				error = vt_update_kbd_leds(vw, kbd);
 			mtx_unlock(&Giant);
 		}
@@ -2261,8 +2419,7 @@ skip_thunk:
 
 		if (vw == vd->vd_curwindow) {
 			mtx_lock(&Giant);
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd != NULL)
+			if ((kbd = vd->vd_keyboard) != NULL)
 				error = vt_save_kbd_mode(vw, kbd);
 			mtx_unlock(&Giant);
 
@@ -2287,8 +2444,7 @@ skip_thunk:
 			error = 0;
 			if (vw == vd->vd_curwindow) {
 				mtx_lock(&Giant);
-				kbd = kbd_get_keyboard(vd->vd_keyboard);
-				if (kbd != NULL)
+				if ((kbd = vd->vd_keyboard) != NULL)
 					error = vt_update_kbd_mode(vw, kbd);
 				mtx_unlock(&Giant);
 			}
@@ -2312,10 +2468,24 @@ skip_thunk:
 	case CONS_HISTORY:
 		if (*(int *)data < 0)
 			return EINVAL;
-		if (*(int *)data != vd->vd_curwindow->vw_buf.vb_history_size)
-			vtbuf_sethistory_size(&vd->vd_curwindow->vw_buf,
-			    *(int *)data);
-		return 0;
+		if (*(int *)data != vw->vw_buf.vb_history_size)
+			vtbuf_sethistory_size(&vw->vw_buf, *(int *)data);
+		return (0);
+	case CONS_CLRHIST:
+		vtbuf_clearhistory(&vw->vw_buf);
+		/*
+		 * Invalidate the entire visible window; it is not guaranteed
+		 * that this operation will be immediately followed by a scroll
+		 * event, so it would otherwise be possible for prior artifacts
+		 * to remain visible.
+		 */
+		VT_LOCK(vd);
+		if (vw == vd->vd_curwindow) {
+			vd->vd_flags |= VDF_INVALID;
+			vt_resume_flush_timer(vw, 0);
+		}
+		VT_UNLOCK(vd);
+		return (0);
 	case CONS_GET:
 		/* XXX */
 		*(int *)data = M_CG640x480;
@@ -2333,8 +2503,7 @@ skip_thunk:
 
 		if (vw == vd->vd_curwindow) {
 			mtx_lock(&Giant);
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd != NULL)
+			if ((kbd = vd->vd_keyboard) != NULL)
 				vt_save_kbd_state(vw, kbd);
 			mtx_unlock(&Giant);
 		}
@@ -2397,7 +2566,7 @@ skip_thunk:
 	}
 	case PIO_VFONT_DEFAULT: {
 		/* Reset to default font. */
-		error = vt_change_font(vw, &vt_font_default);
+		error = vt_change_font(vw, vt_font_assigned);
 		return (error);
 	}
 	case GIO_SCRNMAP: {
@@ -2453,7 +2622,8 @@ skip_thunk:
 	case CONS_SETKBD:	/* set the new keyboard */
 		mtx_lock(&Giant);
 		error = 0;
-		if (vd->vd_keyboard != *(int *)data) {
+		if (vd->vd_keyboard == NULL ||
+		    vd->vd_keyboard->kb_index != *(int *)data) {
 			kbd = kbd_get_keyboard(*(int *)data);
 			if (kbd == NULL) {
 				mtx_unlock(&Giant);
@@ -2462,13 +2632,11 @@ skip_thunk:
 			i = kbd_allocate(kbd->kb_name, kbd->kb_unit,
 			    (void *)vd, vt_kbdevent, vd);
 			if (i >= 0) {
-				if (vd->vd_keyboard != -1) {
-					kbd = kbd_get_keyboard(vd->vd_keyboard);
+				if ((kbd = vd->vd_keyboard) != NULL) {
 					vt_save_kbd_state(vd->vd_curwindow, kbd);
 					kbd_release(kbd, (void *)vd);
 				}
-				kbd = kbd_get_keyboard(i);
-				vd->vd_keyboard = i;
+				kbd = vd->vd_keyboard = kbd_get_keyboard(i);
 
 				vt_update_kbd_mode(vd->vd_curwindow, kbd);
 				vt_update_kbd_state(vd->vd_curwindow, kbd);
@@ -2481,16 +2649,11 @@ skip_thunk:
 	case CONS_RELKBD:	/* release the current keyboard */
 		mtx_lock(&Giant);
 		error = 0;
-		if (vd->vd_keyboard != -1) {
-			kbd = kbd_get_keyboard(vd->vd_keyboard);
-			if (kbd == NULL) {
-				mtx_unlock(&Giant);
-				return (EINVAL);
-			}
+		if ((kbd = vd->vd_keyboard) != NULL) {
 			vt_save_kbd_state(vd->vd_curwindow, kbd);
 			error = kbd_release(kbd, (void *)vd);
 			if (error == 0) {
-				vd->vd_keyboard = -1;
+				vd->vd_keyboard = NULL;
 			}
 		}
 		mtx_unlock(&Giant);
@@ -2663,15 +2826,16 @@ vt_allocate_window(struct vt_device *vd, unsigned int window)
 	vw->vw_kbdmode = K_XLATE;
 
 	if ((vd->vd_flags & VDF_TEXTMODE) == 0) {
-		vw->vw_font = vtfont_ref(&vt_font_default);
+		vw->vw_font = vtfont_ref(vt_font_assigned);
 		vt_compute_drawable_area(vw);
 	}
 
 	vt_termsize(vd, vw->vw_font, &size);
 	vt_winsize(vd, vw->vw_font, &wsz);
+	tm = vw->vw_terminal = terminal_alloc(&vt_termclass, vw);
+	vw->vw_buf.vb_terminal = tm;	/* must be set before vtbuf_init() */
 	vtbuf_init(&vw->vw_buf, &size);
 
-	tm = vw->vw_terminal = terminal_alloc(&vt_termclass, vw);
 	terminal_set_winsize(tm, &wsz);
 	vd->vd_windows[window] = vw;
 	callout_init(&vw->vw_proc_dead_timer, 0);
@@ -2707,7 +2871,6 @@ vt_upgrade(struct vt_device *vd)
 				    vt_window_switch, vw, SHUTDOWN_PRI_DEFAULT);
 			}
 		}
-
 	}
 	VT_LOCK(vd);
 	if (vd->vd_curwindow == NULL)
@@ -2760,7 +2923,7 @@ vt_resize(struct vt_device *vd)
 		VT_LOCK(vd);
 		/* Assign default font to window, if not textmode. */
 		if (!(vd->vd_flags & VDF_TEXTMODE) && vw->vw_font == NULL)
-			vw->vw_font = vtfont_ref(&vt_font_default);
+			vw->vw_font = vtfont_ref(vt_font_assigned);
 		VT_UNLOCK(vd);
 
 		/* Resize terminal windows */

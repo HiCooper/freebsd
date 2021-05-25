@@ -46,12 +46,57 @@ __FBSDID("$FreeBSD$");
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sysexits.h>
 #include <unistd.h>
 
 #include "nvmecontrol.h"
 
-#define FIRMWARE_USAGE							       \
-	"firmware [-s slot] [-f path_to_firmware] [-a] <controller id>\n"
+/* Tables for command line parsing */
+
+static cmd_fn_t firmware;
+
+#define NONE 0xffffffffu
+static struct options {
+	bool		activate;
+	uint32_t	slot;
+	const char	*fw_img;
+	const char	*dev;
+} opt = {
+	.activate = false,
+	.slot = NONE,
+	.fw_img = NULL,
+	.dev = NULL,
+};
+
+static const struct opts firmware_opts[] = {
+#define OPT(l, s, t, opt, addr, desc) { l, s, t, &opt.addr, desc }
+	OPT("activate", 'a', arg_none, opt, activate,
+	    "Attempt to activate firmware"),
+	OPT("slot", 's', arg_uint32, opt, slot,
+	    "Slot to activate and/or download firmware to"),
+	OPT("firmware", 'f', arg_path, opt, fw_img,
+	    "Firmware image to download"),
+	{ NULL, 0, arg_none, NULL, NULL }
+};
+#undef OPT
+
+static const struct args firmware_args[] = {
+	{ arg_string, &opt.dev, "controller-id|namespace-id" },
+	{ arg_none, NULL, NULL },
+};
+
+static struct cmd firmware_cmd = {
+	.name = "firmware",
+	.fn = firmware,
+	.descr = "Download firmware image to controller",
+	.ctx_size = sizeof(opt),
+	.opts = firmware_opts,
+	.args = firmware_args,
+};
+
+CMD_COMMAND(firmware_cmd);
+
+/* End of tables for command line parsing */
 
 static int
 slot_has_valid_firmware(int fd, int slot)
@@ -60,7 +105,7 @@ slot_has_valid_firmware(int fd, int slot)
 	int				has_fw = false;
 
 	read_logpage(fd, NVME_LOG_FIRMWARE_SLOT,
-	    NVME_GLOBAL_NAMESPACE_TAG, &fw, sizeof(fw));
+	    NVME_GLOBAL_NAMESPACE_TAG, 0, 0, 0, &fw, sizeof(fw));
 
 	if (fw.revision[slot-1] != 0LLU)
 		has_fw = true;
@@ -69,7 +114,7 @@ slot_has_valid_firmware(int fd, int slot)
 }
 
 static void
-read_image_file(char *path, void **buf, int32_t *size)
+read_image_file(const char *path, void **buf, int32_t *size)
 {
 	struct stat	sb;
 	int32_t		filesize;
@@ -79,9 +124,9 @@ read_image_file(char *path, void **buf, int32_t *size)
 	*buf = NULL;
 
 	if ((fd = open(path, O_RDONLY)) < 0)
-		err(1, "unable to open '%s'", path);
+		err(EX_NOINPUT, "unable to open '%s'", path);
 	if (fstat(fd, &sb) < 0)
-		err(1, "unable to stat '%s'", path);
+		err(EX_NOINPUT, "unable to stat '%s'", path);
 
 	/*
 	 * The NVMe spec does not explicitly state a maximum firmware image
@@ -95,36 +140,43 @@ read_image_file(char *path, void **buf, int32_t *size)
 	 *  a bit.
 	 */
 	if (sb.st_size > INT32_MAX)
-		errx(1, "size of file '%s' is too large (%jd bytes)",
+		errx(EX_USAGE, "size of file '%s' is too large (%jd bytes)",
 		    path, (intmax_t)sb.st_size);
 	filesize = (int32_t)sb.st_size;
 	if ((*buf = malloc(filesize)) == NULL)
-		errx(1, "unable to malloc %d bytes", filesize);
+		errx(EX_OSERR, "unable to malloc %d bytes", filesize);
 	if ((*size = read(fd, *buf, filesize)) < 0)
-		err(1, "error reading '%s'", path);
+		err(EX_IOERR, "error reading '%s'", path);
 	/* XXX assuming no short reads */
 	if (*size != filesize)
-		errx(1,
+		errx(EX_IOERR,
 		    "error reading '%s' (read %d bytes, requested %d bytes)",
 		    path, *size, filesize);
+	close(fd);
 }
 
 static void
-update_firmware(int fd, uint8_t *payload, int32_t payload_size)
+update_firmware(int fd, uint8_t *payload, int32_t payload_size, uint8_t fwug)
 {
 	struct nvme_pt_command	pt;
-	int32_t			off, resid, size;
+	uint64_t		max_xfer_size;
+	int32_t			off;
+	uint32_t		resid, size;
 	void			*chunk;
 
 	off = 0;
 	resid = payload_size;
 
-	if ((chunk = aligned_alloc(PAGE_SIZE, NVME_MAX_XFER_SIZE)) == NULL)
-		errx(1, "unable to malloc %d bytes", NVME_MAX_XFER_SIZE);
+	if (ioctl(fd, NVME_GET_MAX_XFER_SIZE, &max_xfer_size) < 0)
+		err(EX_IOERR, "query max transfer size failed");
+	if (fwug != 0 && fwug != 0xFF)
+		max_xfer_size = MIN(max_xfer_size, (uint64_t)fwug << 12);
+
+	if ((chunk = aligned_alloc(PAGE_SIZE, max_xfer_size)) == NULL)
+		errx(EX_OSERR, "unable to malloc %zd bytes", (size_t)max_xfer_size);
 
 	while (resid > 0) {
-		size = (resid >= NVME_MAX_XFER_SIZE) ?
-		    NVME_MAX_XFER_SIZE : resid;
+		size = (resid >= max_xfer_size) ?  max_xfer_size : resid;
 		memcpy(chunk, payload + off, size);
 
 		memset(&pt, 0, sizeof(pt));
@@ -136,14 +188,15 @@ update_firmware(int fd, uint8_t *payload, int32_t payload_size)
 		pt.is_read = 0;
 
 		if (ioctl(fd, NVME_PASSTHROUGH_CMD, &pt) < 0)
-			err(1, "firmware download request failed");
+			err(EX_IOERR, "firmware download request failed");
 
 		if (nvme_completion_is_error(&pt.cpl))
-			errx(1, "firmware download request returned error");
+			errx(EX_IOERR, "firmware download request returned error");
 
 		resid -= size;
 		off += size;
 	}
+	free(chunk);
 }
 
 static int
@@ -158,7 +211,7 @@ activate_firmware(int fd, int slot, int activate_action)
 	pt.is_read = 0;
 
 	if (ioctl(fd, NVME_PASSTHROUGH_CMD, &pt) < 0)
-		err(1, "firmware activate request failed");
+		err(EX_IOERR, "firmware activate request failed");
 
 	sct = NVME_STATUS_GET_SCT(pt.cpl.status);
 	sc = NVME_STATUS_GET_SC(pt.cpl.status);
@@ -168,130 +221,114 @@ activate_firmware(int fd, int slot, int activate_action)
 		return 1;
 
 	if (nvme_completion_is_error(&pt.cpl))
-		errx(1, "firmware activate request returned error");
+		errx(EX_IOERR, "firmware activate request returned error");
 
 	return 0;
 }
 
 static void
-firmware(const struct nvme_function *nf, int argc, char *argv[])
+firmware(const struct cmd *f, int argc, char *argv[])
 {
-	int				fd = -1, slot = 0;
-	int				a_flag, f_flag;
+	int				fd = -1;
 	int				activate_action, reboot_required;
-	int				opt;
-	char				*p, *image = NULL;
-	char				*controller = NULL, prompt[64];
+	char				prompt[64];
 	void				*buf = NULL;
-	int32_t				size = 0;
+	char				*path;
+	int32_t				size = 0, nsid;
 	uint16_t			oacs_fw;
 	uint8_t				fw_slot1_ro, fw_num_slots;
 	struct nvme_controller_data	cdata;
 
-	a_flag = f_flag = false;
+	if (arg_parse(argc, argv, f))
+		return;
 
-	while ((opt = getopt(argc, argv, "af:s:")) != -1) {
-		switch (opt) {
-		case 'a':
-			a_flag = true;
-			break;
-		case 's':
-			slot = strtol(optarg, &p, 0);
-			if (p != NULL && *p != '\0') {
-				fprintf(stderr,
-				    "\"%s\" not valid slot.\n",
-				    optarg);
-				usage(nf);
-			} else if (slot == 0) {
-				fprintf(stderr,
-				    "0 is not a valid slot number. "
-				    "Slot numbers start at 1.\n");
-				usage(nf);
-			} else if (slot > 7) {
-				fprintf(stderr,
-				    "Slot number %s specified which is "
-				    "greater than max allowed slot number of "
-				    "7.\n", optarg);
-				usage(nf);
-			}
-			break;
-		case 'f':
-			image = optarg;
-			f_flag = true;
-			break;
-		}
+	if (opt.slot == 0) {
+		fprintf(stderr,
+		    "0 is not a valid slot number. "
+		    "Slot numbers start at 1.\n");
+		arg_help(argc, argv, f);
+	} else if (opt.slot > 7 && opt.slot != NONE) {
+		fprintf(stderr,
+		    "Slot number %s specified which is "
+		    "greater than max allowed slot number of "
+		    "7.\n", optarg);
+		arg_help(argc, argv, f);
 	}
 
-	/* Check that a controller (and not a namespace) was specified. */
-	if (optind >= argc || strstr(argv[optind], NVME_NS_PREFIX) != NULL)
-		usage(nf);
-
-	if (!f_flag && !a_flag) {
+	if (!opt.activate && opt.fw_img == NULL) {
 		fprintf(stderr,
 		    "Neither a replace ([-f path_to_firmware]) nor "
 		    "activate ([-a]) firmware image action\n"
 		    "was specified.\n");
-		usage(nf);
+		arg_help(argc, argv, f);
 	}
 
-	if (!f_flag && a_flag && slot == 0) {
+	if (opt.activate && opt.fw_img == NULL && opt.slot == 0) {
 		fprintf(stderr,
 		    "Slot number to activate not specified.\n");
-		usage(nf);
+		arg_help(argc, argv, f);
 	}
 
-	controller = argv[optind];
-	open_dev(controller, &fd, 1, 1);
-	read_controller_data(fd, &cdata);
+	open_dev(opt.dev, &fd, 1, 1);
+	get_nsid(fd, &path, &nsid);
+	if (nsid != 0) {
+		close(fd);
+		open_dev(path, &fd, 1, 1);
+	}
+	free(path);
+
+	if (read_controller_data(fd, &cdata))
+		errx(EX_IOERR, "Identify request failed");
 
 	oacs_fw = (cdata.oacs >> NVME_CTRLR_DATA_OACS_FIRMWARE_SHIFT) &
 		NVME_CTRLR_DATA_OACS_FIRMWARE_MASK;
 
 	if (oacs_fw == 0)
-		errx(1,
+		errx(EX_UNAVAILABLE,
 		    "controller does not support firmware activate/download");
 
 	fw_slot1_ro = (cdata.frmw >> NVME_CTRLR_DATA_FRMW_SLOT1_RO_SHIFT) &
 		NVME_CTRLR_DATA_FRMW_SLOT1_RO_MASK;
 
-	if (f_flag && slot == 1 && fw_slot1_ro)
-		errx(1, "slot %d is marked as read only", slot);
+	if (opt.fw_img && opt.slot == 1 && fw_slot1_ro)
+		errx(EX_UNAVAILABLE, "slot %d is marked as read only", opt.slot);
 
 	fw_num_slots = (cdata.frmw >> NVME_CTRLR_DATA_FRMW_NUM_SLOTS_SHIFT) &
 		NVME_CTRLR_DATA_FRMW_NUM_SLOTS_MASK;
 
-	if (slot > fw_num_slots)
-		errx(1,
+	if (opt.slot > fw_num_slots)
+		errx(EX_UNAVAILABLE,
 		    "slot %d specified but controller only supports %d slots",
-		    slot, fw_num_slots);
+		    opt.slot, fw_num_slots);
 
-	if (a_flag && !f_flag && !slot_has_valid_firmware(fd, slot))
-		errx(1,
+	if (opt.activate && opt.fw_img == NULL &&
+	    !slot_has_valid_firmware(fd, opt.slot))
+		errx(EX_UNAVAILABLE,
 		    "slot %d does not contain valid firmware,\n"
 		    "try 'nvmecontrol logpage -p 3 %s' to get a list "
 		    "of available images\n",
-		    slot, controller);
+		    opt.slot, opt.dev);
 
-	if (f_flag)
-		read_image_file(image, &buf, &size);
+	if (opt.fw_img)
+		read_image_file(opt.fw_img, &buf, &size);
 
-	if (f_flag && a_flag)
+	if (opt.fw_img != NULL&& opt.activate)
 		printf("You are about to download and activate "
 		       "firmware image (%s) to controller %s.\n"
 		       "This may damage your controller and/or "
 		       "overwrite an existing firmware image.\n",
-		       image, controller);
-	else if (a_flag)
+		       opt.fw_img, opt.dev);
+	else if (opt.activate)
 		printf("You are about to activate a new firmware "
 		       "image on controller %s.\n"
 		       "This may damage your controller.\n",
-		       controller);
-	else if (f_flag)
+		       opt.dev);
+	else if (opt.fw_img != NULL)
 		printf("You are about to download firmware image "
 		       "(%s) to controller %s.\n"
 		       "This may damage your controller and/or "
 		       "overwrite an existing firmware image.\n",
-		       image, controller);
+		       opt.fw_img, opt.dev);
 
 	printf("Are you sure you want to continue? (yes/no) ");
 	while (1) {
@@ -299,13 +336,13 @@ firmware(const struct nvme_function *nf, int argc, char *argv[])
 		if (strncasecmp(prompt, "yes", 3) == 0)
 			break;
 		if (strncasecmp(prompt, "no", 2) == 0)
-			exit(1);
+			exit(EX_DATAERR);
 		printf("Please answer \"yes\" or \"no\". ");
 	}
 
-	if (f_flag) {
-		update_firmware(fd, buf, size);
-		if (a_flag)
+	if (opt.fw_img != NULL) {
+		update_firmware(fd, buf, size, cdata.fwug);
+		if (opt.activate)
 			activate_action = NVME_AA_REPLACE_ACTIVATE;
 		else
 			activate_action = NVME_AA_REPLACE_NO_ACTIVATE;
@@ -313,9 +350,9 @@ firmware(const struct nvme_function *nf, int argc, char *argv[])
 		activate_action = NVME_AA_ACTIVATE;
 	}
 
-	reboot_required = activate_firmware(fd, slot, activate_action);
+	reboot_required = activate_firmware(fd, opt.slot, activate_action);
 
-	if (a_flag) {
+	if (opt.activate) {
 		if (reboot_required) {
 			printf("New firmware image activated but requires "
 			       "conventional reset (i.e. reboot) to "
@@ -325,12 +362,10 @@ firmware(const struct nvme_function *nf, int argc, char *argv[])
 			       "effect after next controller reset.\n"
 			       "Controller reset can be initiated via "
 			       "'nvmecontrol reset %s'\n",
-			       controller);
+			       opt.dev);
 		}
 	}
 
 	close(fd);
 	exit(0);
 }
-
-NVME_COMMAND(top, firmware, firmware, FIRMWARE_USAGE);

@@ -23,7 +23,7 @@
  * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
  * SUCH DAMAGE.
  *
- * $Id: elfcopy.h 3615 2018-05-17 04:12:24Z kaiwang27 $
+ * $Id: elfcopy.h 3757 2019-06-28 01:15:28Z emaste $
  */
 
 #include <sys/queue.h>
@@ -135,8 +135,12 @@ struct section {
 	int		 pseudo;
 	int		 nocopy;
 
+	Elftc_String_Table *strtab;
+
 	TAILQ_ENTRY(section) sec_list;	/* next section */
 };
+
+TAILQ_HEAD(sectionlist, section);
 
 /* Internal data structure for segments. */
 struct segment {
@@ -294,7 +298,7 @@ void	create_scn(struct elfcopy *_ecp);
 void	create_srec(struct elfcopy *_ecp, int _ifd, int _ofd, const char *_ofn);
 void	create_symtab(struct elfcopy *_ecp);
 void	create_symtab_data(struct elfcopy *_ecp);
-void	create_tempfile(char **_fn, int *_fd);
+void	create_tempfile(const char *_src, char **_fn, int *_fd);
 void	finalize_external_symtab(struct elfcopy *_ecp);
 void	free_elf(struct elfcopy *_ecp);
 void	free_sec_act(struct elfcopy *_ecp);
@@ -311,7 +315,6 @@ struct sec_action *lookup_sec_act(struct elfcopy *_ecp,
 struct symop *lookup_symop_list(struct elfcopy *_ecp, const char *_name,
     unsigned int _op);
 void	resync_sections(struct elfcopy *_ecp);
-void	set_shstrtab(struct elfcopy *_ecp);
 void	setup_phdr(struct elfcopy *_ecp);
 void	update_shdr(struct elfcopy *_ecp, int _update_link);
 

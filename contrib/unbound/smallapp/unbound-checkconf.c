@@ -58,6 +58,7 @@
 #include "services/authzone.h"
 #include "respip/respip.h"
 #include "sldns/sbuffer.h"
+#include "sldns/str2wire.h"
 #ifdef HAVE_GETOPT_H
 #include <getopt.h>
 #endif
@@ -146,6 +147,42 @@ check_mod(struct config_file* cfg, struct module_func_block* fb)
 	edns_known_options_delete(&env);
 }
 
+/** true if addr is a localhost address, 127.0.0.1 or ::1 (with maybe "@port"
+ * after it) */
+static int
+str_addr_is_localhost(const char* a)
+{
+	if(strncmp(a, "127.", 4) == 0) return 1;
+	if(strncmp(a, "::1", 3) == 0) return 1;
+	return 0;
+}
+
+/** check do-not-query-localhost */
+static void
+donotquerylocalhostcheck(struct config_file* cfg)
+{
+	if(cfg->donotquery_localhost) {
+		struct config_stub* p;
+		struct config_strlist* s;
+		for(p=cfg->forwards; p; p=p->next) {
+			for(s=p->addrs; s; s=s->next) {
+				if(str_addr_is_localhost(s->str)) {
+					fprintf(stderr, "unbound-checkconf: warning: forward-addr: '%s' is specified for forward-zone: '%s', but do-not-query-localhost: yes means that the address will not be used for lookups.\n",
+						s->str, p->name);
+				}
+			}
+		}
+		for(p=cfg->stubs; p; p=p->next) {
+			for(s=p->addrs; s; s=s->next) {
+				if(str_addr_is_localhost(s->str)) {
+					fprintf(stderr, "unbound-checkconf: warning: stub-addr: '%s' is specified for stub-zone: '%s', but do-not-query-localhost: yes means that the address will not be used for lookups.\n",
+						s->str, p->name);
+				}
+			}
+		}
+	}
+}
+
 /** check localzones */
 static void
 localzonechecks(struct config_file* cfg)
@@ -156,6 +193,94 @@ localzonechecks(struct config_file* cfg)
 	if(!local_zones_apply_cfg(zs, cfg))
 		fatal_exit("failed local-zone, local-data configuration");
 	local_zones_delete(zs);
+}
+
+/** checks for acl and views */
+static void
+acl_view_tag_checks(struct config_file* cfg, struct views* views)
+{
+	int d;
+	struct sockaddr_storage a;
+	socklen_t alen;
+	struct config_str2list* acl;
+	struct config_str3list* s3;
+	struct config_strbytelist* sb;
+
+	/* acl_view */
+	for(acl=cfg->acl_view; acl; acl = acl->next) {
+		struct view* v;
+		if(!netblockstrtoaddr(acl->str, UNBOUND_DNS_PORT, &a, &alen,
+			&d)) {
+			fatal_exit("cannot parse access-control-view "
+				"address %s %s", acl->str, acl->str2);
+		}
+		v = views_find_view(views, acl->str2, 0);
+		if(!v) {
+			fatal_exit("cannot find view for "
+				"access-control-view: %s %s",
+				acl->str, acl->str2);
+		}
+		lock_rw_unlock(&v->lock);
+	}
+
+	/* acl_tags */
+	for(sb=cfg->acl_tags; sb; sb = sb->next) {
+		if(!netblockstrtoaddr(sb->str, UNBOUND_DNS_PORT, &a, &alen,
+			&d)) {
+			fatal_exit("cannot parse access-control-tags "
+				"address %s", sb->str);
+		}
+	}
+
+	/* acl_tag_actions */
+	for(s3=cfg->acl_tag_actions; s3; s3 = s3->next) {
+		enum localzone_type t;
+		if(!netblockstrtoaddr(s3->str, UNBOUND_DNS_PORT, &a, &alen,
+			&d)) {
+			fatal_exit("cannot parse access-control-tag-actions "
+				"address %s %s %s",
+				s3->str, s3->str2, s3->str3);
+		}
+		if(find_tag_id(cfg, s3->str2) == -1) {
+			fatal_exit("cannot parse tag %s (define-tag it), "
+				"for access-control-tag-actions: %s %s %s",
+				s3->str2, s3->str, s3->str2, s3->str3);
+		}
+		if(!local_zone_str2type(s3->str3, &t)) {
+			fatal_exit("cannot parse access control action type %s"
+				" for access-control-tag-actions: %s %s %s",
+				s3->str3, s3->str, s3->str2, s3->str3);
+		}
+	}
+
+	/* acl_tag_datas */
+	for(s3=cfg->acl_tag_datas; s3; s3 = s3->next) {
+		char buf[65536];
+		uint8_t rr[LDNS_RR_BUF_SIZE];
+		size_t len = sizeof(rr);
+		int res;
+		if(!netblockstrtoaddr(s3->str, UNBOUND_DNS_PORT, &a, &alen,
+			&d)) {
+			fatal_exit("cannot parse access-control-tag-datas address %s %s '%s'",
+				s3->str, s3->str2, s3->str3);
+		}
+		if(find_tag_id(cfg, s3->str2) == -1) {
+			fatal_exit("cannot parse tag %s (define-tag it), "
+				"for access-control-tag-datas: %s %s '%s'",
+				s3->str2, s3->str, s3->str2, s3->str3);
+		}
+		/* '.' is sufficient for validation, and it makes the call to
+		 * sldns_wirerr_get_type() simpler below. */
+		snprintf(buf, sizeof(buf), "%s %s", ".", s3->str3);
+		res = sldns_str2wire_rr_buf(buf, rr, &len, NULL, 3600, NULL,
+			0, NULL, 0);
+		if(res != 0) {
+			fatal_exit("cannot parse rr data [char %d] parse error %s, for access-control-tag-datas: %s %s '%s'",
+				(int)LDNS_WIREPARSE_OFFSET(res)-2,
+				sldns_get_errorstr_parse(res),
+				s3->str, s3->str2, s3->str3);
+		}
+	}
 }
 
 /** check view and response-ip configuration */
@@ -175,6 +300,7 @@ view_and_respipchecks(struct config_file* cfg)
 		fatal_exit("Could not setup respip set");
 	if(!respip_views_apply_cfg(views, cfg, &ignored))
 		fatal_exit("Could not setup per-view respip sets");
+	acl_view_tag_checks(cfg, views);
 	views_delete(views);
 	respip_set_delete(respip);
 }
@@ -431,7 +557,7 @@ check_modules_exist(const char* module_conf)
 
 /** check configuration for errors */
 static void
-morechecks(struct config_file* cfg, const char* fname)
+morechecks(struct config_file* cfg)
 {
 	warn_hosts("stub-host", cfg->stubs);
 	warn_hosts("forward-host", cfg->forwards);
@@ -445,6 +571,8 @@ morechecks(struct config_file* cfg, const char* fname)
 		fatal_exit("num_threads value weird");
 	if(!cfg->do_ip4 && !cfg->do_ip6)
 		fatal_exit("ip4 and ip6 are both disabled, pointless");
+	if(!cfg->do_ip4 && cfg->prefer_ip4)
+		fatal_exit("cannot prefer and disable ip4, pointless");
 	if(!cfg->do_ip6 && cfg->prefer_ip6)
 		fatal_exit("cannot prefer and disable ip6, pointless");
 	if(!cfg->do_udp && !cfg->do_tcp)
@@ -462,19 +590,6 @@ morechecks(struct config_file* cfg, const char* fname)
 	if(cfg->chrootdir && cfg->chrootdir[0] &&
 		!is_dir(cfg->chrootdir)) {
 		fatal_exit("bad chroot directory");
-	}
-	if(cfg->chrootdir && cfg->chrootdir[0]) {
-		char buf[10240];
-		buf[0] = 0;
-		if(fname[0] != '/') {
-			if(getcwd(buf, sizeof(buf)) == NULL)
-				fatal_exit("getcwd: %s", strerror(errno));
-			(void)strlcat(buf, "/", sizeof(buf));
-		}
-		(void)strlcat(buf, fname, sizeof(buf));
-		if(strncmp(buf, cfg->chrootdir, strlen(cfg->chrootdir)) != 0)
-			fatal_exit("config file %s is not inside chroot %s",
-				buf, cfg->chrootdir);
 	}
 	if(cfg->directory && cfg->directory[0]) {
 		char* ad = fname_after_chroot(cfg->directory, cfg, 0);
@@ -509,8 +624,6 @@ morechecks(struct config_file* cfg, const char* fname)
 		cfg->auto_trust_anchor_file_list, cfg->chrootdir, cfg);
 	check_chroot_filelist_wild("trusted-keys-file",
 		cfg->trusted_keys_file_list, cfg->chrootdir, cfg);
-	check_chroot_string("dlv-anchor-file", &cfg->dlv_anchor_file,
-		cfg->chrootdir, cfg);
 #ifdef USE_IPSECMOD
 	if(cfg->ipsecmod_enabled && strstr(cfg->module_conf, "ipsecmod")) {
 		/* only check hook if enabled */
@@ -525,10 +638,7 @@ morechecks(struct config_file* cfg, const char* fname)
 	/* check that the modules listed in module_conf exist */
 	check_modules_exist(cfg->module_conf);
 
-	/* There should be no reason for 'respip' module not to work with
-	 * dns64, but it's not explicitly confirmed,  so the combination is
-	 * excluded below.   It's simply unknown yet for the combination of
-	 * respip and other modules. */
+	/* Respip is known to *not* work with dns64. */
 	if(strcmp(cfg->module_conf, "iterator") != 0
 		&& strcmp(cfg->module_conf, "validator iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 validator iterator") != 0
@@ -537,7 +647,9 @@ morechecks(struct config_file* cfg, const char* fname)
 		&& strcmp(cfg->module_conf, "respip validator iterator") != 0
 #ifdef WITH_PYTHONMODULE
 		&& strcmp(cfg->module_conf, "python iterator") != 0
+		&& strcmp(cfg->module_conf, "python respip iterator") != 0
 		&& strcmp(cfg->module_conf, "python validator iterator") != 0
+		&& strcmp(cfg->module_conf, "python respip validator iterator") != 0
 		&& strcmp(cfg->module_conf, "validator python iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 python iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 python validator iterator") != 0
@@ -545,9 +657,69 @@ morechecks(struct config_file* cfg, const char* fname)
 		&& strcmp(cfg->module_conf, "python dns64 iterator") != 0
 		&& strcmp(cfg->module_conf, "python dns64 validator iterator") != 0
 #endif
+#ifdef WITH_DYNLIBMODULE
+		&& strcmp(cfg->module_conf, "dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dynlib dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "python dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "python dynlib dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "python dynlib dynlib dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib respip iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dynlib dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "python dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "python dynlib dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "python dynlib dynlib dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib respip validator iterator") != 0
+		&& strcmp(cfg->module_conf, "validator dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 validator dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dns64 iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dns64 validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dns64 cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib dns64 validator cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 dynlib cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 dynlib validator cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib respip cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib validator cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib respip validator cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "cachedb dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "respip cachedb dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "validator cachedb dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "respip validator cachedb dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "validator dynlib cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "respip validator dynlib cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib subnetcache iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib respip subnetcache iterator") != 0
+		&& strcmp(cfg->module_conf, "subnetcache dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib subnetcache validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib respip subnetcache validator iterator") != 0
+		&& strcmp(cfg->module_conf, "subnetcache dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "subnetcache validator dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache validator dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib ipsecmod iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib ipsecmod respip iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod dynlib respip iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod respip validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib ipsecmod validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dynlib ipsecmod respip validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod dynlib validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod dynlib respip validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod validator dynlib iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod respip validator dynlib iterator") != 0
+#endif
 #ifdef USE_CACHEDB
 		&& strcmp(cfg->module_conf, "validator cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "respip validator cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "respip cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 validator cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 cachedb iterator") != 0
 #endif
@@ -557,35 +729,63 @@ morechecks(struct config_file* cfg, const char* fname)
 		&& strcmp(cfg->module_conf, "dns64 python cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 python validator cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "python cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "python respip cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "python validator cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "python respip validator cachedb iterator") != 0
 		&& strcmp(cfg->module_conf, "cachedb python iterator") != 0
+		&& strcmp(cfg->module_conf, "respip cachedb python iterator") != 0
 		&& strcmp(cfg->module_conf, "validator cachedb python iterator") != 0
+		&& strcmp(cfg->module_conf, "respip validator cachedb python iterator") != 0
 		&& strcmp(cfg->module_conf, "validator python cachedb iterator") != 0
+		&& strcmp(cfg->module_conf, "respip validator python cachedb iterator") != 0
 #endif
 #ifdef CLIENT_SUBNET
 		&& strcmp(cfg->module_conf, "subnetcache iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache iterator") != 0
 		&& strcmp(cfg->module_conf, "subnetcache validator iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache validator iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 subnetcache iterator") != 0
 		&& strcmp(cfg->module_conf, "dns64 subnetcache validator iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 subnetcache respip iterator") != 0
+		&& strcmp(cfg->module_conf, "dns64 subnetcache respip validator iterator") != 0
 #endif
 #if defined(WITH_PYTHONMODULE) && defined(CLIENT_SUBNET)
 		&& strcmp(cfg->module_conf, "python subnetcache iterator") != 0
+		&& strcmp(cfg->module_conf, "python respip subnetcache iterator") != 0
 		&& strcmp(cfg->module_conf, "subnetcache python iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache python iterator") != 0
 		&& strcmp(cfg->module_conf, "python subnetcache validator iterator") != 0
+		&& strcmp(cfg->module_conf, "python respip subnetcache validator iterator") != 0
 		&& strcmp(cfg->module_conf, "subnetcache python validator iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache python validator iterator") != 0
 		&& strcmp(cfg->module_conf, "subnetcache validator python iterator") != 0
+		&& strcmp(cfg->module_conf, "respip subnetcache validator python iterator") != 0
 #endif
 #ifdef USE_IPSECMOD
 		&& strcmp(cfg->module_conf, "ipsecmod iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod respip iterator") != 0
 		&& strcmp(cfg->module_conf, "ipsecmod validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod respip validator iterator") != 0
 #endif
 #if defined(WITH_PYTHONMODULE) && defined(USE_IPSECMOD)
 		&& strcmp(cfg->module_conf, "python ipsecmod iterator") != 0
+		&& strcmp(cfg->module_conf, "python ipsecmod respip iterator") != 0
 		&& strcmp(cfg->module_conf, "ipsecmod python iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod python respip iterator") != 0
 		&& strcmp(cfg->module_conf, "ipsecmod validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod respip validator iterator") != 0
 		&& strcmp(cfg->module_conf, "python ipsecmod validator iterator") != 0
+		&& strcmp(cfg->module_conf, "python ipsecmod respip validator iterator") != 0
 		&& strcmp(cfg->module_conf, "ipsecmod python validator iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod python respip validator iterator") != 0
 		&& strcmp(cfg->module_conf, "ipsecmod validator python iterator") != 0
+		&& strcmp(cfg->module_conf, "ipsecmod respip validator python iterator") != 0
+#endif
+#ifdef USE_IPSET
+		&& strcmp(cfg->module_conf, "validator ipset iterator") != 0
+		&& strcmp(cfg->module_conf, "validator ipset respip iterator") != 0
+		&& strcmp(cfg->module_conf, "ipset iterator") != 0
+		&& strcmp(cfg->module_conf, "ipset respip iterator") != 0
 #endif
 		) {
 		fatal_exit("module conf '%s' is not known to work",
@@ -615,6 +815,7 @@ morechecks(struct config_file* cfg, const char* fname)
 				cfg->control_cert_file);
 	}
 
+	donotquerylocalhostcheck(cfg);
 	localzonechecks(cfg);
 	view_and_respipchecks(cfg);
 #ifdef CLIENT_SUBNET
@@ -648,8 +849,9 @@ check_hints(struct config_file* cfg)
 static void
 check_auth(struct config_file* cfg)
 {
+	int is_rpz = 0;
 	struct auth_zones* az = auth_zones_create();
-	if(!az || !auth_zones_apply_cfg(az, cfg, 0)) {
+	if(!az || !auth_zones_apply_cfg(az, cfg, 0, &is_rpz)) {
 		fatal_exit("Could not setup authority zones");
 	}
 	auth_zones_delete(az);
@@ -680,7 +882,7 @@ checkconf(const char* cfgfile, const char* opt, int final)
 		config_delete(cfg);
 		return;
 	}
-	morechecks(cfg, cfgfile);
+	morechecks(cfg);
 	check_mod(cfg, iter_get_funcblock());
 	check_mod(cfg, val_get_funcblock());
 #ifdef WITH_PYTHONMODULE

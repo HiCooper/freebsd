@@ -79,7 +79,7 @@ union aopen_entry {
 	union aopen_entry *next;
 };
 
-/* cxgbe_snd_tag flags */
+/* cxgbe_rate_tag flags */
 enum {
 	EO_FLOWC_PENDING	= (1 << 0),	/* flowc needs to be sent */
 	EO_FLOWC_RPL_PENDING	= (1 << 1),	/* flowc credits due back */
@@ -87,7 +87,7 @@ enum {
 	EO_FLUSH_RPL_PENDING	= (1 << 3),	/* credit flush rpl due back */
 };
 
-struct cxgbe_snd_tag {
+struct cxgbe_rate_tag {
 	struct m_snd_tag com;
 	struct adapter *adapter;
 	u_int flags;
@@ -107,15 +107,14 @@ struct cxgbe_snd_tag {
 	uint8_t ncompl;		/* # of completions outstanding. */
 };
 
-static inline struct cxgbe_snd_tag *
-mst_to_cst(struct m_snd_tag *t)
+static inline struct cxgbe_rate_tag *
+mst_to_crt(struct m_snd_tag *t)
 {
-
-	return (__containerof(t, struct cxgbe_snd_tag, com));
+	return (__containerof(t, struct cxgbe_rate_tag, com));
 }
 
 union etid_entry {
-	struct cxgbe_snd_tag *cst;
+	struct cxgbe_rate_tag *cst;
 	union etid_entry *next;
 };
 
@@ -217,6 +216,7 @@ struct uld_info {
 	int uld_id;
 	int (*activate)(struct adapter *);
 	int (*deactivate)(struct adapter *);
+	void (*async_event)(struct adapter *);
 };
 
 struct tom_tunables {
@@ -225,6 +225,7 @@ struct tom_tunables {
 	int ddp;
 	int rx_coalesce;
 	int tls;
+	int tls_rx_timeout;
 	int *tls_rx_ports;
 	int num_tls_rx_ports;
 	int tx_align;
@@ -232,10 +233,17 @@ struct tom_tunables {
 	int cop_managed_offloading;
 	int autorcvbuf_inc;
 };
+
 /* iWARP driver tunables */
 struct iw_tunables {
 	int wc_en;
 };
+
+struct tls_tunables {
+	int inline_keys;
+	int combo_wrs;
+};
+
 #ifdef TCP_OFFLOAD
 int t4_register_uld(struct uld_info *);
 int t4_unregister_uld(struct uld_info *);

@@ -59,17 +59,17 @@ __FBSDID("$FreeBSD$");
 
 #define	RANDOM_UNIT	0
 
+/*
+ * In loadable random, the core randomdev.c / random(9) routines have static
+ * visibility and an alternative name to avoid conflicting with the function
+ * pointers of the real names in the core kernel.  random_alg_context_init
+ * installs pointers to the loadable static names into the core kernel's
+ * function pointers at SI_SUB_RANDOM:SI_ORDER_SECOND.
+ */
 #if defined(RANDOM_LOADABLE)
-#define READ_RANDOM_UIO	_read_random_uio
-#define READ_RANDOM	_read_random
-#define IS_RANDOM_SEEDED	_is_random_seeded
-static int READ_RANDOM_UIO(struct uio *, bool);
-static void READ_RANDOM(void *, u_int);
-static bool IS_RANDOM_SEEDED(void);
-#else
-#define READ_RANDOM_UIO	read_random_uio
-#define READ_RANDOM	read_random
-#define IS_RANDOM_SEEDED	is_random_seeded
+static int (read_random_uio)(struct uio *, bool);
+static void (read_random)(void *, u_int);
+static bool (is_random_seeded)(void);
 #endif
 
 static d_read_t randomdev_read;
@@ -89,30 +89,17 @@ static struct cdevsw random_cdevsw = {
 /* For use with make_dev(9)/destroy_dev(9). */
 static struct cdev *random_dev;
 
-static void
-random_alg_context_ra_init_alg(void *data)
-{
-
-	p_random_alg_context = &random_alg_context;
-	p_random_alg_context->ra_init_alg(data);
 #if defined(RANDOM_LOADABLE)
-	random_infra_init(READ_RANDOM_UIO, READ_RANDOM, IS_RANDOM_SEEDED);
-#endif
-}
-
 static void
-random_alg_context_ra_deinit_alg(void *data)
+random_alg_context_init(void *dummy __unused)
 {
-
-#if defined(RANDOM_LOADABLE)
-	random_infra_uninit();
-#endif
-	p_random_alg_context->ra_deinit_alg(data);
-	p_random_alg_context = NULL;
+	_read_random_uio = (read_random_uio);
+	_read_random = (read_random);
+	_is_random_seeded = (is_random_seeded);
 }
-
-SYSINIT(random_device, SI_SUB_RANDOM, SI_ORDER_THIRD, random_alg_context_ra_init_alg, NULL);
-SYSUNINIT(random_device, SI_SUB_RANDOM, SI_ORDER_THIRD, random_alg_context_ra_deinit_alg, NULL);
+SYSINIT(random_device, SI_SUB_RANDOM, SI_ORDER_SECOND, random_alg_context_init,
+    NULL);
+#endif
 
 static struct selinfo rsel;
 
@@ -124,7 +111,7 @@ static int
 randomdev_read(struct cdev *dev __unused, struct uio *uio, int flags)
 {
 
-	return (READ_RANDOM_UIO(uio, (flags & O_NONBLOCK) != 0));
+	return ((read_random_uio)(uio, (flags & O_NONBLOCK) != 0));
 }
 
 /*
@@ -154,7 +141,7 @@ randomdev_wait_until_seeded(bool interruptible)
 		if (spamcount == 0)
 			printf("random: %s unblock wait\n", __func__);
 		spamcount = (spamcount + 1) % 100;
-		error = tsleep(&random_alg_context, slpflags, "randseed",
+		error = tsleep(p_random_alg_context, slpflags, "randseed",
 		    hz / 10);
 		if (error == ERESTART || error == EINTR) {
 			KASSERT(interruptible,
@@ -170,19 +157,23 @@ randomdev_wait_until_seeded(bool interruptible)
 }
 
 int
-READ_RANDOM_UIO(struct uio *uio, bool nonblock)
+(read_random_uio)(struct uio *uio, bool nonblock)
 {
-	uint8_t *random_buf;
-	int error;
-	ssize_t read_len, total_read, c;
 	/* 16 MiB takes about 0.08 s CPU time on my 2017 AMD Zen CPU */
 #define SIGCHK_PERIOD (16 * 1024 * 1024)
 	const size_t sigchk_period = SIGCHK_PERIOD;
-
 	CTASSERT(SIGCHK_PERIOD % PAGE_SIZE == 0);
 #undef SIGCHK_PERIOD
 
-	random_buf = malloc(PAGE_SIZE, M_ENTROPY, M_WAITOK);
+	uint8_t *random_buf;
+	size_t total_read, read_len;
+	ssize_t bufsize;
+	int error;
+
+
+	KASSERT(uio->uio_rw == UIO_READ, ("%s: bogus write", __func__));
+	KASSERT(uio->uio_resid >= 0, ("%s: bogus negative resid", __func__));
+
 	p_random_alg_context->ra_pre_read();
 	error = 0;
 	/* (Un)Blocking logic */
@@ -193,45 +184,64 @@ READ_RANDOM_UIO(struct uio *uio, bool nonblock)
 			error = randomdev_wait_until_seeded(
 			    SEEDWAIT_INTERRUPTIBLE);
 	}
-	if (error == 0) {
-		read_rate_increment((uio->uio_resid + sizeof(uint32_t))/sizeof(uint32_t));
-		total_read = 0;
-		while (uio->uio_resid && !error) {
-			read_len = uio->uio_resid;
-			/*
-			 * Belt-and-braces.
-			 * Round up the read length to a crypto block size multiple,
-			 * which is what the underlying generator is expecting.
-			 * See the random_buf size requirements in the Fortuna code.
-			 */
-			read_len = roundup(read_len, RANDOM_BLOCKSIZE);
-			/* Work in chunks page-sized or less */
-			read_len = MIN(read_len, PAGE_SIZE);
-			p_random_alg_context->ra_read(random_buf, read_len);
-			c = MIN(uio->uio_resid, read_len);
-			/*
-			 * uiomove() may yield the CPU before each 'c' bytes
-			 * (up to PAGE_SIZE) are copied out.
-			 */
-			error = uiomove(random_buf, c, uio);
-			total_read += c;
-			/*
-			 * Poll for signals every few MBs to avoid very long
-			 * uninterruptible syscalls.
-			 */
-			if (error == 0 && uio->uio_resid != 0 &&
-			    total_read % sigchk_period == 0) {
-				error = tsleep_sbt(&random_alg_context, PCATCH,
-				    "randrd", SBT_1NS, 0, C_HARDCLOCK);
-				/* Squash tsleep timeout condition */
-				if (error == EWOULDBLOCK)
-					error = 0;
-			}
-		}
-		if (error == ERESTART || error == EINTR)
-			error = 0;
+	if (error != 0)
+		return (error);
+
+	read_rate_increment(howmany(uio->uio_resid + 1, sizeof(uint32_t)));
+	total_read = 0;
+
+	/* Easy to deal with the trivial 0 byte case. */
+	if (__predict_false(uio->uio_resid == 0))
+		return (0);
+
+	/*
+	 * If memory is plentiful, use maximally sized requests to avoid
+	 * per-call algorithm overhead.  But fall back to a single page
+	 * allocation if the full request isn't immediately available.
+	 */
+	bufsize = MIN(sigchk_period, (size_t)uio->uio_resid);
+	random_buf = malloc(bufsize, M_ENTROPY, M_NOWAIT);
+	if (random_buf == NULL) {
+		bufsize = PAGE_SIZE;
+		random_buf = malloc(bufsize, M_ENTROPY, M_WAITOK);
 	}
-	free(random_buf, M_ENTROPY);
+
+	error = 0;
+	while (uio->uio_resid > 0 && error == 0) {
+		read_len = MIN((size_t)uio->uio_resid, bufsize);
+
+		p_random_alg_context->ra_read(random_buf, read_len);
+
+		/*
+		 * uiomove() may yield the CPU before each 'read_len' bytes (up
+		 * to bufsize) are copied out.
+		 */
+		error = uiomove(random_buf, read_len, uio);
+		total_read += read_len;
+
+		/*
+		 * Poll for signals every few MBs to avoid very long
+		 * uninterruptible syscalls.
+		 */
+		if (error == 0 && uio->uio_resid != 0 &&
+		    total_read % sigchk_period == 0) {
+			error = tsleep_sbt(p_random_alg_context, PCATCH,
+			    "randrd", SBT_1NS, 0, C_HARDCLOCK);
+			/* Squash tsleep timeout condition */
+			if (error == EWOULDBLOCK)
+				error = 0;
+		}
+	}
+
+	/*
+	 * Short reads due to signal interrupt should not indicate error.
+	 * Instead, the uio will reflect that the read was shorter than
+	 * requested.
+	 */
+	if (error == ERESTART || error == EINTR)
+		error = 0;
+
+	zfree(random_buf, M_ENTROPY);
 	return (error);
 }
 
@@ -247,9 +257,8 @@ READ_RANDOM_UIO(struct uio *uio, bool nonblock)
  * 'kern.random.initial_seeding.read_random_bypassed_before_seeding'.
  */
 void
-READ_RANDOM(void *random_buf, u_int len)
+(read_random)(void *random_buf, u_int len)
 {
-	u_int read_directly_len;
 
 	KASSERT(random_buf != NULL, ("No suitable random buffer in %s", __func__));
 	p_random_alg_context->ra_pre_read();
@@ -278,27 +287,11 @@ READ_RANDOM(void *random_buf, u_int len)
 		(void)randomdev_wait_until_seeded(SEEDWAIT_UNINTERRUPTIBLE);
 	}
 	read_rate_increment(roundup2(len, sizeof(uint32_t)));
-	/*
-	 * The underlying generator expects multiples of
-	 * RANDOM_BLOCKSIZE.
-	 */
-	read_directly_len = rounddown(len, RANDOM_BLOCKSIZE);
-	if (read_directly_len > 0)
-		p_random_alg_context->ra_read(random_buf, read_directly_len);
-	if (read_directly_len < len) {
-		uint8_t remainder_buf[RANDOM_BLOCKSIZE];
-
-		p_random_alg_context->ra_read(remainder_buf,
-		    sizeof(remainder_buf));
-		memcpy((char *)random_buf + read_directly_len, remainder_buf,
-		    len - read_directly_len);
-
-		explicit_bzero(remainder_buf, sizeof(remainder_buf));
-	}
+	p_random_alg_context->ra_read(random_buf, len);
 }
 
 bool
-IS_RANDOM_SEEDED(void)
+(is_random_seeded)(void)
 {
 	return (p_random_alg_context->ra_seeded());
 }
@@ -349,7 +342,7 @@ randomdev_write(struct cdev *dev __unused, struct uio *uio, int flags __unused)
 		if (error)
 			break;
 		randomdev_accumulate(random_buf, c);
-		tsleep(&random_alg_context, 0, "randwr", hz/10);
+		tsleep(p_random_alg_context, 0, "randwr", hz/10);
 	}
 	if (nbytes != uio->uio_resid && (error == ERESTART || error == EINTR))
 		/* Partial write, not error. */
@@ -378,10 +371,12 @@ randomdev_unblock(void)
 {
 
 	selwakeuppri(&rsel, PUSER);
-	wakeup(&random_alg_context);
+	wakeup(p_random_alg_context);
 	printf("random: unblocking device.\n");
+#ifndef RANDOM_FENESTRASX
 	/* Do random(9) a favour while we are about it. */
 	(void)atomic_cmpset_int(&arc4rand_iniseed_state, ARC4_ENTR_NONE, ARC4_ENTR_HAVE);
+#endif
 }
 
 /* ARGSUSED */
@@ -403,62 +398,6 @@ randomdev_ioctl(struct cdev *dev __unused, u_long cmd, caddr_t addr __unused,
 	return (error);
 }
 
-void
-random_source_register(struct random_source *rsource)
-{
-	struct random_sources *rrs;
-
-	KASSERT(rsource != NULL, ("invalid input to %s", __func__));
-
-	rrs = malloc(sizeof(*rrs), M_ENTROPY, M_WAITOK);
-	rrs->rrs_source = rsource;
-
-	random_harvest_register_source(rsource->rs_source);
-
-	printf("random: registering fast source %s\n", rsource->rs_ident);
-	LIST_INSERT_HEAD(&source_list, rrs, rrs_entries);
-}
-
-void
-random_source_deregister(struct random_source *rsource)
-{
-	struct random_sources *rrs = NULL;
-
-	KASSERT(rsource != NULL, ("invalid input to %s", __func__));
-
-	random_harvest_deregister_source(rsource->rs_source);
-
-	LIST_FOREACH(rrs, &source_list, rrs_entries)
-		if (rrs->rrs_source == rsource) {
-			LIST_REMOVE(rrs, rrs_entries);
-			break;
-		}
-	if (rrs != NULL)
-		free(rrs, M_ENTROPY);
-}
-
-static int
-random_source_handler(SYSCTL_HANDLER_ARGS)
-{
-	struct random_sources *rrs;
-	struct sbuf sbuf;
-	int error, count;
-
-	sbuf_new_for_sysctl(&sbuf, NULL, 64, req);
-	count = 0;
-	LIST_FOREACH(rrs, &source_list, rrs_entries) {
-		sbuf_cat(&sbuf, (count++ ? ",'" : "'"));
-		sbuf_cat(&sbuf, rrs->rrs_source->rs_ident);
-		sbuf_cat(&sbuf, "'");
-	}
-	error = sbuf_finish(&sbuf);
-	sbuf_delete(&sbuf);
-	return (error);
-}
-SYSCTL_PROC(_kern_random, OID_AUTO, random_sources, CTLTYPE_STRING | CTLFLAG_RD | CTLFLAG_MPSAFE,
-	    NULL, 0, random_source_handler, "A",
-	    "List of active fast entropy sources.");
-
 /* ARGSUSED */
 static int
 randomdev_modevent(module_t mod __unused, int type, void *data __unused)
@@ -473,7 +412,7 @@ randomdev_modevent(module_t mod __unused, int type, void *data __unused)
 		make_dev_alias(random_dev, "urandom"); /* compatibility */
 		break;
 	case MOD_UNLOAD:
-		destroy_dev(random_dev);
+		error = EBUSY;
 		break;
 	case MOD_SHUTDOWN:
 		break;

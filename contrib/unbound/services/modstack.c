@@ -51,6 +51,9 @@
 #ifdef WITH_PYTHONMODULE
 #include "pythonmod/pythonmod.h"
 #endif
+#ifdef WITH_DYNLIBMODULE
+#include "dynlibmod/dynlibmod.h"
+#endif
 #ifdef USE_CACHEDB
 #include "cachedb/cachedb.h"
 #endif
@@ -59,6 +62,9 @@
 #endif
 #ifdef CLIENT_SUBNET
 #include "edns-subnet/subnetmod.h"
+#endif
+#ifdef USE_IPSET
+#include "ipset/ipset.h"
 #endif
 
 /** count number of modules (words) in the string */
@@ -113,8 +119,14 @@ modstack_config(struct module_stack* stack, const char* module_conf)
         for(i=0; i<stack->num; i++) {
                 stack->mod[i] = module_factory(&module_conf);
                 if(!stack->mod[i]) {
-                        log_err("Unknown value for next module: '%s'",
-                                module_conf);
+			char md[256];
+			snprintf(md, sizeof(md), "%s", module_conf);
+			if(strchr(md, ' ')) *(strchr(md, ' ')) = 0;
+			if(strchr(md, '\t')) *(strchr(md, '\t')) = 0;
+                        log_err("Unknown value in module-config, module: '%s'."
+				" This module is not present (not compiled in),"
+				" See the list of linked modules with unbound -h",
+                                md);
                         return 0;
                 }
         }
@@ -131,6 +143,9 @@ module_list_avail(void)
 #ifdef WITH_PYTHONMODULE
 		"python",
 #endif
+#ifdef WITH_DYNLIBMODULE
+		"dynlib",
+#endif
 #ifdef USE_CACHEDB
 		"cachedb",
 #endif
@@ -139,6 +154,9 @@ module_list_avail(void)
 #endif
 #ifdef CLIENT_SUBNET
 		"subnetcache",
+#endif
+#ifdef USE_IPSET
+                "ipset",
 #endif
 		"respip",
 		"validator",
@@ -159,6 +177,9 @@ module_funcs_avail(void)
 #ifdef WITH_PYTHONMODULE
 		&pythonmod_get_funcblock,
 #endif
+#ifdef WITH_DYNLIBMODULE
+		&dynlibmod_get_funcblock,
+#endif
 #ifdef USE_CACHEDB
 		&cachedb_get_funcblock,
 #endif
@@ -167,6 +188,9 @@ module_funcs_avail(void)
 #endif
 #ifdef CLIENT_SUBNET
 		&subnetmod_get_funcblock,
+#endif
+#ifdef USE_IPSET
+		&ipset_get_funcblock,
 #endif
 		&respip_get_funcblock,
 		&val_get_funcblock,

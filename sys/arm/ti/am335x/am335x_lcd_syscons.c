@@ -441,7 +441,6 @@ am335x_syscons_init(int unit, video_adapter_t *adp, int flags)
 	sc->xmargin = (sc->width - (vi->vi_width * vi->vi_cwidth)) / 2;
 	sc->ymargin = (sc->height - (vi->vi_height * vi->vi_cheight))/2;
 
-
 	adp->va_window = (vm_offset_t) am335x_syscons_static_window;
 	adp->va_flags |= V_ADP_FONT /* | V_ADP_COLOR | V_ADP_MODECHANGE */;
 
@@ -770,22 +769,3 @@ int am335x_lcd_syscons_setup(vm_offset_t vaddr, vm_paddr_t paddr,
 
 	return (0);
 }
-
-/*
- * Define a stub keyboard driver in case one hasn't been
- * compiled into the kernel
- */
-#include <sys/kbio.h>
-#include <dev/kbd/kbdreg.h>
-
-static int dummy_kbd_configure(int flags);
-
-keyboard_switch_t am335x_dummysw;
-
-static int
-dummy_kbd_configure(int flags)
-{
-
-	return (0);
-}
-KEYBOARD_DRIVER(am335x_dummy, am335x_dummysw, dummy_kbd_configure);

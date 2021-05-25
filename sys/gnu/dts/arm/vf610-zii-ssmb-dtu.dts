@@ -37,7 +37,6 @@
 			label = "zii:green:debug1";
 			gpios = <&gpio2 18 GPIO_ACTIVE_HIGH>;
 			linux,default-trigger = "heartbeat";
-			max-brightness = <1>;
 		};
 	};
 
@@ -46,6 +45,14 @@
 		regulator-name = "vcc_3v3_mcu";
 		regulator-min-microvolt = <3300000>;
 		regulator-max-microvolt = <3300000>;
+	};
+
+	supply-voltage-monitor {
+		compatible = "iio-hwmon";
+		io-channels = <&adc0 8>, /* 12V_MAIN */
+			      <&adc0 9>, /* +3.3V    */
+			      <&adc1 8>, /* VCC_1V5  */
+			      <&adc1 9>; /* VCC_1V2  */
 	};
 };
 
@@ -209,6 +216,10 @@
 		compatible = "atmel,24c04";
 		reg = <0x52>;
 	};
+};
+
+&snvsrtc {
+	status = "disabled";
 };
 
 &uart0 {

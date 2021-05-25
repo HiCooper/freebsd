@@ -176,6 +176,8 @@ typedef enum {
 	PJT_MUTEX_CONSISTENT,
 	PJT_MUTEXATTR_GETROBUST,
 	PJT_MUTEXATTR_SETROBUST,
+	PJT_GETTHREADID_NP,
+	PJT_ATTR_GET_NP,
 	PJT_MAX
 } pjt_index_t;
 
@@ -330,6 +332,7 @@ int		__sys_clock_gettime(__clockid_t, struct timespec *ts);
 int		__sys_clock_nanosleep(__clockid_t, int,
 		    const struct timespec *, struct timespec *);
 int		__sys_close(int);
+int		__sys_close_range(unsigned, unsigned, int);
 int		__sys_connect(int, const struct sockaddr *, __socklen_t);
 int		__sys_fcntl(int, int, ...);
 int		__sys_fdatasync(int);
@@ -390,6 +393,7 @@ __pid_t		__sys_wait6(enum idtype, __id_t, int *, int,
 		    struct __wrusage *, struct __siginfo *);
 __ssize_t	__sys_write(int, const void *, __size_t);
 __ssize_t	__sys_writev(int, const struct iovec *, int);
+int		__sys_shm_open2(const char *, int, __mode_t, int, const char *);
 
 int		__libc_sigaction(int, const struct sigaction *,
 		    struct sigaction *) __hidden;
@@ -426,5 +430,10 @@ void	___pthread_cleanup_push_imp(void (*)(void *), void *,
 void	___pthread_cleanup_pop_imp(int);
 
 void __throw_constraint_handler_s(const char * restrict msg, int error);
+
+struct __nl_cat_d;
+struct _xlocale;
+struct __nl_cat_d *__catopen_l(const char *name, int type,
+	    struct _xlocale *locale);
 
 #endif /* _LIBC_PRIVATE_H_ */

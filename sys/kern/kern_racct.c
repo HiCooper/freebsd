@@ -2,7 +2,6 @@
  * SPDX-License-Identifier: BSD-2-Clause-FreeBSD
  *
  * Copyright (c) 2010 The FreeBSD Foundation
- * All rights reserved.
  *
  * This software was developed by Edward Tomasz Napierala under sponsorship
  * from the FreeBSD Foundation.
@@ -79,7 +78,8 @@ bool __read_frequently racct_enable = false;
 bool __read_frequently racct_enable = true;
 #endif
 
-SYSCTL_NODE(_kern, OID_AUTO, racct, CTLFLAG_RW, 0, "Resource Accounting");
+SYSCTL_NODE(_kern, OID_AUTO, racct, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "Resource Accounting");
 SYSCTL_BOOL(_kern_racct, OID_AUTO, enable, CTLFLAG_RDTUN, &racct_enable,
     0, "Enable RACCT/RCTL");
 SYSCTL_UINT(_kern_racct, OID_AUTO, pcpu_threshold, CTLFLAG_RW, &pcpu_threshold,
@@ -527,7 +527,7 @@ racct_adjust_resource(struct racct *racct, int resource,
 		    ("%s: resource %d usage < 0", __func__, resource));
 		racct->r_resources[resource] = 0;
 	}
-	
+
 	/*
 	 * There are some cases where the racct %cpu resource would grow
 	 * beyond 100% per core.  For example in racct_proc_exit() we add
@@ -1145,6 +1145,8 @@ racct_proc_throttle(struct proc *p, int timeout)
 
 	FOREACH_THREAD_IN_PROC(p, td) {
 		thread_lock(td);
+		td->td_flags |= TDF_ASTPENDING;
+
 		switch (td->td_state) {
 		case TDS_RUNQ:
 			/*
@@ -1256,17 +1258,11 @@ racctd(void)
 
 		sx_slock(&allproc_lock);
 
-		sx_slock(&zombproc_lock);
-		LIST_FOREACH(p, &zombproc, p_list) {
-			PROC_LOCK(p);
-			racct_set(p, RACCT_PCTCPU, 0);
-			PROC_UNLOCK(p);
-		}
-		sx_sunlock(&zombproc_lock);
-
 		FOREACH_PROC_IN_SYSTEM(p) {
 			PROC_LOCK(p);
 			if (p->p_state != PRS_NORMAL) {
+				if (p->p_state == PRS_ZOMBIE)
+					racct_set(p, RACCT_PCTCPU, 0);
 				PROC_UNLOCK(p);
 				continue;
 			}

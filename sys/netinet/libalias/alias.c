@@ -153,7 +153,8 @@ __FBSDID("$FreeBSD$");
 
 SYSCTL_DECL(_net_inet);
 SYSCTL_DECL(_net_inet_ip);
-SYSCTL_NODE(_net_inet_ip, OID_AUTO, alias, CTLFLAG_RW, NULL, "Libalias sysctl API");
+SYSCTL_NODE(_net_inet_ip, OID_AUTO, alias, CTLFLAG_RW | CTLFLAG_MPSAFE, NULL,
+    "Libalias sysctl API");
 
 #endif
 
@@ -187,7 +188,6 @@ a timeout period.
 static void	TcpMonitorIn(u_char, struct alias_link *);
 
 static void	TcpMonitorOut(u_char, struct alias_link *);
-
 
 static void
 TcpMonitorIn(u_char th_flags, struct alias_link *lnk)
@@ -224,10 +224,6 @@ TcpMonitorOut(u_char th_flags, struct alias_link *lnk)
 		break;
 	}
 }
-
-
-
-
 
 /* Protocol Specific Packet Aliasing Routines
 
@@ -268,7 +264,6 @@ All packets go through the aliasing mechanism, whether they come from
 the gateway machine or other machines on a local area network.
 */
 
-
 /* Local prototypes */
 static int	IcmpAliasIn1(struct libalias *, struct ip *);
 static int	IcmpAliasIn2(struct libalias *, struct ip *);
@@ -289,7 +284,6 @@ static int	UdpAliasOut(struct libalias *, struct ip *, int, int create);
 
 static int	TcpAliasIn(struct libalias *, struct ip *);
 static int	TcpAliasOut(struct libalias *, struct ip *, int, int create);
-
 
 static int
 IcmpAliasIn1(struct libalias *la, struct ip *pip)
@@ -437,14 +431,18 @@ fragment contained in ICMP data section */
 	return (PKT_ALIAS_IGNORED);
 }
 
-
 static int
 IcmpAliasIn(struct libalias *la, struct ip *pip)
 {
-	int iresult;
 	struct icmp *ic;
+	int dlen, iresult;
 
 	LIBALIAS_LOCK_ASSERT(la);
+
+	dlen = ntohs(pip->ip_len) - (pip->ip_hl << 2);
+	if (dlen < ICMP_MINLEN)
+		return (PKT_ALIAS_IGNORED);
+
 /* Return if proxy-only mode is enabled */
 	if (la->packetAliasMode & PKT_ALIAS_PROXY_ONLY)
 		return (PKT_ALIAS_OK);
@@ -463,6 +461,9 @@ IcmpAliasIn(struct libalias *la, struct ip *pip)
 	case ICMP_SOURCEQUENCH:
 	case ICMP_TIMXCEED:
 	case ICMP_PARAMPROB:
+		if (dlen < ICMP_ADVLENMIN ||
+		    dlen < ICMP_ADVLEN(ic))
+			return (PKT_ALIAS_IGNORED);
 		iresult = IcmpAliasIn2(la, pip);
 		break;
 	case ICMP_ECHO:
@@ -472,7 +473,6 @@ IcmpAliasIn(struct libalias *la, struct ip *pip)
 	}
 	return (iresult);
 }
-
 
 static int
 IcmpAliasOut1(struct libalias *la, struct ip *pip, int create)
@@ -517,7 +517,6 @@ IcmpAliasOut1(struct libalias *la, struct ip *pip, int create)
 	}
 	return (PKT_ALIAS_IGNORED);
 }
-
 
 static int
 IcmpAliasOut2(struct libalias *la, struct ip *pip)
@@ -618,7 +617,6 @@ fragment contained in ICMP data section */
 	}
 	return (PKT_ALIAS_IGNORED);
 }
-
 
 static int
 IcmpAliasOut(struct libalias *la, struct ip *pip, int create)
@@ -725,16 +723,22 @@ ProtoAliasOut(struct libalias *la, struct in_addr *ip_src,
 	return (PKT_ALIAS_IGNORED);
 }
 
-
 static int
 UdpAliasIn(struct libalias *la, struct ip *pip)
 {
 	struct udphdr *ud;
 	struct alias_link *lnk;
+	int dlen;
 
 	LIBALIAS_LOCK_ASSERT(la);
 
+	dlen = ntohs(pip->ip_len) - (pip->ip_hl << 2);
+	if (dlen < sizeof(struct udphdr))
+		return (PKT_ALIAS_IGNORED);
+
 	ud = (struct udphdr *)ip_next(pip);
+	if (dlen < ntohs(ud->uh_ulen))
+		return (PKT_ALIAS_IGNORED);
 
 	lnk = FindUdpTcpIn(la, pip->ip_src, pip->ip_dst,
 	    ud->uh_sport, ud->uh_dport,
@@ -823,12 +827,19 @@ UdpAliasOut(struct libalias *la, struct ip *pip, int maxpacketsize, int create)
 	u_short dest_port;
 	u_short proxy_server_port;
 	int proxy_type;
-	int error;
+	int dlen, error;
 
 	LIBALIAS_LOCK_ASSERT(la);
 
 /* Return if proxy-only mode is enabled and not proxyrule found.*/
+	dlen = ntohs(pip->ip_len) - (pip->ip_hl << 2);
+	if (dlen < sizeof(struct udphdr))
+		return (PKT_ALIAS_IGNORED);
+
 	ud = (struct udphdr *)ip_next(pip);
+	if (dlen < ntohs(ud->uh_ulen))
+		return (PKT_ALIAS_IGNORED);
+
 	proxy_type = ProxyCheck(la, &proxy_server_address, 
 		&proxy_server_port, pip->ip_src, pip->ip_dst, 
 		ud->uh_dport, pip->ip_p);
@@ -914,15 +925,18 @@ UdpAliasOut(struct libalias *la, struct ip *pip, int maxpacketsize, int create)
 	return (PKT_ALIAS_IGNORED);
 }
 
-
-
 static int
 TcpAliasIn(struct libalias *la, struct ip *pip)
 {
 	struct tcphdr *tc;
 	struct alias_link *lnk;
+	int dlen;
 
 	LIBALIAS_LOCK_ASSERT(la);
+
+	dlen = ntohs(pip->ip_len) - (pip->ip_hl << 2);
+	if (dlen < sizeof(struct tcphdr))
+		return (PKT_ALIAS_IGNORED);
 	tc = (struct tcphdr *)ip_next(pip);
 
 	lnk = FindUdpTcpIn(la, pip->ip_src, pip->ip_dst,
@@ -1041,7 +1055,7 @@ TcpAliasIn(struct libalias *la, struct ip *pip)
 static int
 TcpAliasOut(struct libalias *la, struct ip *pip, int maxpacketsize, int create)
 {
-	int proxy_type, error;
+	int dlen, proxy_type, error;
 	u_short dest_port;
 	u_short proxy_server_port;
 	struct in_addr dest_address;
@@ -1050,6 +1064,10 @@ TcpAliasOut(struct libalias *la, struct ip *pip, int maxpacketsize, int create)
 	struct alias_link *lnk;
 
 	LIBALIAS_LOCK_ASSERT(la);
+
+	dlen = ntohs(pip->ip_len) - (pip->ip_hl << 2);
+	if (dlen < sizeof(struct tcphdr))
+		return (PKT_ALIAS_IGNORED);
 	tc = (struct tcphdr *)ip_next(pip);
 
 	if (create)
@@ -1153,9 +1171,6 @@ TcpAliasOut(struct libalias *la, struct ip *pip, int maxpacketsize, int create)
 	return (PKT_ALIAS_IGNORED);
 }
 
-
-
-
 /* Fragment Handling
 
     FragmentIn()
@@ -1209,11 +1224,6 @@ FragmentOut(struct libalias *la, struct in_addr *ip_src, u_short *ip_sum)
 
 	return (PKT_ALIAS_OK);
 }
-
-
-
-
-
 
 /* Outside World Access
 
@@ -1397,8 +1407,6 @@ getout:
 	return (iresult);
 }
 
-
-
 /* Unregistered address ranges */
 
 /* 10.0.0.0   ->   10.255.255.255 */
@@ -1412,6 +1420,10 @@ getout:
 /* 192.168.0.0 -> 192.168.255.255 */
 #define UNREG_ADDR_C_LOWER 0xc0a80000
 #define UNREG_ADDR_C_UPPER 0xc0a8ffff
+
+/* 100.64.0.0  -> 100.127.255.255 (RFC 6598 - Carrier Grade NAT) */
+#define UNREG_ADDR_CGN_LOWER 0x64400000
+#define UNREG_ADDR_CGN_UPPER 0x647fffff
 
 int
 LibAliasOut(struct libalias *la, char *ptr, int maxpacketsize)
@@ -1464,7 +1476,8 @@ LibAliasOutLocked(struct libalias *la, char *ptr,	/* valid IP packet */
 	}
 
 	addr_save = GetDefaultAliasAddress(la);
-	if (la->packetAliasMode & PKT_ALIAS_UNREGISTERED_ONLY) {
+	if (la->packetAliasMode & PKT_ALIAS_UNREGISTERED_ONLY ||
+	    la->packetAliasMode & PKT_ALIAS_UNREGISTERED_CGN) {
 		u_long addr;
 		int iclass;
 
@@ -1476,6 +1489,9 @@ LibAliasOutLocked(struct libalias *la, char *ptr,	/* valid IP packet */
 			iclass = 2;
 		else if (addr >= UNREG_ADDR_A_LOWER && addr <= UNREG_ADDR_A_UPPER)
 			iclass = 1;
+		else if (addr >= UNREG_ADDR_CGN_LOWER && addr <= UNREG_ADDR_CGN_UPPER &&
+		    la->packetAliasMode & PKT_ALIAS_UNREGISTERED_CGN)
+			iclass = 4;
 
 		if (iclass == 0) {
 			SetDefaultAliasAddress(la, pip->ip_src);
@@ -1610,7 +1626,6 @@ LibAliasUnaliasOut(struct libalias *la, char *ptr,	/* valid IP packet */
 			iresult = PKT_ALIAS_OK;
 
 		} else if (pip->ip_p == IPPROTO_ICMP) {
-
 			int accumulate;
 			struct in_addr original_address;
 			u_short original_id;

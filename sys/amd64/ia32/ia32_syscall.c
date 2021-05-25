@@ -52,7 +52,6 @@ __FBSDID("$FreeBSD$");
 #include <sys/bus.h>
 #include <sys/systm.h>
 #include <sys/proc.h>
-#include <sys/pioctl.h>
 #include <sys/kernel.h>
 #include <sys/ktr.h>
 #include <sys/lock.h>
@@ -181,15 +180,14 @@ ia32_fetch_syscall_args(struct thread *td)
  		sa->callp = &p->p_sysent->sv_table[0];
   	else
  		sa->callp = &p->p_sysent->sv_table[sa->code];
-	sa->narg = sa->callp->sy_narg;
 
-	if (params != NULL && sa->narg != 0)
+	if (params != NULL && sa->callp->sy_narg != 0)
 		error = copyin(params, (caddr_t)args,
-		    (u_int)(sa->narg * sizeof(int)));
+		    (u_int)(sa->callp->sy_narg * sizeof(int)));
 	else
 		error = 0;
 
-	for (i = 0; i < sa->narg; i++)
+	for (i = 0; i < sa->callp->sy_narg; i++)
 		sa->args[i] = args[i];
 
 	if (error == 0) {
@@ -207,14 +205,13 @@ ia32_syscall(struct trapframe *frame)
 {
 	struct thread *td;
 	register_t orig_tf_rflags;
-	int error;
 	ksiginfo_t ksi;
 
 	orig_tf_rflags = frame->tf_rflags;
 	td = curthread;
 	td->td_frame = frame;
 
-	error = syscallenter(td);
+	syscallenter(td);
 
 	/*
 	 * Traced syscall.
@@ -228,8 +225,8 @@ ia32_syscall(struct trapframe *frame)
 		trapsignal(td, &ksi);
 	}
 
-	syscallret(td, error);
-	amd64_syscall_ret_flush_l1d(error);
+	syscallret(td);
+	amd64_syscall_ret_flush_l1d(td->td_errno);
 }
 
 static void

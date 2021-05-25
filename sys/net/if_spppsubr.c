@@ -742,7 +742,7 @@ static void
 sppp_ifstart_sched(void *dummy)
 {
 	struct sppp *sp = dummy;
-	
+
 	sp->if_start(SP2IFP(sp));
 }
 
@@ -1005,7 +1005,7 @@ sppp_attach(struct ifnet *ifp)
 
 	/* Initialize mtx lock */
 	mtx_init(&sp->mtx, "sppp", MTX_NETWORK_LOCK, MTX_DEF | MTX_RECURSE);
-	
+
 	/* Initialize keepalive handler. */
  	callout_init(&sp->keepalive_callout, 1);
 	callout_reset(&sp->keepalive_callout, hz * 10, sppp_keepalive,
@@ -1060,15 +1060,13 @@ sppp_detach(struct ifnet *ifp)
 	KASSERT(mtx_initialized(&sp->mtx), ("sppp mutex is not initialized"));
 
 	/* Stop keepalive handler. */
- 	if (!callout_drain(&sp->keepalive_callout))
-		callout_stop(&sp->keepalive_callout);
+ 	callout_drain(&sp->keepalive_callout);
 
 	for (i = 0; i < IDX_COUNT; i++) {
-		if (!callout_drain(&sp->ch[i]))
-			callout_stop(&sp->ch[i]);
+		callout_drain(&sp->ch[i]);
 	}
-	if (!callout_drain(&sp->pap_my_to_ch))
-		callout_stop(&sp->pap_my_to_ch);
+	callout_drain(&sp->pap_my_to_ch);
+
 	mtx_destroy(&sp->pp_cpq.ifq_mtx);
 	mtx_destroy(&sp->pp_fastq.ifq_mtx);
 	mtx_destroy(&sp->mtx);
@@ -1865,7 +1863,6 @@ sppp_cp_input(const struct cp *cp, struct sppp *sp, struct mbuf *m)
 	}
 }
 
-
 /*
  * The generic part of all Up/Down/Open/Close/TO event handlers.
  * Basically, the state transition handling in the automaton.
@@ -1932,7 +1929,6 @@ sppp_down_event(const struct cp *cp, struct sppp *sp)
 	}
 }
 
-
 static void
 sppp_open_event(const struct cp *cp, struct sppp *sp)
 {
@@ -1981,7 +1977,6 @@ sppp_open_event(const struct cp *cp, struct sppp *sp)
 		break;
 	}
 }
-
 
 static void
 sppp_close_event(const struct cp *cp, struct sppp *sp)
@@ -2682,7 +2677,7 @@ sppp_lcp_tlu(struct sppp *sp)
 	/* notify low-level driver of state change */
 	if (sp->pp_chg)
 		sp->pp_chg(sp, (int)sp->pp_phase);
-	
+
 	if (sp->pp_phase == PHASE_NETWORK)
 		/* if no NCP is starting, close down */
 		sppp_lcp_check_and_close(sp);
@@ -3072,7 +3067,6 @@ sppp_ipcp_RCR(struct sppp *sp, struct lcp_header *h, int len)
 				else
 					log(-1, "%s [not agreed] ",
 						sppp_dotted_quad(desiredaddr));
-
 			}
 			p[2] = hisaddr >> 24;
 			p[3] = hisaddr >> 16;
@@ -3838,7 +3832,6 @@ static void sppp_ipv6cp_down(struct sppp *sp)
 {
 }
 
-
 static void sppp_ipv6cp_open(struct sppp *sp)
 {
 }
@@ -4190,7 +4183,6 @@ sppp_chap_input(struct sppp *sp, struct mbuf *m)
 			log(-1, ">\n");
 		}
 		break;
-
 	}
 }
 
@@ -4508,7 +4500,6 @@ sppp_pap_input(struct sppp *sp, struct mbuf *m)
 			log(-1, ">\n");
 		}
 		break;
-
 	}
 }
 
@@ -4803,7 +4794,7 @@ sppp_keepalive(void *dummy)
 		sppp_cisco_send (sp, CISCO_KEEPALIVE_REQ,
 			 ++sp->pp_seq[IDX_LCP],	sp->pp_rseq[IDX_LCP]);
 	else if (sp->pp_phase >= PHASE_AUTHENTICATE) {
-		long nmagic = htonl (sp->lcp.magic);
+		uint32_t nmagic = htonl(sp->lcp.magic);
 		sp->lcp.echoid = ++sp->pp_seq[IDX_LCP];
 		sppp_cp_send (sp, PPP_LCP, ECHO_REQ,
 			sp->lcp.echoid, 4, &nmagic);
@@ -4820,6 +4811,7 @@ out:
 void
 sppp_get_ip_addrs(struct sppp *sp, u_long *src, u_long *dst, u_long *srcmask)
 {
+	struct epoch_tracker et;
 	struct ifnet *ifp = SP2IFP(sp);
 	struct ifaddr *ifa;
 	struct sockaddr_in *si, *sm;
@@ -4832,7 +4824,7 @@ sppp_get_ip_addrs(struct sppp *sp, u_long *src, u_long *dst, u_long *srcmask)
 	 * aliases don't make any sense on a p2p link anyway.
 	 */
 	si = NULL;
-	if_addr_rlock(ifp);
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link)
 		if (ifa->ifa_addr->sa_family == AF_INET) {
 			si = (struct sockaddr_in *)ifa->ifa_addr;
@@ -4851,7 +4843,7 @@ sppp_get_ip_addrs(struct sppp *sp, u_long *src, u_long *dst, u_long *srcmask)
 		if (si && si->sin_addr.s_addr)
 			ddst = si->sin_addr.s_addr;
 	}
-	if_addr_runlock(ifp);
+	NET_EPOCH_EXIT(et);
 
 	if (dst) *dst = ntohl(ddst);
 	if (src) *src = ntohl(ssrc);
@@ -4865,6 +4857,7 @@ static void
 sppp_set_ip_addr(struct sppp *sp, u_long src)
 {
 	STDDCL;
+	struct epoch_tracker et;
 	struct ifaddr *ifa;
 	struct sockaddr_in *si;
 	struct in_ifaddr *ia;
@@ -4874,7 +4867,7 @@ sppp_set_ip_addr(struct sppp *sp, u_long src)
 	 * aliases don't make any sense on a p2p link anyway.
 	 */
 	si = NULL;
-	if_addr_rlock(ifp);
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
 		if (ifa->ifa_addr->sa_family == AF_INET) {
 			si = (struct sockaddr_in *)ifa->ifa_addr;
@@ -4884,7 +4877,7 @@ sppp_set_ip_addr(struct sppp *sp, u_long src)
 			}
 		}
 	}
-	if_addr_runlock(ifp);
+	NET_EPOCH_EXIT(et);
 
 	if (ifa != NULL) {
 		int error;
@@ -4923,6 +4916,7 @@ static void
 sppp_get_ip6_addrs(struct sppp *sp, struct in6_addr *src, struct in6_addr *dst,
 		   struct in6_addr *srcmask)
 {
+	struct epoch_tracker et;
 	struct ifnet *ifp = SP2IFP(sp);
 	struct ifaddr *ifa;
 	struct sockaddr_in6 *si, *sm;
@@ -4936,7 +4930,7 @@ sppp_get_ip6_addrs(struct sppp *sp, struct in6_addr *src, struct in6_addr *dst,
 	 * aliases don't make any sense on a p2p link anyway.
 	 */
 	si = NULL;
-	if_addr_rlock(ifp);
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link)
 		if (ifa->ifa_addr->sa_family == AF_INET6) {
 			si = (struct sockaddr_in6 *)ifa->ifa_addr;
@@ -4962,7 +4956,7 @@ sppp_get_ip6_addrs(struct sppp *sp, struct in6_addr *src, struct in6_addr *dst,
 		bcopy(&ddst, dst, sizeof(*dst));
 	if (src)
 		bcopy(&ssrc, src, sizeof(*src));
-	if_addr_runlock(ifp);
+	NET_EPOCH_EXIT(et);
 }
 
 #ifdef IPV6CP_MYIFID_DYN
@@ -4982,6 +4976,7 @@ static void
 sppp_set_ip6_addr(struct sppp *sp, const struct in6_addr *src)
 {
 	STDDCL;
+	struct epoch_tracker et;
 	struct ifaddr *ifa;
 	struct sockaddr_in6 *sin6;
 
@@ -4991,7 +4986,7 @@ sppp_set_ip6_addr(struct sppp *sp, const struct in6_addr *src)
 	 */
 
 	sin6 = NULL;
-	if_addr_rlock(ifp);
+	NET_EPOCH_ENTER(et);
 	CK_STAILQ_FOREACH(ifa, &ifp->if_addrhead, ifa_link) {
 		if (ifa->ifa_addr->sa_family == AF_INET6) {
 			sin6 = (struct sockaddr_in6 *)ifa->ifa_addr;
@@ -5001,7 +4996,7 @@ sppp_set_ip6_addr(struct sppp *sp, const struct in6_addr *src)
 			}
 		}
 	}
-	if_addr_runlock(ifp);
+	NET_EPOCH_EXIT(et);
 
 	if (ifa != NULL) {
 		int error;
@@ -5225,7 +5220,6 @@ sppp_phase_network(struct sppp *sp)
 	/* if no NCP is starting, all this was in vain, close down */
 	sppp_lcp_check_and_close(sp);
 }
-
 
 static const char *
 sppp_cp_type_name(u_char type)

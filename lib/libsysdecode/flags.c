@@ -657,8 +657,18 @@ sysdecode_mlockall_flags(FILE *fp, int flags, int *rem)
 bool
 sysdecode_mmap_prot(FILE *fp, int prot, int *rem)
 {
+	int protm;
+	bool printed;
 
-	return (print_mask_int(fp, mmapprot, prot, rem));
+	printed = false;
+	protm = PROT_MAX_EXTRACT(prot);
+	prot &= ~PROT_MAX(protm);
+	if (protm != 0) {
+		fputs("PROT_MAX(", fp);
+		printed = print_mask_int(fp, mmapprot, protm, rem);
+		fputs(")|", fp);
+	}
+	return (print_mask_int(fp, mmapprot, prot, rem) || printed);
 }
 
 bool
@@ -929,6 +939,20 @@ sysdecode_umtx_op(int op)
 {
 
 	return (lookup_value(umtxop, op));
+}
+
+bool
+sysdecode_umtx_op_flags(FILE *fp, int op, int *rem)
+{
+	uintmax_t val;
+	bool printed;
+
+	printed = false;
+	val = (unsigned)op;
+	print_mask_part(fp, umtxopflags, &val, &printed);
+	if (rem != NULL)
+		*rem = val;
+	return (printed);
 }
 
 const char *
@@ -1266,4 +1290,11 @@ sysdecode_sctp_sinfo_flags(FILE *fp, int sinfo_flags)
 			fprintf(fp, "%s%#x", printed ? "|" : "", rem);
 		}
 	}
+}
+
+bool
+sysdecode_shmflags(FILE *fp, int flags, int *rem)
+{
+
+	return (print_mask_0(fp, shmflags, flags, rem));
 }

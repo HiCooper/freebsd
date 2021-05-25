@@ -41,6 +41,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/sysctl.h>
 #include <sys/systm.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include "geom/raid/g_raid.h"
 #include "g_raid_tr_if.h"
 
@@ -400,7 +401,6 @@ g_raid_tr_raid1_rebuild_start(struct g_raid_tr_object *tr)
 	g_raid_tr_raid1_rebuild_some(tr);
 }
 
-
 static void
 g_raid_tr_raid1_maybe_rebuild(struct g_raid_tr_object *tr,
     struct g_raid_subdisk *sd)
@@ -408,7 +408,7 @@ g_raid_tr_raid1_maybe_rebuild(struct g_raid_tr_object *tr,
 	struct g_raid_volume *vol;
 	struct g_raid_tr_raid1_object *trs;
 	int na, nr;
-	
+
 	/*
 	 * If we're stopping, don't do anything.  If we don't have at least one
 	 * good disk and one bad disk, we don't do anything.  And if there's a
@@ -640,6 +640,7 @@ g_raid_tr_iostart_raid1(struct g_raid_tr_object *tr, struct bio *bp)
 	case BIO_DELETE:
 		g_raid_tr_iostart_raid1_write(tr, bp);
 		break;
+	case BIO_SPEEDUP:
 	case BIO_FLUSH:
 		g_raid_tr_flush_common(tr, bp);
 		break;
@@ -681,7 +682,6 @@ g_raid_tr_iodone_raid1(struct g_raid_tr_object *tr,
 		 */
 		if (trs->trso_type == TR_RAID1_REBUILD) {
 			if (bp->bio_cmd == BIO_READ) {
-
 				/* Immediately abort rebuild, if requested. */
 				if (trs->trso_flags & TR_RAID1_F_ABORT) {
 					trs->trso_flags &= ~TR_RAID1_F_DOING_SOME;

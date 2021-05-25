@@ -43,6 +43,7 @@ __FBSDID("$FreeBSD$");
 #include <sys/eventhandler.h>
 #include <vm/uma.h>
 #include <geom/geom.h>
+#include <geom/geom_dbg.h>
 #include <sys/proc.h>
 #include <sys/kthread.h>
 #include <sys/sched.h>
@@ -53,7 +54,8 @@ __FBSDID("$FreeBSD$");
 static MALLOC_DEFINE(M_RAID, "raid_data", "GEOM_RAID Data");
 
 SYSCTL_DECL(_kern_geom);
-SYSCTL_NODE(_kern_geom, OID_AUTO, raid, CTLFLAG_RW, 0, "GEOM_RAID stuff");
+SYSCTL_NODE(_kern_geom, OID_AUTO, raid, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "GEOM_RAID stuff");
 int g_raid_enable = 1;
 SYSCTL_INT(_kern_geom_raid, OID_AUTO, enable, CTLFLAG_RWTUN,
     &g_raid_enable, 0, "Enable on-disk metadata taste");
@@ -773,7 +775,7 @@ g_raid_open_consumer(struct g_raid_softc *sc, const char *name)
 
 	g_topology_assert();
 
-	if (strncmp(name, "/dev/", 5) == 0)
+	if (strncmp(name, _PATH_DEV, 5) == 0)
 		name += 5;
 	pp = g_provider_by_name(name);
 	if (pp == NULL)
@@ -1110,6 +1112,7 @@ g_raid_start(struct bio *bp)
 	case BIO_WRITE:
 	case BIO_DELETE:
 	case BIO_FLUSH:
+	case BIO_SPEEDUP:
 		break;
 	case BIO_GETATTR:
 		if (!strcmp(bp->bio_attribute, "GEOM::candelete"))
@@ -2225,7 +2228,8 @@ g_raid_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 	gp->orphan = g_raid_taste_orphan;
 	cp = g_new_consumer(gp);
 	cp->flags |= G_CF_DIRECT_RECEIVE;
-	g_attach(cp, pp);
+	if (g_attach(cp, pp) != 0)
+		goto ofail2;
 	if (g_access(cp, 1, 0, 0) != 0)
 		goto ofail;
 
@@ -2248,6 +2252,7 @@ g_raid_taste(struct g_class *mp, struct g_provider *pp, int flags __unused)
 		(void)g_access(cp, -1, 0, 0);
 ofail:
 	g_detach(cp);
+ofail2:
 	g_destroy_consumer(cp);
 	g_destroy_geom(gp);
 	G_RAID_DEBUG(2, "Tasting provider %s done.", pp->name);
@@ -2372,7 +2377,7 @@ g_raid_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 				sbuf_printf(sb, "%s ",
 				    g_raid_get_diskname(sd->sd_disk));
 			} else {
-				sbuf_printf(sb, "NONE ");
+				sbuf_cat(sb, "NONE ");
 			}
 			sbuf_printf(sb, "(%s",
 			    g_raid_subdisk_state2str(sd->sd_state));
@@ -2382,11 +2387,11 @@ g_raid_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 				    (int)(sd->sd_rebuild_pos * 100 /
 				     sd->sd_size));
 			}
-			sbuf_printf(sb, ")");
+			sbuf_cat(sb, ")");
 			if (i + 1 < vol->v_disks_count)
-				sbuf_printf(sb, ", ");
+				sbuf_cat(sb, ", ");
 		}
-		sbuf_printf(sb, "</Subdisks>\n");
+		sbuf_cat(sb, "</Subdisks>\n");
 		sx_xunlock(&sc->sc_lock);
 		g_topology_lock();
 	} else if (cp != NULL) {
@@ -2398,7 +2403,7 @@ g_raid_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 		sbuf_printf(sb, "%s<State>%s", indent,
 		    g_raid_disk_state2str(disk->d_state));
 		if (!TAILQ_EMPTY(&disk->d_subdisks)) {
-			sbuf_printf(sb, " (");
+			sbuf_cat(sb, " (");
 			TAILQ_FOREACH(sd, &disk->d_subdisks, sd_next) {
 				sbuf_printf(sb, "%s",
 				    g_raid_subdisk_state2str(sd->sd_state));
@@ -2409,11 +2414,11 @@ g_raid_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 					     sd->sd_size));
 				}
 				if (TAILQ_NEXT(sd, sd_next))
-					sbuf_printf(sb, ", ");
+					sbuf_cat(sb, ", ");
 			}
-			sbuf_printf(sb, ")");
+			sbuf_cat(sb, ")");
 		}
-		sbuf_printf(sb, "</State>\n");
+		sbuf_cat(sb, "</State>\n");
 		sbuf_printf(sb, "%s<Subdisks>", indent);
 		TAILQ_FOREACH(sd, &disk->d_subdisks, sd_next) {
 			sbuf_printf(sb, "r%d(%s):%d@%ju",
@@ -2421,9 +2426,9 @@ g_raid_dumpconf(struct sbuf *sb, const char *indent, struct g_geom *gp,
 			    sd->sd_volume->v_name,
 			    sd->sd_pos, (uintmax_t)sd->sd_offset);
 			if (TAILQ_NEXT(sd, sd_next))
-				sbuf_printf(sb, ", ");
+				sbuf_cat(sb, ", ");
 		}
-		sbuf_printf(sb, "</Subdisks>\n");
+		sbuf_cat(sb, "</Subdisks>\n");
 		sbuf_printf(sb, "%s<ReadErrors>%d</ReadErrors>\n", indent,
 		    disk->d_read_errs);
 		sx_xunlock(&sc->sc_lock);

@@ -45,7 +45,10 @@ __FBSDID("$FreeBSD$");
 #include <sys/reboot.h>
 
 #include <vm/vm.h>
+#include <vm/vm_param.h>
 #include <vm/vm_page.h>
+#include <vm/vm_phys.h>
+#include <vm/vm_dumpset.h>
 
 #include <net/ethernet.h>
 
@@ -55,7 +58,6 @@ __FBSDID("$FreeBSD$");
 #include <machine/hwfunc.h>
 #include <machine/md_var.h>
 #include <machine/trap.h>
-#include <machine/vmparam.h>
 
 #include <mips/atheros/ar71xxreg.h>
 
@@ -273,8 +275,6 @@ ar71xx_platform_check_mac_hints(void)
 
 	return (0);
 }
-
-extern char cpu_model[];
 
 void
 platform_start(__register_t a0 __unused, __register_t a1 __unused, 

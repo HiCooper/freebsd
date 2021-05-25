@@ -155,7 +155,6 @@ static uint32_t colors_24[16] = {
 	0xFFFF00,/* Yellow 	*/
 	0xFFFFFF,/* White 	*/
 
-
 };
 
 #define	IPUV3_READ(ipuv3, module, reg)					\
@@ -422,7 +421,6 @@ static device_method_t ipu3_fb_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_probe,		ipu3_fb_probe),
 	DEVMETHOD(device_attach,	ipu3_fb_attach),
-
 	{ 0, 0 }
 };
 
@@ -878,22 +876,3 @@ ipu3fb_putm(video_adapter_t *adp, int x, int y, uint8_t *pixel_image,
 
 	return (0);
 }
-
-/*
- * Define a stub keyboard driver in case one hasn't been
- * compiled into the kernel
- */
-#include <sys/kbio.h>
-#include <dev/kbd/kbdreg.h>
-
-static int dummy_kbd_configure(int flags);
-
-keyboard_switch_t ipu3dummysw;
-
-static int
-dummy_kbd_configure(int flags)
-{
-
-	return (0);
-}
-KEYBOARD_DRIVER(ipu3dummy, ipu3dummysw, dummy_kbd_configure);

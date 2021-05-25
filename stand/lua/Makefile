@@ -12,7 +12,7 @@ MAN=	cli.lua.8 \
 	password.lua.8 \
 	screen.lua.8
 
-FILESDIR=	/boot/lua
+FILESDIR=	${LUAPATH}
 FILES=	cli.lua \
 	color.lua \
 	config.lua \
@@ -20,11 +20,11 @@ FILES=	cli.lua \
 	drawer.lua \
 	hook.lua \
 	loader.lua \
-	logo-beastie.lua \
-	logo-beastiebw.lua \
-	logo-fbsdbw.lua \
-	logo-orb.lua \
-	logo-orbbw.lua \
+	gfx-beastie.lua \
+	gfx-beastiebw.lua \
+	gfx-fbsdbw.lua \
+	gfx-orb.lua \
+	gfx-orbbw.lua \
 	menu.lua \
 	password.lua \
 	screen.lua

@@ -37,6 +37,7 @@
 #ifndef _FS_TMPFS_TMPFS_H_
 #define _FS_TMPFS_TMPFS_H_
 
+#include <sys/cdefs.h>
 #include <sys/queue.h>
 #include <sys/tree.h>
 
@@ -155,7 +156,9 @@ struct tmpfs_node {
 	 * when the node is removed from list and unlocked.
 	 */
 	LIST_ENTRY(tmpfs_node)	tn_entries;	/* (m) */
-	bool			tn_attached;	/* (m) */
+
+	/* Node identifier. */
+	ino_t			tn_id;		/* (c) */
 
 	/*
 	 * The node's type.  Any of 'VBLK', 'VCHR', 'VDIR', 'VFIFO',
@@ -165,18 +168,22 @@ struct tmpfs_node {
 	 */
 	enum vtype		tn_type;	/* (c) */
 
-	/* Node identifier. */
-	ino_t			tn_id;		/* (c) */
+	/*
+	 * See the top comment. Reordered here to fill LP64 hole.
+	 */
+	bool			tn_attached;	/* (m) */
 
 	/*
 	 * Node's internal status.  This is used by several file system
 	 * operations to do modifications to the node in a delayed
 	 * fashion.
+	 *
+	 * tn_accessed has a dedicated byte to allow update by store without
+	 * using atomics.  This provides a micro-optimization to e.g.
+	 * tmpfs_read_pgcache().
 	 */
-	int			tn_status;	/* (vi) */
-#define	TMPFS_NODE_ACCESSED	(1 << 1)
-#define	TMPFS_NODE_MODIFIED	(1 << 2)
-#define	TMPFS_NODE_CHANGED	(1 << 3)
+	uint8_t			tn_status;	/* (vi) */
+	uint8_t			tn_accessed;	/* unlocked */
 
 	/*
 	 * The node size.  It does not necessarily match the real amount
@@ -227,7 +234,7 @@ struct tmpfs_node {
 	int		tn_vpstate;		/* (i) */
 
 	/* Transient refcounter on this node. */
-	u_int		tn_refcount;		/* (m) + (i) */
+	u_int		tn_refcount;		/* 0<->1 (m) + (i) */
 
 	/* misc data field for different tn_type node */
 	union {
@@ -286,6 +293,7 @@ struct tmpfs_node {
 			 * a position within the file is accessed.
 			 */
 			vm_object_t		tn_aobj;	/* (c) */
+			struct tmpfs_mount	*tn_tmp;	/* (c) */
 		} tn_reg;
 	} tn_spec;	/* (v) */
 };
@@ -315,10 +323,15 @@ LIST_HEAD(tmpfs_node_list, tmpfs_node);
 #define TMPFS_ASSERT_LOCKED(node) (void)0
 #endif
 
+/* tn_vpstate */
 #define TMPFS_VNODE_ALLOCATING	1
 #define TMPFS_VNODE_WANT	2
 #define TMPFS_VNODE_DOOMED	4
 #define	TMPFS_VNODE_WRECLAIM	8
+
+/* tn_status */
+#define	TMPFS_NODE_MODIFIED	0x01
+#define	TMPFS_NODE_CHANGED	0x02
 
 /*
  * Internal representation of a tmpfs mount point.
@@ -378,14 +391,12 @@ struct tmpfs_mount {
 	/* All node lock to protect the node list and tmp_pages_used. */
 	struct mtx		tm_allnode_lock;
 
-	/* Zones used to store file system meta data, per tmpfs mount. */
-	uma_zone_t		tm_dirent_pool;
-	uma_zone_t		tm_node_pool;
-
 	/* Read-only status. */
 	bool			tm_ronly;
 	/* Do not use namecache. */
 	bool			tm_nonc;
+	/* Do not update mtime on writes through mmaped areas. */
+	bool			tm_nomtime;
 };
 #define	TMPFS_LOCK(tm) mtx_lock(&(tm)->tm_allnode_lock)
 #define	TMPFS_UNLOCK(tm) mtx_unlock(&(tm)->tm_allnode_lock)
@@ -395,12 +406,12 @@ struct tmpfs_mount {
  * This structure maps a file identifier to a tmpfs node.  Used by the
  * NFS code.
  */
-struct tmpfs_fid {
-	uint16_t		tf_len;
-	uint16_t		tf_pad;
-	ino_t			tf_id;
-	unsigned long		tf_gen;
+struct tmpfs_fid_data {
+	ino_t			tfd_id;
+	unsigned long		tfd_gen;
 };
+_Static_assert(sizeof(struct tmpfs_fid_data) <= MAXFIDSZ,
+    "(struct tmpfs_fid_data) is larger than (struct fid).fid_data");
 
 struct tmpfs_dir_cursor {
 	struct tmpfs_dirent	*tdc_current;
@@ -413,10 +424,10 @@ struct tmpfs_dir_cursor {
  */
 
 void	tmpfs_ref_node(struct tmpfs_node *node);
-void	tmpfs_ref_node_locked(struct tmpfs_node *node);
 int	tmpfs_alloc_node(struct mount *mp, struct tmpfs_mount *, enum vtype,
 	    uid_t uid, gid_t gid, mode_t mode, struct tmpfs_node *,
 	    const char *, dev_t, struct tmpfs_node **);
+int	tmpfs_fo_close(struct file *fp, struct thread *td);
 void	tmpfs_free_node(struct tmpfs_mount *, struct tmpfs_node *);
 bool	tmpfs_free_node_locked(struct tmpfs_mount *, struct tmpfs_node *, bool);
 void	tmpfs_free_tmp(struct tmpfs_mount *);
@@ -452,14 +463,20 @@ int	tmpfs_chtimes(struct vnode *, struct vattr *, struct ucred *cred,
 void	tmpfs_itimes(struct vnode *, const struct timespec *,
 	    const struct timespec *);
 
+void	tmpfs_set_accessed(struct tmpfs_mount *tm, struct tmpfs_node *node);
 void	tmpfs_set_status(struct tmpfs_mount *tm, struct tmpfs_node *node,
 	    int status);
-void	tmpfs_update(struct vnode *);
 int	tmpfs_truncate(struct vnode *, off_t);
 struct tmpfs_dirent *tmpfs_dir_first(struct tmpfs_node *dnode,
 	    struct tmpfs_dir_cursor *dc);
 struct tmpfs_dirent *tmpfs_dir_next(struct tmpfs_node *dnode,
 	    struct tmpfs_dir_cursor *dc);
+static __inline void
+tmpfs_update(struct vnode *vp)
+{
+
+	tmpfs_itimes(vp, NULL, NULL);
+}
 
 /*
  * Convenience macros to simplify some logical expressions.
@@ -493,10 +510,9 @@ struct tmpfs_dirent *tmpfs_dir_next(struct tmpfs_node *dnode,
 #endif
 
 size_t tmpfs_mem_avail(void);
-
 size_t tmpfs_pages_used(struct tmpfs_mount *tmp);
-
-#endif
+void tmpfs_subr_init(void);
+void tmpfs_subr_uninit(void);
 
 /*
  * Macros/functions to convert from generic data structures to tmpfs
@@ -523,6 +539,9 @@ VP_TO_TMPFS_NODE(struct vnode *vp)
 	return (node);
 }
 
+#define	VP_TO_TMPFS_NODE_SMR(vp)	\
+	((struct tmpfs_node *)vn_load_v_data_smr(vp))
+
 static inline struct tmpfs_node *
 VP_TO_TMPFS_DIR(struct vnode *vp)
 {
@@ -539,5 +558,20 @@ tmpfs_use_nc(struct vnode *vp)
 
 	return (!(VFS_TO_TMPFS(vp->v_mount)->tm_nonc));
 }
+
+static inline void
+tmpfs_update_getattr(struct vnode *vp)
+{
+	struct tmpfs_node *node;
+
+	node = VP_TO_TMPFS_NODE(vp);
+	if (__predict_false((node->tn_status & (TMPFS_NODE_MODIFIED |
+	    TMPFS_NODE_CHANGED)) != 0 || node->tn_accessed))
+		tmpfs_update(vp);
+}
+
+extern struct fileops tmpfs_fnops;
+
+#endif /* _KERNEL */
 
 #endif /* _FS_TMPFS_TMPFS_H_ */

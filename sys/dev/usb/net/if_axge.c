@@ -48,6 +48,10 @@ __FBSDID("$FreeBSD$");
 
 #include <net/if.h>
 #include <net/if_var.h>
+#include <net/if_media.h>
+
+#include <dev/mii/mii.h>
+#include <dev/mii/miivar.h>
 
 #include <dev/usb/usb.h>
 #include <dev/usb/usbdi.h>
@@ -61,6 +65,8 @@ __FBSDID("$FreeBSD$");
 #include <dev/usb/net/usb_ethernet.h>
 #include <dev/usb/net/if_axgereg.h>
 
+#include "miibus_if.h"
+
 /*
  * Various supported device vendors/products.
  */
@@ -69,6 +75,7 @@ static const STRUCT_USB_HOST_ID axge_devs[] = {
 #define	AXGE_DEV(v,p) { USB_VP(USB_VENDOR_##v, USB_PRODUCT_##v##_##p) }
 	AXGE_DEV(ASIX, AX88178A),
 	AXGE_DEV(ASIX, AX88179),
+	AXGE_DEV(BELKIN, B2B128),
 	AXGE_DEV(DLINK, DUB1312),
 	AXGE_DEV(LENOVO, GIGALAN),
 	AXGE_DEV(SITECOMEU, LN032),
@@ -136,7 +143,8 @@ static void	axge_csum_cfg(struct usb_ether *);
 #ifdef USB_DEBUG
 static int axge_debug = 0;
 
-static SYSCTL_NODE(_hw_usb, OID_AUTO, axge, CTLFLAG_RW, 0, "USB axge");
+static SYSCTL_NODE(_hw_usb, OID_AUTO, axge, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
+    "USB axge");
 SYSCTL_INT(_hw_usb_axge, OID_AUTO, debug, CTLFLAG_RWTUN, &axge_debug, 0,
     "Debug level");
 #endif
@@ -587,7 +595,6 @@ axge_detach(device_t dev)
 	sc = device_get_softc(dev);
 	ue = &sc->sc_ue;
 	if (device_is_attached(dev)) {
-
 		/* wait for any post attach or other command to complete */
 		usb_proc_drain(&ue->ue_tq);
 
@@ -733,7 +740,6 @@ tr_setup:
 			goto tr_setup;
 		}
 		return;
-
 	}
 }
 
@@ -750,19 +756,28 @@ axge_tick(struct usb_ether *ue)
 	mii_tick(mii);
 }
 
+static u_int
+axge_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int cnt)
+{
+	uint8_t *hashtbl = arg;
+	uint32_t h;
+
+	h = ether_crc32_be(LLADDR(sdl), ETHER_ADDR_LEN) >> 26;
+	hashtbl[h / 8] |= 1 << (h % 8);
+
+	return (1);
+}
+
 static void
 axge_rxfilter(struct usb_ether *ue)
 {
 	struct axge_softc *sc;
 	struct ifnet *ifp;
-	struct ifmultiaddr *ifma;
-	uint32_t h;
 	uint16_t rxmode;
 	uint8_t hashtbl[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
 	sc = uether_getsc(ue);
 	ifp = uether_getifp(ue);
-	h = 0;
 	AXGE_LOCK_ASSERT(sc, MA_OWNED);
 
 	/*
@@ -785,15 +800,7 @@ axge_rxfilter(struct usb_ether *ue)
 	}
 
 	rxmode |= RCR_ACPT_MCAST;
-	if_maddr_rlock(ifp);
-	CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-		if (ifma->ifma_addr->sa_family != AF_LINK)
-			continue;
-		h = ether_crc32_be(LLADDR((struct sockaddr_dl *)
-		    ifma->ifma_addr), ETHER_ADDR_LEN) >> 26;
-		hashtbl[h / 8] |= 1 << (h % 8);
-	}
-	if_maddr_runlock(ifp);
+	if_foreach_llmaddr(ifp, axge_hash_maddr, &hashtbl);
 
 	axge_write_mem(sc, AXGE_ACCESS_MAC, 8, AXGE_MFA, (void *)&hashtbl, 8);
 	axge_write_cmd_2(sc, AXGE_ACCESS_MAC, 2, AXGE_RCR, rxmode);
@@ -1035,7 +1042,7 @@ axge_rxeof(struct usb_ether *ue, struct usb_page_cache *pc, unsigned int offset,
 	}
 	if_inc_counter(ifp, IFCOUNTER_IPACKETS, 1);
 
-	_IF_ENQUEUE(&ue->ue_rxq, m);
+	(void)mbufq_enqueue(&ue->ue_rxq, m);
 }
 
 static void

@@ -205,14 +205,15 @@ deadlres_td_on_lock(struct proc *p, struct thread *td, int blkticks)
 		 * Accordingly with provided thresholds, this thread is stuck
 		 * for too long on a turnstile.
 		 */
-		panic("%s: possible deadlock detected for %p, "
-		    "blocked for %d ticks\n", __func__, td, tticks);
+		panic("%s: possible deadlock detected for %p (%s), "
+		    "blocked for %d ticks\n", __func__,
+		    td, sched_tdname(td), tticks);
 }
 
 static void
 deadlres_td_sleep_q(struct proc *p, struct thread *td, int slpticks)
 {
-	void *wchan;
+	const void *wchan;
 	int i, slptype, tticks;
 
 	sx_assert(&allproc_lock, SX_LOCKED);
@@ -228,7 +229,6 @@ deadlres_td_sleep_q(struct proc *p, struct thread *td, int slpticks)
 	slptype = sleepq_type(wchan);
 	if ((slptype == SLEEPQ_SX || slptype == SLEEPQ_LK) &&
 	    tticks > slpticks) {
-
 		/*
 		 * Accordingly with provided thresholds, this thread is stuck
 		 * for too long on a sleepqueue.
@@ -239,8 +239,9 @@ deadlres_td_sleep_q(struct proc *p, struct thread *td, int slpticks)
 			if (!strcmp(blessed[i], td->td_wmesg))
 				return;
 
-		panic("%s: possible deadlock detected for %p, "
-		    "blocked for %d ticks\n", __func__, td, tticks);
+		panic("%s: possible deadlock detected for %p (%s), "
+		    "blocked for %d ticks\n", __func__,
+		    td, sched_tdname(td), tticks);
 	}
 }
 
@@ -282,8 +283,7 @@ deadlkres(void)
 				if (TD_ON_LOCK(td))
 					deadlres_td_on_lock(p, td,
 					    blkticks);
-				else if (TD_IS_SLEEPING(td) &&
-				    TD_ON_SLEEPQ(td))
+				else if (TD_IS_SLEEPING(td))
 					deadlres_td_sleep_q(p, td,
 					    slpticks);
 				thread_unlock(td);
@@ -305,7 +305,7 @@ static struct kthread_desc deadlkres_kd = {
 
 SYSINIT(deadlkres, SI_SUB_CLOCKS, SI_ORDER_ANY, kthread_start, &deadlkres_kd);
 
-static SYSCTL_NODE(_debug, OID_AUTO, deadlkres, CTLFLAG_RW, 0,
+static SYSCTL_NODE(_debug, OID_AUTO, deadlkres, CTLFLAG_RW | CTLFLAG_MPSAFE, 0,
     "Deadlock resolver");
 SYSCTL_INT(_debug_deadlkres, OID_AUTO, slptime_threshold, CTLFLAG_RW,
     &slptime_threshold, 0,
@@ -507,6 +507,7 @@ hardclock(int cnt, int usermode)
 			if (i > 0 && i <= newticks)
 				watchdog_fire();
 		}
+		intr_event_handle(clk_intr_event, NULL);
 	}
 	if (curcpu == CPU_FIRST())
 		cpu_tick_calibration();
@@ -644,6 +645,7 @@ statclock(int cnt, int usermode)
 	struct proc *p;
 	long rss;
 	long *cp_time;
+	uint64_t runtime, new_switchtime;
 
 	td = curthread;
 	p = td->td_proc;
@@ -699,8 +701,18 @@ statclock(int cnt, int usermode)
 	    "prio:%d", td->td_priority, "stathz:%d", (stathz)?stathz:hz);
 	SDT_PROBE2(sched, , , tick, td, td->td_proc);
 	thread_lock_flags(td, MTX_QUIET);
-	for ( ; cnt > 0; cnt--)
-		sched_clock(td);
+
+	/*
+	 * Compute the amount of time during which the current
+	 * thread was running, and add that to its total so far.
+	 */
+	new_switchtime = cpu_ticks();
+	runtime = new_switchtime - PCPU_GET(switchtime);
+	td->td_runtime += runtime;
+	td->td_incruntime += runtime;
+	PCPU_SET(switchtime, new_switchtime);
+
+	sched_clock(td, cnt);
 	thread_unlock(td);
 #ifdef HWPMC_HOOKS
 	if (td->td_intr_frame != NULL)

@@ -144,6 +144,7 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	#endif
 	size_t sfpsize;
 	caddr_t sfp, usfp;
+	register_t sp;
 	int oonstack, rndfsize;
 	int sig;
 	int code;
@@ -155,7 +156,6 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 	psp = p->p_sigacts;
 	mtx_assert(&psp->ps_mtx, MA_OWNED);
 	tf = td->td_frame;
-	oonstack = sigonstack(tf->fixreg[1]);
 
 	/*
 	 * Fill siginfo structure.
@@ -173,6 +173,8 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		sfp = (caddr_t)&sf32;
 		sfpsize = sizeof(sf32);
 		rndfsize = roundup(sizeof(sf32), 16);
+		sp = (uint32_t)tf->fixreg[1];
+		oonstack = sigonstack(sp);
 
 		/*
 		 * Save user context
@@ -203,6 +205,8 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		#else
 		rndfsize = roundup(sizeof(sf), 16);
 		#endif
+		sp = tf->fixreg[1];
+		oonstack = sigonstack(sp);
 
 		/*
 		 * Save user context
@@ -232,13 +236,15 @@ sendsig(sig_t catcher, ksiginfo_t *ksi, sigset_t *mask)
 		usfp = (void *)(((uintptr_t)td->td_sigstk.ss_sp +
 		   td->td_sigstk.ss_size - rndfsize) & ~0xFul);
 	} else {
-		usfp = (void *)((tf->fixreg[1] - rndfsize) & ~0xFul);
+		usfp = (void *)((sp - rndfsize) & ~0xFul);
 	}
 
 	/*
-	 * Save the floating-point state, if necessary, then copy it.
+	 * Set Floating Point facility to "Ignore Exceptions Mode" so signal
+	 * handler can run.
 	 */
-	/* XXX */
+	if (td->td_pcb->pcb_flags & PCB_FPU)
+		tf->srr1 = tf->srr1 & ~(PSL_FE0 | PSL_FE1);
 
 	/*
 	 * Set up the registers to return to sigcode.
@@ -326,6 +332,13 @@ sys_sigreturn(struct thread *td, struct sigreturn_args *uap)
 	error = set_mcontext(td, &uc.uc_mcontext);
 	if (error != 0)
 		return (error);
+
+	/*
+	 * Save FPU state if needed. User may have changed it on
+	 * signal handler
+	 */
+	if (uc.uc_mcontext.mc_srr1 & PSL_FP)
+		save_fpu(td);
 
 	kern_sigprocmask(td, SIG_SETMASK, &uc.uc_sigmask, NULL, 0);
 
@@ -459,7 +472,17 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 		return (EINVAL);
 
 	/*
-	 * Don't let the user set privileged MSR bits
+	 * Don't let the user change privileged MSR bits.
+	 *
+	 * psl_userstatic is used here to mask off any bits that can
+	 * legitimately vary between user contexts (Floating point
+	 * exception control and any facilities that we are using the
+	 * "enable on first use" pattern with.)
+	 *
+	 * All other bits are required to match psl_userset(32).
+	 *
+	 * Remember to update the platform cpu_init code when implementing
+	 * support for a new conditional facility!
 	 */
 	if ((mcp->mc_srr1 & psl_userstatic) != (tf->srr1 & psl_userstatic)) {
 		return (EINVAL);
@@ -476,9 +499,19 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 	else
 		tf->fixreg[2] = tls;
 
-	/* Disable FPU */
-	tf->srr1 &= ~PSL_FP;
-	pcb->pcb_flags &= ~PCB_FPU;
+	/*
+	 * Force the FPU back off to ensure the new context will not bypass
+	 * the enable_fpu() setup code accidentally.
+	 *
+	 * This prevents an issue where a process that uses floating point
+	 * inside a signal handler could end up in a state where the MSR
+	 * did not match pcb_flags.
+	 *
+	 * Additionally, ensure VSX is disabled as well, as it is illegal
+	 * to leave it turned on when FP or VEC are off.
+	 */
+	tf->srr1 &= ~(PSL_FP | PSL_VSX);
+	pcb->pcb_flags &= ~(PCB_FPU | PCB_VSX);
 
 	if (mcp->mc_flags & _MC_FP_VALID) {
 		/* enable_fpu() will happen lazily on a fault */
@@ -502,6 +535,9 @@ set_mcontext(struct thread *td, mcontext_t *mcp)
 		pcb->pcb_vec.vscr = mcp->mc_vscr;
 		pcb->pcb_vec.vrsave = mcp->mc_vrsave;
 		memcpy(pcb->pcb_vec.vr, mcp->mc_avec, sizeof(mcp->mc_avec));
+	} else {
+		tf->srr1 &= ~PSL_VEC;
+		pcb->pcb_flags &= ~PCB_VEC;
 	}
 
 	return (0);
@@ -529,13 +565,15 @@ cleanup_power_extras(struct thread *td)
 		mtspr(SPR_FSCR, 0);
 	if (pcb_flags & PCB_CDSCR) 
 		mtspr(SPR_DSCRP, 0);
+
+	cleanup_fpscr();
 }
 
 /*
  * Set set up registers on exec.
  */
 void
-exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+exec_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 	struct trapframe	*tf;
 	register_t		argc;
@@ -581,7 +619,7 @@ exec_setregs(struct thread *td, struct image_params *imgp, u_long stack)
 
 #ifdef COMPAT_FREEBSD32
 void
-ppc32_setregs(struct thread *td, struct image_params *imgp, u_long stack)
+ppc32_setregs(struct thread *td, struct image_params *imgp, uintptr_t stack)
 {
 	struct trapframe	*tf;
 	uint32_t		argc;
@@ -651,7 +689,7 @@ set_regs(struct thread *td, struct reg *regs)
 
 	tf = td->td_frame;
 	memcpy(tf, regs, sizeof(struct reg));
-	
+
 	return (0);
 }
 
@@ -725,7 +763,7 @@ grab_mcontext32(struct thread *td, mcontext32_t *mcp, int flags)
 	error = grab_mcontext(td, &mcp64, flags);
 	if (error != 0)
 		return (error);
-	
+
 	mcp->mc_vers = mcp64.mc_vers;
 	mcp->mc_flags = mcp64.mc_flags;
 	mcp->mc_onstack = mcp64.mc_onstack;
@@ -796,6 +834,13 @@ freebsd32_sigreturn(struct thread *td, struct freebsd32_sigreturn_args *uap)
 	error = set_mcontext32(td, &uc.uc_mcontext);
 	if (error != 0)
 		return (error);
+
+	/*
+	 * Save FPU state if needed. User may have changed it on
+	 * signal handler
+	 */
+	if (uc.uc_mcontext.mc_srr1 & PSL_FP)
+		save_fpu(td);
 
 	kern_sigprocmask(td, SIG_SETMASK, &uc.uc_sigmask, NULL, 0);
 
@@ -928,7 +973,7 @@ cpu_set_syscall_retval(struct thread *td, int error)
 		tf->srr0 -= 4;
 		break;
 	default:
-		tf->fixreg[FIRSTARG] = SV_ABI_ERRNO(p, error);
+		tf->fixreg[FIRSTARG] = error;
 		tf->cr |= 0x10000000;		/* Set summary overflow */
 		break;
 	}
@@ -1082,15 +1127,17 @@ emulate_mfspr(int spr, int reg, struct trapframe *frame){
 	td = curthread;
 
 	if (spr == SPR_DSCR || spr == SPR_DSCRP) {
+		if (!(cpu_features2 & PPC_FEATURE2_DSCR))
+			return (SIGILL);
 		// If DSCR was never set, get the default DSCR
 		if ((td->td_pcb->pcb_flags & PCB_CDSCR) == 0)
 			td->td_pcb->pcb_dscr = mfspr(SPR_DSCRP);
 
 		frame->fixreg[reg] = td->td_pcb->pcb_dscr;
 		frame->srr0 += 4;
-		return 0;
+		return (0);
 	} else
-		return SIGILL;
+		return (SIGILL);
 }
 
 static int
@@ -1100,13 +1147,15 @@ emulate_mtspr(int spr, int reg, struct trapframe *frame){
 	td = curthread;
 
 	if (spr == SPR_DSCR || spr == SPR_DSCRP) {
+		if (!(cpu_features2 & PPC_FEATURE2_DSCR))
+			return (SIGILL);
 		td->td_pcb->pcb_flags |= PCB_CDSCR;
 		td->td_pcb->pcb_dscr = frame->fixreg[reg];
 		mtspr(SPR_DSCRP, frame->fixreg[reg]);
 		frame->srr0 += 4;
-		return 0;
+		return (0);
 	} else
-		return SIGILL;
+		return (SIGILL);
 }
 
 #define XFX 0xFC0007FF
@@ -1162,4 +1211,3 @@ ppc_instr_emulate(struct trapframe *frame, struct thread *td)
 
 	return (sig);
 }
-

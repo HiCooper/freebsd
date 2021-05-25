@@ -60,7 +60,7 @@
  *		in the range 5 to 9.
  */
 #undef __FreeBSD_version
-#define __FreeBSD_version 1300029	/* Master, propagated to newvers */
+#define __FreeBSD_version 1300132	/* Master, propagated to newvers */
 
 /*
  * __FreeBSD_kernel__ indicates that this system uses the kernel of FreeBSD,
@@ -90,6 +90,7 @@
 #define	P_OSREL_VMTOTAL64		1200054
 #define	P_OSREL_CK_SUPERBLOCK		1300000
 #define	P_OSREL_CK_INODE		1300005
+#define	P_OSREL_POWERPC_NEW_AUX_ARGS	1300070
 
 #define	P_OSREL_MAJOR(x)		((x) / 100000)
 #endif
@@ -135,8 +136,10 @@
 #endif
 
 #ifndef _KERNEL
+#ifndef LOCORE
 /* Signals. */
 #include <sys/signal.h>
+#endif
 #endif
 
 /* Machine type dependent parameters. */
@@ -156,8 +159,12 @@
 #ifndef DFLTPHYS
 #define DFLTPHYS	(64 * 1024)	/* default max raw I/O transfer size */
 #endif
-#ifndef MAXPHYS
-#define MAXPHYS		(128 * 1024)	/* max raw I/O transfer size */
+#ifndef MAXPHYS				/* max raw I/O transfer size */
+#ifdef __ILP32__
+#define MAXPHYS		(128 * 1024)
+#else
+#define MAXPHYS		(1024 * 1024)
+#endif
 #endif
 #ifndef MAXDUMPPGS
 #define MAXDUMPPGS	(DFLTPHYS/PAGE_SIZE)

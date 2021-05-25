@@ -109,7 +109,7 @@ __collate_load_tables(const char *encoding)
 	return (__collate_load_tables_l(encoding, &__xlocale_global_collate));
 }
 
-int
+static int
 __collate_load_tables_l(const char *encoding, struct xlocale_collate *table)
 {
 	int i, chains, z;
@@ -140,23 +140,27 @@ __collate_load_tables_l(const char *encoding, struct xlocale_collate *table)
 		(void) _close(fd);
 		return (_LDP_ERROR);
 	}
-	if (sbuf.st_size < (COLLATE_STR_LEN + sizeof (info))) {
+	if (sbuf.st_size < (COLLATE_FMT_VERSION_LEN +
+			    XLOCALE_DEF_VERSION_LEN +
+			    sizeof (info))) {
 		(void) _close(fd);
 		errno = EINVAL;
 		return (_LDP_ERROR);
 	}
 	map = mmap(NULL, sbuf.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	(void) _close(fd);
-	if ((TMP = map) == NULL) {
+	if ((TMP = map) == MAP_FAILED) {
 		return (_LDP_ERROR);
 	}
 
-	if (strncmp(TMP, COLLATE_VERSION, COLLATE_STR_LEN) != 0) {
+	if (strncmp(TMP, COLLATE_FMT_VERSION, COLLATE_FMT_VERSION_LEN) != 0) {
 		(void) munmap(map, sbuf.st_size);
 		errno = EINVAL;
 		return (_LDP_ERROR);
 	}
-	TMP += COLLATE_STR_LEN;
+	TMP += COLLATE_FMT_VERSION_LEN;
+	strlcat(table->header.version, TMP, sizeof (table->header.version));
+	TMP += XLOCALE_DEF_VERSION_LEN;
 
 	info = (void *)TMP;
 	TMP += sizeof (*info);
@@ -181,6 +185,11 @@ __collate_load_tables_l(const char *encoding, struct xlocale_collate *table)
 		return (_LDP_ERROR);
 	}
 
+	if (table->map && (table->maplen > 0)) {
+		(void) munmap(table->map, table->maplen);
+	}
+	table->map = map;
+	table->maplen = sbuf.st_size;
 	table->info = info;
 	table->char_pri_table = (void *)TMP;
 	TMP += sizeof (collate_char_t) * (UCHAR_MAX + 1);

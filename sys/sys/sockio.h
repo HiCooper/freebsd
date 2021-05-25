@@ -83,6 +83,8 @@
 #define	SIOCSIFDESCR	 _IOW('i', 41, struct ifreq)	/* set ifnet descr */ 
 #define	SIOCGIFDESCR	_IOWR('i', 42, struct ifreq)	/* get ifnet descr */ 
 #define	SIOCAIFADDR	 _IOW('i', 43, struct ifaliasreq)/* add/chg IF alias */
+#define	SIOCGIFDATA	 _IOW('i', 44, struct ifreq)	/* get if_data */
+#define	SIOCGIFALIAS	_IOWR('i', 45, struct ifaliasreq)/* get IF alias */
 
 #define	SIOCADDMULTI	 _IOW('i', 49, struct ifreq)	/* add m'cast addr */
 #define	SIOCDELMULTI	 _IOW('i', 50, struct ifreq)	/* del m'cast addr */
@@ -142,5 +144,7 @@
 
 #define	SIOCGLANPCP	_IOWR('i', 152, struct ifreq)	/* Get (V)LAN PCP */
 #define	SIOCSLANPCP	 _IOW('i', 153, struct ifreq)	/* Set (V)LAN PCP */
+
+#define	SIOCGIFDOWNREASON	_IOWR('i', 154, struct ifdownreason)
 
 #endif /* !_SYS_SOCKIO_H_ */

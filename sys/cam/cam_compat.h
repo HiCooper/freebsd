@@ -40,7 +40,6 @@ int cam_compat_ioctl(struct cdev *dev, u_long cmd, caddr_t addr, int flag,
     struct thread *td, int(*cbfnp)(struct cdev *, u_long, caddr_t, int,
     struct thread *));
 
-
 /* Version 0x16 compatibility */
 #define CAM_VERSION_0x16	0x16
 
@@ -72,7 +71,7 @@ struct ccb_hdr_0x17 {
 	ccb_ppriv_area	periph_priv;
 	ccb_spriv_area	sim_priv;
 	u_int32_t	timeout;	/* Hard timeout value in seconds */
-	struct callout_handle timeout_ch;
+	struct callout	*timeout_ch;
 };
 
 struct ccb_pathinq_0x17 {

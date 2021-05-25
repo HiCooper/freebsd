@@ -23,6 +23,8 @@
 #include <sys/cdefs.h>
 __FBSDID("$FreeBSD$");
 
+#include "opt_rss.h"
+
 #include <sys/param.h>
 #include <sys/systm.h>
 #include <sys/kernel.h>
@@ -46,6 +48,9 @@ __FBSDID("$FreeBSD$");
 #include <net/if_media.h>
 #include <net/if_vlan_var.h>
 #include <net/iflib.h>
+#ifdef RSS
+#include <net/rss_config.h>
+#endif
 
 #include <netinet/in_systm.h>
 #include <netinet/in.h>
@@ -70,7 +75,6 @@ __FBSDID("$FreeBSD$");
 
 #include "opt_inet.h"
 #include "opt_inet6.h"
-
 
 #define VMXNET3_VMWARE_VENDOR_ID	0x15AD
 #define VMXNET3_VMWARE_DEVICE_ID	0x07B0
@@ -187,7 +191,6 @@ typedef enum {
 
 static void	vmxnet3_barrier(struct vmxnet3_softc *, vmxnet3_barrier_t);
 
-
 static device_method_t vmxnet3_methods[] = {
 	/* Device interface */
 	DEVMETHOD(device_register, vmxnet3_register),
@@ -287,7 +290,7 @@ static struct if_shared_ctx vmxnet3_sctx_init = {
 	.isc_vendor_info = vmxnet3_vendor_info_array,
 	.isc_driver_version = "2",
 	.isc_driver = &vmxnet3_iflib_driver,
-	.isc_flags = IFLIB_HAS_RXCQ | IFLIB_HAS_TXCQ,
+	.isc_flags = IFLIB_HAS_RXCQ | IFLIB_HAS_TXCQ | IFLIB_SINGLE_IRQ_RX_ONLY,
 
 	/*
 	 * Number of receive queues per receive queue set, with associated
@@ -313,6 +316,13 @@ static void *
 vmxnet3_register(device_t dev)
 {
 	return (&vmxnet3_sctx_init);
+}
+
+static int
+trunc_powerof2(int val)
+{
+
+	return (1U << (fls(val) - 1));
 }
 
 static int
@@ -344,12 +354,16 @@ vmxnet3_attach_pre(if_ctx_t ctx)
 	/* If 0, the iflib tunable was not set, so set to the default */
 	if (scctx->isc_nrxqsets == 0)
 		scctx->isc_nrxqsets = VMXNET3_DEF_RX_QUEUES;
+	scctx->isc_nrxqsets = trunc_powerof2(scctx->isc_nrxqsets);
 	scctx->isc_nrxqsets_max = min(VMXNET3_MAX_RX_QUEUES, mp_ncpus);
+	scctx->isc_nrxqsets_max = trunc_powerof2(scctx->isc_nrxqsets_max);
 
 	/* If 0, the iflib tunable was not set, so set to the default */
 	if (scctx->isc_ntxqsets == 0)
 		scctx->isc_ntxqsets = VMXNET3_DEF_TX_QUEUES;
+	scctx->isc_ntxqsets = trunc_powerof2(scctx->isc_ntxqsets);
 	scctx->isc_ntxqsets_max = min(VMXNET3_MAX_TX_QUEUES, mp_ncpus);
+	scctx->isc_ntxqsets_max = trunc_powerof2(scctx->isc_ntxqsets_max);
 
 	/*
 	 * Enforce that the transmit completion queue descriptor count is
@@ -375,6 +389,12 @@ vmxnet3_attach_pre(if_ctx_t ctx)
 	    sizeof(struct vmxnet3_rxdesc) * scctx->isc_nrxd[1];
 	scctx->isc_rxqsizes[2] =
 	    sizeof(struct vmxnet3_rxdesc) * scctx->isc_nrxd[2];
+
+	/*
+	 * Initialize the max frame size and descriptor queue buffer
+	 * sizes.
+	 */
+	vmxnet3_mtu_set(ctx, if_getmtu(sc->vmx_ifp));
 
 	scctx->isc_rss_table_size = UPT1_RSS_MAX_IND_TABLE_SIZE;
 
@@ -454,7 +474,7 @@ vmxnet3_msix_intr_assign(if_ctx_t ctx, int msix)
 
 	sc = iflib_get_softc(ctx);
 	scctx = sc->vmx_scctx;
-	
+
 	for (i = 0; i < scctx->isc_nrxqsets; i++) {
 		snprintf(irq_name, sizeof(irq_name), "rxq%d", i);
 
@@ -715,7 +735,7 @@ vmxnet3_queues_shared_alloc(struct vmxnet3_softc *sc)
 	if_softc_ctx_t scctx;
 	int size;
 	int error;
-	
+
 	scctx = sc->vmx_scctx;
 
 	/*
@@ -741,7 +761,7 @@ vmxnet3_init_txq(struct vmxnet3_softc *sc, int q)
 	struct vmxnet3_comp_ring *txc;
 	struct vmxnet3_txring *txr;
 	if_softc_ctx_t scctx;
-	
+
 	txq = &sc->vmx_txq[q];
 	txc = &txq->vxtxq_comp_ring;
 	txr = &txq->vxtxq_cmd_ring;
@@ -764,7 +784,7 @@ vmxnet3_tx_queues_alloc(if_ctx_t ctx, caddr_t *vaddrs, uint64_t *paddrs,
 	int q;
 	int error;
 	caddr_t kva;
-	
+
 	sc = iflib_get_softc(ctx);
 
 	/* Allocate the array of transmit queues */
@@ -859,7 +879,7 @@ vmxnet3_rx_queues_alloc(if_ctx_t ctx, caddr_t *vaddrs, uint64_t *paddrs,
 	int i;
 	int error;
 	caddr_t kva;
-	
+
 	sc = iflib_get_softc(ctx);
 	scctx = sc->vmx_scctx;
 
@@ -1140,8 +1160,11 @@ vmxnet3_reinit_rss_shared_data(struct vmxnet3_softc *sc)
 	struct vmxnet3_driver_shared *ds;
 	if_softc_ctx_t scctx;
 	struct vmxnet3_rss_shared *rss;
+#ifdef RSS
+	uint8_t rss_algo;
+#endif
 	int i;
-	
+
 	ds = sc->vmx_ds;
 	scctx = sc->vmx_scctx;
 	rss = sc->vmx_rss;
@@ -1152,10 +1175,29 @@ vmxnet3_reinit_rss_shared_data(struct vmxnet3_softc *sc)
 	rss->hash_func = UPT1_RSS_HASH_FUNC_TOEPLITZ;
 	rss->hash_key_size = UPT1_RSS_MAX_KEY_SIZE;
 	rss->ind_table_size = UPT1_RSS_MAX_IND_TABLE_SIZE;
-	memcpy(rss->hash_key, rss_key, UPT1_RSS_MAX_KEY_SIZE);
-
-	for (i = 0; i < UPT1_RSS_MAX_IND_TABLE_SIZE; i++)
-		rss->ind_table[i] = i % scctx->isc_nrxqsets;
+#ifdef RSS
+	/*
+	 * If the software RSS is configured to anything else other than
+	 * Toeplitz, then just do Toeplitz in "hardware" for the sake of
+	 * the packet distribution, but report the hash as opaque to
+	 * disengage from the software RSS.
+	 */
+	rss_algo = rss_gethashalgo();
+	if (rss_algo == RSS_HASH_TOEPLITZ) {
+		rss_getkey(rss->hash_key);
+		for (i = 0; i < UPT1_RSS_MAX_IND_TABLE_SIZE; i++) {
+			rss->ind_table[i] = rss_get_indirection_to_bucket(i) %
+			    scctx->isc_nrxqsets;
+		}
+		sc->vmx_flags |= VMXNET3_FLAG_SOFT_RSS;
+	} else
+#endif
+	{
+		memcpy(rss->hash_key, rss_key, UPT1_RSS_MAX_KEY_SIZE);
+		for (i = 0; i < UPT1_RSS_MAX_IND_TABLE_SIZE; i++)
+			rss->ind_table[i] = i % scctx->isc_nrxqsets;
+		sc->vmx_flags &= ~VMXNET3_FLAG_SOFT_RSS;
+	}
 }
 
 static void
@@ -1164,11 +1206,11 @@ vmxnet3_reinit_shared_data(struct vmxnet3_softc *sc)
 	struct ifnet *ifp;
 	struct vmxnet3_driver_shared *ds;
 	if_softc_ctx_t scctx;
-	
+
 	ifp = sc->vmx_ifp;
 	ds = sc->vmx_ds;
 	scctx = sc->vmx_scctx;
-	
+
 	ds->mtu = ifp->if_mtu;
 	ds->ntxqueue = scctx->isc_ntxqsets;
 	ds->nrxqueue = scctx->isc_nrxqsets;
@@ -1320,7 +1362,7 @@ vmxnet3_isc_txd_encap(void *vsc, if_pkt_info_t pi)
 	hdrlen = pi->ipi_ehdrlen + pi->ipi_ip_hlen;
 	if (pi->ipi_csum_flags & CSUM_TSO) {
 		sop->offload_mode = VMXNET3_OM_TSO;
-		sop->hlen = hdrlen;
+		sop->hlen = hdrlen + pi->ipi_tcp_hlen;
 		sop->offload_pos = pi->ipi_tso_segsz;
 	} else if (pi->ipi_csum_flags & (VMXNET3_CSUM_OFFLOAD |
 	    VMXNET3_CSUM_OFFLOAD_IPV6)) {
@@ -1372,7 +1414,7 @@ vmxnet3_isc_txd_credits_update(void *vsc, uint16_t txqid, bool clear)
 	struct vmxnet3_txcompdesc *txcd;
 	struct vmxnet3_txring *txr;
 	int processed;
-	
+
 	sc = vsc;
 	txq = &sc->vmx_txq[txqid];
 	txc = &txq->vxtxq_comp_ring;
@@ -1449,7 +1491,7 @@ vmxnet3_isc_rxd_available(void *vsc, uint16_t rxqid, qidx_t idx, qidx_t budget)
 			completed_gen ^= 1;
 		}
 	}
-	
+
 	return (avail);
 }
 
@@ -1467,6 +1509,7 @@ vmxnet3_isc_rxd_pkt_get(void *vsc, if_rxd_info_t ri)
 	int cqidx;
 	uint16_t total_len;
 	uint8_t nfrags;
+	uint8_t i;
 	uint8_t flid;
 
 	sc = vsc;
@@ -1490,6 +1533,7 @@ vmxnet3_isc_rxd_pkt_get(void *vsc, if_rxd_info_t ri)
 		KASSERT(rxcd->sop && rxcd->eop,
 		    ("%s: zero-length packet without both sop and eop set",
 			__func__));
+		rxc->vxcr_zero_length++;
 		if (++cqidx == rxc->vxcr_ndesc) {
 			cqidx = 0;
 			rxc->vxcr_gen ^= 1;
@@ -1499,54 +1543,50 @@ vmxnet3_isc_rxd_pkt_get(void *vsc, if_rxd_info_t ri)
 	KASSERT(rxcd->sop, ("%s: expected sop", __func__));
 
 	/*
-	 * RSS and flow ID
+	 * RSS and flow ID.
+	 * Types other than M_HASHTYPE_NONE and M_HASHTYPE_OPAQUE_HASH should
+	 * be used only if the software RSS is enabled and it uses the same
+	 * algorithm and the hash key as the "hardware".  If the software RSS
+	 * is not enabled, then it's simply pointless to use those types.
+	 * If it's enabled but with different parameters, then hash values will
+	 * not match.
 	 */
 	ri->iri_flowid = rxcd->rss_hash;
-	switch (rxcd->rss_type) {
-	case VMXNET3_RCD_RSS_TYPE_NONE:
-		ri->iri_flowid = ri->iri_qsidx;
-		ri->iri_rsstype = M_HASHTYPE_NONE;
-		break;
-	case VMXNET3_RCD_RSS_TYPE_IPV4:
-		ri->iri_rsstype = M_HASHTYPE_RSS_IPV4;
-		break;
-	case VMXNET3_RCD_RSS_TYPE_TCPIPV4:
-		ri->iri_rsstype = M_HASHTYPE_RSS_TCP_IPV4;
-		break;
-	case VMXNET3_RCD_RSS_TYPE_IPV6:
-		ri->iri_rsstype = M_HASHTYPE_RSS_IPV6;
-		break;
-	case VMXNET3_RCD_RSS_TYPE_TCPIPV6:
-		ri->iri_rsstype = M_HASHTYPE_RSS_TCP_IPV6;
-		break;
-	default:
-		ri->iri_rsstype = M_HASHTYPE_OPAQUE_HASH;
-		break;
-	}
-
-	/* VLAN */
-	if (rxcd->vlan) {
-		ri->iri_flags |= M_VLANTAG;
-		ri->iri_vtag = rxcd->vtag;
-	}
-
-	/* Checksum offload */
-	if (!rxcd->no_csum) {
-		uint32_t csum_flags = 0;
-
-		if (rxcd->ipv4) {
-			csum_flags |= CSUM_IP_CHECKED;
-			if (rxcd->ipcsum_ok)
-				csum_flags |= CSUM_IP_VALID;
+#ifdef RSS
+	if ((sc->vmx_flags & VMXNET3_FLAG_SOFT_RSS) != 0) {
+		switch (rxcd->rss_type) {
+		case VMXNET3_RCD_RSS_TYPE_NONE:
+			ri->iri_flowid = ri->iri_qsidx;
+			ri->iri_rsstype = M_HASHTYPE_NONE;
+			break;
+		case VMXNET3_RCD_RSS_TYPE_IPV4:
+			ri->iri_rsstype = M_HASHTYPE_RSS_IPV4;
+			break;
+		case VMXNET3_RCD_RSS_TYPE_TCPIPV4:
+			ri->iri_rsstype = M_HASHTYPE_RSS_TCP_IPV4;
+			break;
+		case VMXNET3_RCD_RSS_TYPE_IPV6:
+			ri->iri_rsstype = M_HASHTYPE_RSS_IPV6;
+			break;
+		case VMXNET3_RCD_RSS_TYPE_TCPIPV6:
+			ri->iri_rsstype = M_HASHTYPE_RSS_TCP_IPV6;
+			break;
+		default:
+			ri->iri_rsstype = M_HASHTYPE_OPAQUE_HASH;
+			break;
 		}
-		if (!rxcd->fragment && (rxcd->tcp || rxcd->udp)) {
-			csum_flags |= CSUM_L4_CALC;
-			if (rxcd->csum_ok) {
-				csum_flags |= CSUM_L4_VALID;
-				ri->iri_csum_data = 0xffff;
-			}
+	} else
+#endif
+	{
+		switch (rxcd->rss_type) {
+		case VMXNET3_RCD_RSS_TYPE_NONE:
+			ri->iri_flowid = ri->iri_qsidx;
+			ri->iri_rsstype = M_HASHTYPE_NONE;
+			break;
+		default:
+			ri->iri_rsstype = M_HASHTYPE_OPAQUE_HASH;
+			break;
 		}
-		ri->iri_csum_flags = csum_flags;
 	}
 
 	/*
@@ -1584,6 +1624,46 @@ vmxnet3_isc_rxd_pkt_get(void *vsc, if_rxd_info_t ri)
 	ri->iri_nfrags = nfrags;
 	ri->iri_len = total_len;
 
+	/*
+	 * If there's an error, the last descriptor in the packet will
+	 * have the error indicator set.  In this case, set all
+	 * fragment lengths to zero.  This will cause iflib to discard
+	 * the packet, but process all associated descriptors through
+	 * the refill mechanism.
+	 */
+	if (__predict_false(rxcd->error)) {
+		rxc->vxcr_pkt_errors++;
+		for (i = 0; i < nfrags; i++) {
+			frag = &ri->iri_frags[i];
+			frag->irf_len = 0;
+		}
+	} else {
+		/* Checksum offload information is in the last descriptor. */
+		if (!rxcd->no_csum) {
+			uint32_t csum_flags = 0;
+
+			if (rxcd->ipv4) {
+				csum_flags |= CSUM_IP_CHECKED;
+				if (rxcd->ipcsum_ok)
+					csum_flags |= CSUM_IP_VALID;
+			}
+			if (!rxcd->fragment && (rxcd->tcp || rxcd->udp)) {
+				csum_flags |= CSUM_L4_CALC;
+				if (rxcd->csum_ok) {
+					csum_flags |= CSUM_L4_VALID;
+					ri->iri_csum_data = 0xffff;
+				}
+			}
+			ri->iri_csum_flags = csum_flags;
+		}
+
+		/* VLAN information is in the last descriptor. */
+		if (rxcd->vlan) {
+			ri->iri_flags |= M_VLANTAG;
+			ri->iri_vtag = rxcd->vtag;
+		}
+	}
+
 	return (0);
 }
 
@@ -1597,14 +1677,13 @@ vmxnet3_isc_rxd_refill(void *vsc, if_rxd_update_t iru)
 	uint64_t *paddrs;
 	int count;
 	int len;
-	int pidx;
+	int idx;
 	int i;
 	uint8_t flid;
 	uint8_t btype;
 
 	count = iru->iru_count;
 	len = iru->iru_buf_size;
-	pidx = iru->iru_pidx;
 	flid = iru->iru_flidx;
 	paddrs = iru->iru_paddrs;
 
@@ -1618,17 +1697,32 @@ vmxnet3_isc_rxd_refill(void *vsc, if_rxd_update_t iru)
 	 * command ring 1 is filled with BTYPE_BODY descriptors.
 	 */
 	btype = (flid == 0) ? VMXNET3_BTYPE_HEAD : VMXNET3_BTYPE_BODY;
-	for (i = 0; i < count; i++) {
-		rxd[pidx].addr = paddrs[i];
-		rxd[pidx].len = len;
-		rxd[pidx].btype = btype;
-		rxd[pidx].gen = rxr->vxrxr_gen;
+	/*
+	 * The refill entries from iflib will advance monotonically,
+	 * but the refilled descriptors may not be contiguous due to
+	 * earlier skipping of descriptors by the device.  The refill
+	 * entries from iflib need an entire state update, while the
+	 * descriptors previously skipped by the device only need to
+	 * have their generation numbers updated.
+	 */
+	idx = rxr->vxrxr_refill_start;
+	i = 0;
+	do {
+		if (idx == iru->iru_idxs[i]) {
+			rxd[idx].addr = paddrs[i];
+			rxd[idx].len = len;
+			rxd[idx].btype = btype;
+			i++;
+		} else
+			rxr->vxrxr_desc_skips++;
+		rxd[idx].gen = rxr->vxrxr_gen;
 
-		if (++pidx == rxr->vxrxr_ndesc) {
-			pidx = 0;
+		if (++idx == rxr->vxrxr_ndesc) {
+			idx = 0;
 			rxr->vxrxr_gen ^= 1;
 		}
-	}
+	} while (i != count);
+	rxr->vxrxr_refill_start = idx;
 }
 
 static void
@@ -1638,7 +1732,7 @@ vmxnet3_isc_rxd_flush(void *vsc, uint16_t rxqid, uint8_t flid, qidx_t pidx)
 	struct vmxnet3_rxqueue *rxq;
 	struct vmxnet3_rxring *rxr;
 	bus_size_t r;
-	
+
 	sc = vsc;
 	rxq = &sc->vmx_rxq[rxqid];
 	rxr = &rxq->vxrxq_cmd_ring[flid];
@@ -1648,13 +1742,6 @@ vmxnet3_isc_rxd_flush(void *vsc, uint16_t rxqid, uint8_t flid, qidx_t pidx)
 	else
 		r = VMXNET3_BAR0_RXH2(rxqid);
 
-	/*
-	 * pidx is the index of the last descriptor with a buffer the device
-	 * can use, and the device needs to be told which index is one past
-	 * that.
-	 */
-	if (++pidx == rxr->vxrxr_ndesc)
-		pidx = 0;
 	vmxnet3_write_bar0(sc, r, pidx);
 }
 
@@ -1664,7 +1751,7 @@ vmxnet3_legacy_intr(void *xsc)
 	struct vmxnet3_softc *sc;
 	if_softc_ctx_t scctx;
 	if_ctx_t ctx;
-	
+
 	sc = xsc;
 	scctx = sc->vmx_scctx;
 	ctx = sc->vmx_ctx;
@@ -1745,7 +1832,7 @@ vmxnet3_txinit(struct vmxnet3_softc *sc, struct vmxnet3_txqueue *txq)
 	struct vmxnet3_comp_ring *txc;
 
 	txq->vxtxq_last_flush = -1;
-	
+
 	txr = &txq->vxtxq_cmd_ring;
 	txr->vxtxr_next = 0;
 	txr->vxtxr_gen = VMXNET3_INIT_GEN;
@@ -1777,6 +1864,8 @@ vmxnet3_rxinit(struct vmxnet3_softc *sc, struct vmxnet3_rxqueue *rxq)
 	for (i = 0; i < sc->vmx_sctx->isc_nrxqs - 1; i++) {
 		rxr = &rxq->vxrxq_cmd_ring[i];
 		rxr->vxrxr_gen = VMXNET3_INIT_GEN;
+		rxr->vxrxr_desc_skips = 0;
+		rxr->vxrxr_refill_start = 0;
 		/*
 		 * iflib has zeroed out the descriptor array during the
 		 * prior attach or stop
@@ -1786,6 +1875,8 @@ vmxnet3_rxinit(struct vmxnet3_softc *sc, struct vmxnet3_rxqueue *rxq)
 	for (/**/; i < VMXNET3_RXRINGS_PERQ; i++) {
 		rxr = &rxq->vxrxq_cmd_ring[i];
 		rxr->vxrxr_gen = 0;
+		rxr->vxrxr_desc_skips = 0;
+		rxr->vxrxr_refill_start = 0;
 		bzero(rxr->vxrxr_rxd,
 		    rxr->vxrxr_ndesc * sizeof(struct vmxnet3_rxdesc));
 	}
@@ -1793,6 +1884,8 @@ vmxnet3_rxinit(struct vmxnet3_softc *sc, struct vmxnet3_rxqueue *rxq)
 	rxc = &rxq->vxrxq_comp_ring;
 	rxc->vxcr_next = 0;
 	rxc->vxcr_gen = VMXNET3_INIT_GEN;
+	rxc->vxcr_zero_length = 0;
+	rxc->vxcr_pkt_errors = 0;
 	/*
 	 * iflib has zeroed out the descriptor array during the prior attach
 	 * or stop
@@ -1858,13 +1951,8 @@ static void
 vmxnet3_init(if_ctx_t ctx)
 {
 	struct vmxnet3_softc *sc;
-	if_softc_ctx_t scctx;
-	
-	sc = iflib_get_softc(ctx);
-	scctx = sc->vmx_scctx;
 
-	scctx->isc_max_frame_size = if_getmtu(iflib_get_ifp(ctx)) +
-	    ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN + ETHER_CRC_LEN;
+	sc = iflib_get_softc(ctx);
 
 	/* Use the current MAC address. */
 	bcopy(IF_LLADDR(sc->vmx_ifp), sc->vmx_lladdr, ETHER_ADDR_LEN);
@@ -1890,10 +1978,36 @@ vmxnet3_multi_set(if_ctx_t ctx)
 static int
 vmxnet3_mtu_set(if_ctx_t ctx, uint32_t mtu)
 {
+	struct vmxnet3_softc *sc;
+	if_softc_ctx_t scctx;
+
+	sc = iflib_get_softc(ctx);
+	scctx = sc->vmx_scctx;
 
 	if (mtu > VMXNET3_TX_MAXSIZE - (ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN +
 		ETHER_CRC_LEN))
 		return (EINVAL);
+
+	/*
+	 * Update the max frame size so that the rx mbuf size is
+	 * chosen based on the new mtu during the interface init that
+	 * will occur after this routine returns.
+	 */
+	scctx->isc_max_frame_size = mtu +
+		ETHER_HDR_LEN + ETHER_VLAN_ENCAP_LEN + ETHER_CRC_LEN;
+	/* RX completion queue - n/a */
+	scctx->isc_rxd_buf_size[0] = 0;
+	/*
+	 * For header-type descriptors (used for first segment of
+	 * packet), let iflib determine the buffer size based on the
+	 * max frame size.
+	 */
+	scctx->isc_rxd_buf_size[1] = 0;
+	/*
+	 * For body-type descriptors (used for jumbo frames and LRO),
+	 * always use page-sized buffers.
+	 */
+	scctx->isc_rxd_buf_size[2] = MJUMPAGESIZE;
 
 	return (0);
 }
@@ -1995,12 +2109,23 @@ vmxnet3_vlan_unregister(if_ctx_t ctx, uint16_t tag)
 	vmxnet3_update_vlan_filter(iflib_get_softc(ctx), 0, tag);
 }
 
+static u_int
+vmxnet3_hash_maddr(void *arg, struct sockaddr_dl *sdl, u_int count)
+{
+	struct vmxnet3_softc *sc = arg;
+
+	if (count < VMXNET3_MULTICAST_MAX)
+		bcopy(LLADDR(sdl), &sc->vmx_mcast[count * ETHER_ADDR_LEN],
+		    ETHER_ADDR_LEN);
+
+	return (1);
+}
+
 static void
 vmxnet3_set_rxfilter(struct vmxnet3_softc *sc, int flags)
 {
 	struct ifnet *ifp;
 	struct vmxnet3_driver_shared *ds;
-	struct ifmultiaddr *ifma;
 	u_int mode;
 
 	ifp = sc->vmx_ifp;
@@ -2012,24 +2137,10 @@ vmxnet3_set_rxfilter(struct vmxnet3_softc *sc, int flags)
 	if (flags & IFF_ALLMULTI)
 		mode |= VMXNET3_RXMODE_ALLMULTI;
 	else {
-		int cnt = 0, overflow = 0;
+		int cnt;
 
-		if_maddr_rlock(ifp);
-		CK_STAILQ_FOREACH(ifma, &ifp->if_multiaddrs, ifma_link) {
-			if (ifma->ifma_addr->sa_family != AF_LINK)
-				continue;
-			else if (cnt == VMXNET3_MULTICAST_MAX) {
-				overflow = 1;
-				break;
-			}
-
-			bcopy(LLADDR((struct sockaddr_dl *)ifma->ifma_addr),
-			   &sc->vmx_mcast[cnt*ETHER_ADDR_LEN], ETHER_ADDR_LEN);
-			cnt++;
-		}
-		if_maddr_runlock(ifp);
-
-		if (overflow != 0) {
+		cnt = if_foreach_llmaddr(ifp, vmxnet3_hash_maddr, sc);
+		if (cnt >= VMXNET3_MULTICAST_MAX) {
 			cnt = 0;
 			mode |= VMXNET3_RXMODE_ALLMULTI;
 		} else if (cnt > 0)
@@ -2069,7 +2180,7 @@ vmxnet3_link_status(struct vmxnet3_softc *sc)
 	ctx = sc->vmx_ctx;
 	link = vmxnet3_link_is_up(sc);
 	speed = IF_Gbps(10);
-	
+
 	if (link != 0 && sc->vmx_link_active == 0) {
 		sc->vmx_link_active = 1;
 		iflib_link_state_change(ctx, LINK_STATE_UP, speed);
@@ -2123,16 +2234,16 @@ vmxnet3_setup_txq_sysctl(struct vmxnet3_txqueue *txq,
 	txstats = &txq->vxtxq_ts->stats;
 
 	snprintf(namebuf, sizeof(namebuf), "txq%d", txq->vxtxq_id);
-	node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf, CTLFLAG_RD,
-	    NULL, "Transmit Queue");
+	node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf,
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Transmit Queue");
 	txq->vxtxq_sysctl = list = SYSCTL_CHILDREN(node);
 
 	/*
 	 * Add statistics reported by the host. These are updated by the
 	 * iflib txq timer on txq 0.
 	 */
-	txsnode = SYSCTL_ADD_NODE(ctx, list, OID_AUTO, "hstats", CTLFLAG_RD,
-	    NULL, "Host Statistics");
+	txsnode = SYSCTL_ADD_NODE(ctx, list, OID_AUTO, "hstats",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Host Statistics");
 	txslist = SYSCTL_CHILDREN(txsnode);
 	SYSCTL_ADD_UQUAD(ctx, txslist, OID_AUTO, "tso_packets", CTLFLAG_RD,
 	    &txstats->TSO_packets, "TSO packets");
@@ -2164,16 +2275,16 @@ vmxnet3_setup_rxq_sysctl(struct vmxnet3_rxqueue *rxq,
 	rxstats = &rxq->vxrxq_rs->stats;
 
 	snprintf(namebuf, sizeof(namebuf), "rxq%d", rxq->vxrxq_id);
-	node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf, CTLFLAG_RD,
-	    NULL, "Receive Queue");
+	node = SYSCTL_ADD_NODE(ctx, child, OID_AUTO, namebuf,
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Receive Queue");
 	rxq->vxrxq_sysctl = list = SYSCTL_CHILDREN(node);
 
 	/*
 	 * Add statistics reported by the host. These are updated by the
 	 * iflib txq timer on txq 0.
 	 */
-	rxsnode = SYSCTL_ADD_NODE(ctx, list, OID_AUTO, "hstats", CTLFLAG_RD,
-	    NULL, "Host Statistics");
+	rxsnode = SYSCTL_ADD_NODE(ctx, list, OID_AUTO, "hstats",
+	    CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "Host Statistics");
 	rxslist = SYSCTL_CHILDREN(rxsnode);
 	SYSCTL_ADD_UQUAD(ctx, rxslist, OID_AUTO, "lro_packets", CTLFLAG_RD,
 	    &rxstats->LRO_packets, "LRO packets");
@@ -2207,12 +2318,12 @@ vmxnet3_setup_debug_sysctl(struct vmxnet3_softc *sc,
 	int i;
 
 	scctx = sc->vmx_scctx;
-	
+
 	for (i = 0; i < scctx->isc_ntxqsets; i++) {
 		struct vmxnet3_txqueue *txq = &sc->vmx_txq[i];
 
 		node = SYSCTL_ADD_NODE(ctx, txq->vxtxq_sysctl, OID_AUTO,
-		    "debug", CTLFLAG_RD, NULL, "");
+		    "debug", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 		list = SYSCTL_CHILDREN(node);
 
 		SYSCTL_ADD_UINT(ctx, list, OID_AUTO, "cmd_next", CTLFLAG_RD,
@@ -2233,21 +2344,29 @@ vmxnet3_setup_debug_sysctl(struct vmxnet3_softc *sc,
 		struct vmxnet3_rxqueue *rxq = &sc->vmx_rxq[i];
 
 		node = SYSCTL_ADD_NODE(ctx, rxq->vxrxq_sysctl, OID_AUTO,
-		    "debug", CTLFLAG_RD, NULL, "");
+		    "debug", CTLFLAG_RD | CTLFLAG_MPSAFE, NULL, "");
 		list = SYSCTL_CHILDREN(node);
 
 		SYSCTL_ADD_UINT(ctx, list, OID_AUTO, "cmd0_ndesc", CTLFLAG_RD,
 		    &rxq->vxrxq_cmd_ring[0].vxrxr_ndesc, 0, "");
 		SYSCTL_ADD_INT(ctx, list, OID_AUTO, "cmd0_gen", CTLFLAG_RD,
 		    &rxq->vxrxq_cmd_ring[0].vxrxr_gen, 0, "");
+		SYSCTL_ADD_U64(ctx, list, OID_AUTO, "cmd0_desc_skips", CTLFLAG_RD,
+		    &rxq->vxrxq_cmd_ring[0].vxrxr_desc_skips, 0, "");
 		SYSCTL_ADD_UINT(ctx, list, OID_AUTO, "cmd1_ndesc", CTLFLAG_RD,
 		    &rxq->vxrxq_cmd_ring[1].vxrxr_ndesc, 0, "");
 		SYSCTL_ADD_INT(ctx, list, OID_AUTO, "cmd1_gen", CTLFLAG_RD,
 		    &rxq->vxrxq_cmd_ring[1].vxrxr_gen, 0, "");
+		SYSCTL_ADD_U64(ctx, list, OID_AUTO, "cmd1_desc_skips", CTLFLAG_RD,
+		    &rxq->vxrxq_cmd_ring[1].vxrxr_desc_skips, 0, "");
 		SYSCTL_ADD_UINT(ctx, list, OID_AUTO, "comp_ndesc", CTLFLAG_RD,
 		    &rxq->vxrxq_comp_ring.vxcr_ndesc, 0,"");
 		SYSCTL_ADD_INT(ctx, list, OID_AUTO, "comp_gen", CTLFLAG_RD,
 		    &rxq->vxrxq_comp_ring.vxcr_gen, 0, "");
+		SYSCTL_ADD_U64(ctx, list, OID_AUTO, "comp_zero_length", CTLFLAG_RD,
+		    &rxq->vxrxq_comp_ring.vxcr_zero_length, 0, "");
+		SYSCTL_ADD_U64(ctx, list, OID_AUTO, "comp_pkt_errors", CTLFLAG_RD,
+		    &rxq->vxrxq_comp_ring.vxcr_pkt_errors, 0, "");
 	}
 }
 
@@ -2259,7 +2378,7 @@ vmxnet3_setup_queue_sysctl(struct vmxnet3_softc *sc,
 	int i;
 
 	scctx = sc->vmx_scctx;
-	
+
 	for (i = 0; i < scctx->isc_ntxqsets; i++)
 		vmxnet3_setup_txq_sysctl(&sc->vmx_txq[i], ctx, child);
 	for (i = 0; i < scctx->isc_nrxqsets; i++)

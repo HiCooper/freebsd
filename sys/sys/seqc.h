@@ -36,70 +36,23 @@
 /*
  * seqc_t may be included in structs visible to userspace
  */
-typedef uint32_t seqc_t;
+#include <sys/_seqc.h>
 
 #ifdef _KERNEL
-
-/*
- * seqc allows readers and writers to work with a consistent snapshot. Modifying
- * operations must be enclosed within a transaction delineated by
- * seqc_write_beg/seqc_write_end. The trick works by having the writer increment
- * the sequence number twice, at the beginning and end of the transaction.
- * The reader detects that the sequence number has not changed between its start
- * and end, and that the sequence number is even, to validate consistency.
- *
- * Some fencing (both hard fencing and compiler barriers) may be needed,
- * depending on the cpu. Modern AMD cpus provide strong enough guarantees to not
- * require any fencing by the reader or writer.
- *
- * Example usage:
- *
- * writers:
- *     lock_exclusive(&obj->lock);
- *     seqc_write_begin(&obj->seqc);
- *     obj->var1 = ...;
- *     obj->var2 = ...;
- *     seqc_write_end(&obj->seqc);
- *     unlock_exclusive(&obj->lock);
- *
- * readers:
- *    int var1, var2;
- *    seqc_t seqc;
- *
- *    for (;;) {
- *    	      seqc = seqc_read(&obj->seqc);
- *            var1 = obj->var1;
- *            var2 = obj->var2;
- *            if (seqc_consistent(&obj->seqc, seqc))
- *                   break;
- *    }
- *    .....
- *
- * Writers may not block or sleep in any way.
- *
- * There are 2 minor caveats in this implementation:
- *
- * 1. There is no guarantee of progress. That is, a large number of writers can
- * interfere with the execution of the readers and cause the code to live-lock
- * in a loop trying to acquire a consistent snapshot.
- *
- * 2. If the reader loops long enough, the counter may overflow and eventually
- * wrap back to its initial value, fooling the reader into accepting the
- * snapshot.  Given that this needs 4 billion transactional writes across a
- * single contended reader, it is unlikely to ever happen.
- */		
 
 /* A hack to get MPASS macro */
 #include <sys/lock.h>
 
 #include <machine/cpu.h>
 
-static __inline bool
-seqc_in_modify(seqc_t seqcp)
-{
-
-	return (seqcp & 1);
-}
+/*
+ * Predicts from inline functions are not honored by clang.
+ */
+#define seqc_in_modify(seqc)	({			\
+	seqc_t __seqc = (seqc);				\
+							\
+	__predict_false(__seqc & 1);			\
+})
 
 static __inline void
 seqc_write_begin(seqc_t *seqcp)
@@ -115,9 +68,17 @@ static __inline void
 seqc_write_end(seqc_t *seqcp)
 {
 
-	atomic_store_rel_int(seqcp, *seqcp + 1);
+	atomic_thread_fence_rel();
+	*seqcp += 1;
 	MPASS(!seqc_in_modify(*seqcp));
 	critical_exit();
+}
+
+static __inline seqc_t
+seqc_read_any(const seqc_t *seqcp)
+{
+
+	return (atomic_load_acq_int(__DECONST(seqc_t *, seqcp)));
 }
 
 static __inline seqc_t
@@ -126,7 +87,7 @@ seqc_read(const seqc_t *seqcp)
 	seqc_t ret;
 
 	for (;;) {
-		ret = atomic_load_acq_int(__DECONST(seqc_t *, seqcp));
+		ret = seqc_read_any(seqcp);
 		if (seqc_in_modify(ret)) {
 			cpu_spinwait();
 			continue;
@@ -137,19 +98,38 @@ seqc_read(const seqc_t *seqcp)
 	return (ret);
 }
 
-static __inline seqc_t
-seqc_consistent_nomb(const seqc_t *seqcp, seqc_t oldseqc)
+#define seqc_consistent_nomb(seqcp, oldseqc)	({	\
+	const seqc_t *__seqcp = (seqcp);		\
+	seqc_t __oldseqc = (oldseqc);			\
+							\
+	MPASS(!(seqc_in_modify(__oldseqc)));		\
+	__predict_true(*__seqcp == __oldseqc);		\
+})
+
+#define seqc_consistent(seqcp, oldseqc)		({	\
+	atomic_thread_fence_acq();			\
+	seqc_consistent_nomb(seqcp, oldseqc);		\
+})
+
+/*
+ * Variant which does not critical enter/exit.
+ */
+static __inline void
+seqc_sleepable_write_begin(seqc_t *seqcp)
 {
 
-	return (*seqcp == oldseqc);
+	MPASS(!seqc_in_modify(*seqcp));
+	*seqcp += 1;
+	atomic_thread_fence_rel();
 }
 
-static __inline seqc_t
-seqc_consistent(const seqc_t *seqcp, seqc_t oldseqc)
+static __inline void
+seqc_sleepable_write_end(seqc_t *seqcp)
 {
 
-	atomic_thread_fence_acq();
-	return (seqc_consistent_nomb(seqcp, oldseqc));
+	atomic_thread_fence_rel();
+	*seqcp += 1;
+	MPASS(!seqc_in_modify(*seqcp));
 }
 
 #endif	/* _KERNEL */

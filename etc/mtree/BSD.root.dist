@@ -18,6 +18,8 @@
             rockchip              tags=package=runtime
             ..
         ..
+        efi
+        ..
         firmware
         ..
         lua
@@ -51,6 +53,8 @@
         dma
         ..
         gss
+        ..
+        kyua
         ..
         mail
         ..
@@ -113,7 +117,7 @@
     ..
     rescue
     ..
-    root
+    root            mode=0750
     ..
     sbin
     ..

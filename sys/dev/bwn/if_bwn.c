@@ -98,7 +98,7 @@ __FBSDID("$FreeBSD$");
 
 #include "gpio_if.h"
 
-static SYSCTL_NODE(_hw, OID_AUTO, bwn, CTLFLAG_RD, 0,
+static SYSCTL_NODE(_hw, OID_AUTO, bwn, CTLFLAG_RD | CTLFLAG_MPSAFE, 0,
     "Broadcom driver parameters");
 
 /*
@@ -580,7 +580,7 @@ bwn_attach(device_t dev)
 		device_printf(sc->sc_dev, "couldn't allocate registers\n");
 		return (error);
 	}
-	
+
 	if ((error = bhnd_alloc_pmu(sc->sc_dev))) {
 		bus_release_resource(sc->sc_dev, SYS_RES_MEMORY,
 		    sc->sc_mem_rid, sc->sc_mem_res);
@@ -621,7 +621,7 @@ bwn_attach(device_t dev)
 		mac->mac_flags |= BWN_MAC_FLAG_BADFRAME_PREEMP;
 
 	TASK_INIT(&mac->mac_hwreset, 0, bwn_hwreset, mac);
-	TASK_INIT(&mac->mac_intrtask, 0, bwn_intrtask, mac);
+	NET_TASK_INIT(&mac->mac_intrtask, 0, bwn_intrtask, mac);
 	TASK_INIT(&mac->mac_txpower, 0, bwn_txpwr, mac);
 
 	error = bwn_attach_core(mac);
@@ -632,9 +632,10 @@ bwn_attach(device_t dev)
 		goto fail;
 
 	bhnd_format_chip_id(chip_name, sizeof(chip_name), sc->sc_cid.chip_id);
-	device_printf(sc->sc_dev, "WLAN (%s rev %u) "
+	device_printf(sc->sc_dev, "WLAN (%s rev %u sromrev %u) "
 	    "PHY (analog %d type %d rev %d) RADIO (manuf %#x ver %#x rev %d)\n",
-	    chip_name, bhnd_get_hwrev(sc->sc_dev), mac->mac_phy.analog,
+	    chip_name, bhnd_get_hwrev(sc->sc_dev),
+	    sc->sc_board_info.board_srom_rev, mac->mac_phy.analog,
 	    mac->mac_phy.type, mac->mac_phy.rev, mac->mac_phy.rf_manuf,
 	    mac->mac_phy.rf_ver, mac->mac_phy.rf_rev);
 	if (mac->mac_flags & BWN_MAC_FLAG_DMA)
@@ -684,7 +685,7 @@ fail:
 	free(mac, M_DEVBUF);
 	bhnd_release_pmu(dev);
 	bwn_release_bus_providers(sc);
-	
+
 	if (sc->sc_mem_res != NULL) {
 		bus_release_resource(sc->sc_dev, SYS_RES_MEMORY,
 		    sc->sc_mem_rid, sc->sc_mem_res);
@@ -1306,7 +1307,6 @@ bwn_attach_core(struct bwn_mac *mac)
 		have_bg = 1;
 		have_a = 1;
 	}
-	
 
 #if 0
 	device_printf(sc->sc_dev, "%s: iost=0x%04hx, have_a=%d, have_bg=%d,"
@@ -2122,7 +2122,6 @@ bwn_stop(struct bwn_softc *sc)
 static void
 bwn_wme_clear(struct bwn_softc *sc)
 {
-#define	MS(_v, _f)	(((_v) & _f) >> _f##_S)
 	struct wmeParams *p;
 	unsigned int i;
 
@@ -2137,29 +2136,37 @@ bwn_wme_clear(struct bwn_softc *sc)
 			p->wmep_txopLimit = 0;
 			p->wmep_aifsn = 2;
 			/* XXX FIXME: log2(cwmin) */
-			p->wmep_logcwmin = MS(0x0001, WME_PARAM_LOGCWMIN);
-			p->wmep_logcwmax = MS(0x0001, WME_PARAM_LOGCWMAX);
+			p->wmep_logcwmin =
+			    _IEEE80211_MASKSHIFT(0x0001, WME_PARAM_LOGCWMIN);
+			p->wmep_logcwmax =
+			    _IEEE80211_MASKSHIFT(0x0001, WME_PARAM_LOGCWMAX);
 			break;
 		case BWN_WME_VIDEO:
 			p->wmep_txopLimit = 0;
 			p->wmep_aifsn = 2;
 			/* XXX FIXME: log2(cwmin) */
-			p->wmep_logcwmin = MS(0x0001, WME_PARAM_LOGCWMIN);
-			p->wmep_logcwmax = MS(0x0001, WME_PARAM_LOGCWMAX);
+			p->wmep_logcwmin =
+			    _IEEE80211_MASKSHIFT(0x0001, WME_PARAM_LOGCWMIN);
+			p->wmep_logcwmax =
+			    _IEEE80211_MASKSHIFT(0x0001, WME_PARAM_LOGCWMAX);
 			break;
 		case BWN_WME_BESTEFFORT:
 			p->wmep_txopLimit = 0;
 			p->wmep_aifsn = 3;
 			/* XXX FIXME: log2(cwmin) */
-			p->wmep_logcwmin = MS(0x0001, WME_PARAM_LOGCWMIN);
-			p->wmep_logcwmax = MS(0x03ff, WME_PARAM_LOGCWMAX);
+			p->wmep_logcwmin =
+			    _IEEE80211_MASKSHIFT(0x0001, WME_PARAM_LOGCWMIN);
+			p->wmep_logcwmax =
+			    _IEEE80211_MASKSHIFT(0x03ff, WME_PARAM_LOGCWMAX);
 			break;
 		case BWN_WME_BACKGROUND:
 			p->wmep_txopLimit = 0;
 			p->wmep_aifsn = 7;
 			/* XXX FIXME: log2(cwmin) */
-			p->wmep_logcwmin = MS(0x0001, WME_PARAM_LOGCWMIN);
-			p->wmep_logcwmax = MS(0x03ff, WME_PARAM_LOGCWMAX);
+			p->wmep_logcwmin =
+			    _IEEE80211_MASKSHIFT(0x0001, WME_PARAM_LOGCWMIN);
+			p->wmep_logcwmax =
+			    _IEEE80211_MASKSHIFT(0x03ff, WME_PARAM_LOGCWMAX);
 			break;
 		default:
 			KASSERT(0 == 1, ("%s:%d: fail", __func__, __LINE__));
@@ -3040,7 +3047,7 @@ bwn_dma_32_setdesc(struct bwn_dma_ring *dr,
 	struct bhnd_dma_translation	*dt;
 	uint32_t			 addr, addrext, ctl;
 	int				 slot;
-	
+
 	descbase = dr->dr_ring_descbase;
 	dma = &dr->dr_mac->mac_method.dma;
 	dt = &dma->translation;
@@ -3136,8 +3143,7 @@ bwn_dma_64_setdesc(struct bwn_dma_ring *dr,
 	uint32_t			 addrext;
 	uint32_t			 ctl0, ctl1;
 	int				 slot;
-	
-	
+
 	descbase = dr->dr_ring_descbase;
 	dma = &dr->dr_mac->mac_method.dma;
 	dt = &dma->translation;
@@ -3684,7 +3690,6 @@ bwn_gpio_control(struct bwn_mac *mac, uint32_t pins)
 
 	return (0);
 }
-
 
 static int
 bwn_gpio_init(struct bwn_mac *mac)
@@ -4526,7 +4531,6 @@ bwn_fwinitvals_write(struct bwn_mac *mac, const struct bwn_fwinitvals *ivals,
 			BWN_WRITE_4(mac, offset, be32toh(iv->data.d32));
 			iv = GET_NEXTIV32(iv);
 		} else {
-
 			if (array_size < sizeof(iv->data.d16))
 				goto fail;
 			array_size -= sizeof(iv->data.d16);
@@ -4615,14 +4619,13 @@ static void
 bwn_wme_loadparams(struct bwn_mac *mac,
     const struct wmeParams *p, uint16_t shm_offset)
 {
-#define	SM(_v, _f)      (((_v) << _f##_S) & _f)
 	struct bwn_softc *sc = mac->mac_sc;
 	uint16_t params[BWN_NR_WMEPARAMS];
 	int slot, tmp;
 	unsigned int i;
 
 	slot = BWN_READ_2(mac, BWN_RNG) &
-	    SM(p->wmep_logcwmin, WME_PARAM_LOGCWMIN);
+	    _IEEE80211_SHIFTMASK(p->wmep_logcwmin, WME_PARAM_LOGCWMIN);
 
 	memset(&params, 0, sizeof(params));
 
@@ -4631,9 +4634,12 @@ bwn_wme_loadparams(struct bwn_mac *mac,
 	    p->wmep_logcwmin, p->wmep_logcwmax, p->wmep_aifsn);
 
 	params[BWN_WMEPARAM_TXOP] = p->wmep_txopLimit * 32;
-	params[BWN_WMEPARAM_CWMIN] = SM(p->wmep_logcwmin, WME_PARAM_LOGCWMIN);
-	params[BWN_WMEPARAM_CWMAX] = SM(p->wmep_logcwmax, WME_PARAM_LOGCWMAX);
-	params[BWN_WMEPARAM_CWCUR] = SM(p->wmep_logcwmin, WME_PARAM_LOGCWMIN);
+	params[BWN_WMEPARAM_CWMIN] =
+	    _IEEE80211_SHIFTMASK(p->wmep_logcwmin, WME_PARAM_LOGCWMIN);
+	params[BWN_WMEPARAM_CWMAX] =
+	     _IEEE80211_SHIFTMASK(p->wmep_logcwmax, WME_PARAM_LOGCWMAX);
+	params[BWN_WMEPARAM_CWCUR] =
+	     _IEEE80211_SHIFTMASK(p->wmep_logcwmin, WME_PARAM_LOGCWMIN);
 	params[BWN_WMEPARAM_AIFS] = p->wmep_aifsn;
 	params[BWN_WMEPARAM_BSLOTS] = slot;
 	params[BWN_WMEPARAM_REGGAP] = slot + p->wmep_aifsn;
@@ -5071,6 +5077,7 @@ bwn_intr(void *arg)
 static void
 bwn_intrtask(void *arg, int npending)
 {
+	struct epoch_tracker et;
 	struct bwn_mac *mac = arg;
 	struct bwn_softc *sc = mac->mac_sc;
 	uint32_t merged = 0;
@@ -5131,6 +5138,7 @@ bwn_intrtask(void *arg, int npending)
 	if (mac->mac_reason_intr & BWN_INTR_NOISESAMPLE_OK)
 		bwn_intr_noise(mac);
 
+	NET_EPOCH_ENTER(et);
 	if (mac->mac_flags & BWN_MAC_FLAG_DMA) {
 		if (mac->mac_reason[0] & BWN_DMAINTR_RX_DONE) {
 			bwn_dma_rx(mac->mac_method.dma.rx);
@@ -5138,6 +5146,7 @@ bwn_intrtask(void *arg, int npending)
 		}
 	} else
 		rx = bwn_pio_rx(&mac->mac_method.pio.rx);
+	NET_EPOCH_EXIT(et);
 
 	KASSERT(!(mac->mac_reason[1] & BWN_DMAINTR_RX_DONE), ("%s", __func__));
 	KASSERT(!(mac->mac_reason[2] & BWN_DMAINTR_RX_DONE), ("%s", __func__));
@@ -6003,7 +6012,6 @@ bwn_rxeof(struct bwn_mac *mac, struct mbuf *m, const void *_rxhdr)
 		chanstat = le16toh(rxhdr->ps4.r598.channel);
 		break;
 	}
-
 
 	phytype = chanstat & BWN_RX_CHAN_PHYTYPE;
 
@@ -7167,7 +7175,6 @@ bwn_dma_attach(struct bwn_mac *mac)
 		    mac->mac_dmatype);
 		return (ENXIO);
 	}
-
 
 	/* Fetch our device->host DMA translation and tag */
 	error = bhnd_get_dma_translation(sc->sc_dev, addr_width, 0, &dmat,

@@ -107,6 +107,10 @@
 #include <dev/ciss/cissio.h>
 #include <dev/ciss/cissvar.h>
 
+#ifdef CISS_DEBUG
+#include "opt_ddb.h"
+#endif
+
 static MALLOC_DEFINE(CISS_MALLOC_CLASS, "ciss_data",
     "ciss internal data buffers");
 
@@ -197,7 +201,9 @@ static void	ciss_notify_logical(struct ciss_softc *sc, struct ciss_notify *cn);
 static void	ciss_notify_physical(struct ciss_softc *sc, struct ciss_notify *cn);
 
 /* debugging output */
+#ifdef DDB
 static void	ciss_print_request(struct ciss_request *cr);
+#endif
 static void	ciss_print_ldrive(struct ciss_softc *sc, struct ciss_ldrive *ld);
 static const char *ciss_name_ldrive_status(int status);
 static int	ciss_decode_ldrive_status(int status);
@@ -265,7 +271,6 @@ TUNABLE_INT("hw.ciss.force_transport", &ciss_force_transport);
  */
 static int ciss_force_interrupt = 0;
 TUNABLE_INT("hw.ciss.force_interrupt", &ciss_force_interrupt);
-
 
 /************************************************************************
  * CISS adapters amazingly don't have a defined programming interface
@@ -1451,7 +1456,6 @@ ciss_init_logical(struct ciss_softc *sc)
 	    sc->ciss_logical[i][j].cl_status = CISS_LD_NONEXISTENT;
     }
 
-
     for (i = 0; i < sc->ciss_cfg->max_logical_supported; i++) {
 	if (i < ndrives) {
 	    struct ciss_ldrive	*ld;
@@ -1470,7 +1474,6 @@ ciss_init_logical(struct ciss_softc *sc)
 	     */
 	    if (ld->cl_lstatus->media_exchanged)
 		ciss_accept_media(sc, ld);
-
 	}
     }
 
@@ -2121,7 +2124,6 @@ ciss_done(struct ciss_softc *sc, cr_qhead_t *qh)
      * to the completed queue.
      */
     for (;;) {
-
 	tag = CISS_TL_SIMPLE_FETCH_CMD(sc);
 	if (tag == CISS_TL_SIMPLE_OPQ_EMPTY)
 	    break;
@@ -2222,7 +2224,6 @@ ciss_perf_msi_intr(void *arg)
     ciss_complete(sc, &qh);
     mtx_unlock(&sc->ciss_mtx);
 }
-
 
 /************************************************************************
  * Process completed requests.
@@ -2475,7 +2476,6 @@ ciss_abort_request(struct ciss_request *ar)
     return(error);
 }
 #endif
-
 
 /************************************************************************
  * Fetch and initialise a request
@@ -2977,7 +2977,6 @@ ciss_cam_action(struct cam_sim *sim, union ccb *ccb)
     physical = CISS_IS_PHYSICAL(bus);
 
     switch (ccb->ccb_h.func_code) {
-
 	/* perform SCSI I/O */
     case XPT_SCSI_IO:
 	if (!ciss_cam_action_io(sim, csio))
@@ -3393,7 +3392,6 @@ ciss_cam_complete_fixup(struct ciss_softc *sc, struct ccb_scsiio *csio)
 	(cdb[1] & SI_EVPD) == 0 &&
 	(csio->ccb_h.flags & CAM_DIR_MASK) == CAM_DIR_IN &&
 	csio->dxfer_len >= SHORT_INQUIRY_LENGTH) {
-
 	inq = (struct scsi_inquiry_data *)csio->data_ptr;
 	target = csio->ccb_h.target_id;
 	bus = cam_sim_bus(xpt_path_sim(csio->ccb_h.path));
@@ -3423,7 +3421,6 @@ ciss_cam_complete_fixup(struct ciss_softc *sc, struct ccb_scsiio *csio)
 	}
     }
 }
-
 
 /********************************************************************************
  * Name the device at (target)
@@ -3560,6 +3557,7 @@ ciss_disable_adapter(struct ciss_softc *sc)
     pci_disable_busmaster(sc->ciss_dev);
     sc->ciss_flags &= ~CISS_FLAG_RUNNING;
 
+    STAILQ_INIT(&qh);
     for (i = 1; i < sc->ciss_max_requests; i++) {
 	cr = &sc->ciss_request[i];
 	if ((cr->cr_flags & CISS_REQ_BUSY) == 0)
@@ -3811,8 +3809,9 @@ ciss_notify_abort(struct ciss_softc *sc)
     cnc->opcode = CISS_OPCODE_WRITE;
     cnc->command = CISS_COMMAND_ABORT_NOTIFY;
     cnc->length = htonl(CISS_NOTIFY_DATA_SIZE);
-
+#if 0
     ciss_print_request(cr);
+#endif
 
     /*
      * Submit the request and wait for it to complete.
@@ -4197,7 +4196,6 @@ ciss_notify_thread(void *arg)
 	}
 
 	ciss_release_request(cr);
-
     }
     sc->ciss_notify_thread = NULL;
     wakeup(&sc->ciss_notify_thread);
@@ -4237,6 +4235,7 @@ ciss_kill_notify_thread(struct ciss_softc *sc)
 /************************************************************************
  * Print a request.
  */
+#ifdef DDB
 static void
 ciss_print_request(struct ciss_request *cr)
 {
@@ -4290,6 +4289,7 @@ ciss_print_request(struct ciss_request *cr)
 	}
     }
 }
+#endif
 
 /************************************************************************
  * Print information about the status of a logical drive.
@@ -4353,8 +4353,6 @@ ciss_print_ldrive(struct ciss_softc *sc, struct ciss_ldrive *ld)
     }
 }
 
-#ifdef CISS_DEBUG
-#include "opt_ddb.h"
 #ifdef DDB
 #include <ddb/ddb.h>
 /************************************************************************
@@ -4408,7 +4406,6 @@ DB_COMMAND(ciss_prt, db_ciss_prt)
 	ciss_print_adapter(sc);
     }
 }
-#endif
 #endif
 
 /************************************************************************
@@ -4471,7 +4468,6 @@ ciss_decode_ldrive_status(int status)
 	return(CISS_LD_OFFLINE);
     }
 }
-
 
 /************************************************************************
  * Return a name for a logical drive's organisation.

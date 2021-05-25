@@ -110,13 +110,16 @@ extern char pmc_cpuid[PMC_CPUID_LEN];
 	__PMC_CPU(INTEL_BROADWELL_XEON, 0x97,   "Intel Broadwell Xeon") \
 	__PMC_CPU(INTEL_SKYLAKE, 0x98,   "Intel Skylake")		\
 	__PMC_CPU(INTEL_SKYLAKE_XEON, 0x99,   "Intel Skylake Xeon")	\
+	__PMC_CPU(INTEL_ATOM_GOLDMONT, 0x9A,   "Intel Atom Goldmont")	\
 	__PMC_CPU(INTEL_XSCALE,	0x100,	"Intel XScale")		\
 	__PMC_CPU(MIPS_24K,     0x200,  "MIPS 24K")		\
 	__PMC_CPU(MIPS_OCTEON,  0x201,  "Cavium Octeon")	\
 	__PMC_CPU(MIPS_74K,     0x202,  "MIPS 74K")		\
+	__PMC_CPU(MIPS_BERI,	0x203,  "BERI")			\
 	__PMC_CPU(PPC_7450,     0x300,  "PowerPC MPC7450")	\
 	__PMC_CPU(PPC_E500,     0x340,  "PowerPC e500 Core")	\
 	__PMC_CPU(PPC_970,      0x380,  "IBM PowerPC 970")	\
+	__PMC_CPU(PPC_POWER8,   0x390,  "IBM POWER8")		\
 	__PMC_CPU(GENERIC, 	0x400,  "Generic")		\
 	__PMC_CPU(ARMV7_CORTEX_A5,	0x500,	"ARMv7 Cortex A5")	\
 	__PMC_CPU(ARMV7_CORTEX_A7,	0x501,	"ARMv7 Cortex A7")	\
@@ -125,7 +128,8 @@ extern char pmc_cpuid[PMC_CPUID_LEN];
 	__PMC_CPU(ARMV7_CORTEX_A15,	0x504,	"ARMv7 Cortex A15")	\
 	__PMC_CPU(ARMV7_CORTEX_A17,	0x505,	"ARMv7 Cortex A17")	\
 	__PMC_CPU(ARMV8_CORTEX_A53,	0x600,	"ARMv8 Cortex A53")	\
-	__PMC_CPU(ARMV8_CORTEX_A57,	0x601,	"ARMv8 Cortex A57")
+	__PMC_CPU(ARMV8_CORTEX_A57,	0x601,	"ARMv8 Cortex A57")	\
+	__PMC_CPU(ARMV8_CORTEX_A76,	0x602,	"ARMv8 Cortex A76")
 
 enum pmc_cputype {
 #undef	__PMC_CPU
@@ -160,7 +164,9 @@ enum pmc_cputype {
 	__PMC_CLASS(ARMV7,	0x10,	"ARMv7")			\
 	__PMC_CLASS(ARMV8,	0x11,	"ARMv8")			\
 	__PMC_CLASS(MIPS74K,	0x12,	"MIPS 74K")			\
-	__PMC_CLASS(E500,	0x13,	"Freescale e500 class")
+	__PMC_CLASS(E500,	0x13,	"Freescale e500 class")		\
+	__PMC_CLASS(BERI,	0x14,	"MIPS BERI")			\
+	__PMC_CLASS(POWER8,	0x15,	"IBM POWER8 class")
 
 enum pmc_class {
 #undef  __PMC_CLASS
@@ -169,7 +175,7 @@ enum pmc_class {
 };
 
 #define	PMC_CLASS_FIRST	PMC_CLASS_TSC
-#define	PMC_CLASS_LAST	PMC_CLASS_E500
+#define	PMC_CLASS_LAST	PMC_CLASS_POWER8
 
 /*
  * A PMC can be in the following states:
@@ -352,13 +358,11 @@ enum pmc_event {
 	__PMC_OP(CLOSELOG, "Close log file")				\
 	__PMC_OP(GETDYNEVENTINFO, "Get dynamic events list")
 
-
 enum pmc_ops {
 #undef	__PMC_OP
 #define	__PMC_OP(N, D)	PMC_OP_##N,
 	__PMC_OPS()
 };
-
 
 /*
  * Flags used in operations on PMCs.
@@ -409,7 +413,6 @@ typedef uint64_t	pmc_value_t;
  * The 'ROW INDEX' ranges over 0..NWPMCS where NHWPMCS is the total
  * number of hardware PMCs on this cpu.
  */
-
 
 #define	PMC_ID_TO_ROWINDEX(ID)	((ID) & 0xFF)
 #define	PMC_ID_TO_CLASS(ID)	(((ID) & 0xF00) >> 8)
@@ -483,7 +486,6 @@ struct pmc_op_pmcsetcount {
 	pmc_id_t	pm_pmcid;	/* PMC id to set */
 };
 
-
 /*
  * OP PMCRW
  *
@@ -491,13 +493,11 @@ struct pmc_op_pmcsetcount {
  * to have been previously allocated using PMCALLOCATE.
  */
 
-
 struct pmc_op_pmcrw {
 	uint32_t	pm_flags;	/* PMC_F_{OLD,NEW}VALUE*/
 	pmc_id_t	pm_pmcid;	/* pmc id */
 	pmc_value_t	pm_value;	/* new&returned value */
 };
-
 
 /*
  * OP GETPMCINFO
@@ -524,13 +524,11 @@ struct pmc_op_getpmcinfo {
 	struct pmc_info	pm_pmcs[];	/* space for 'npmc' structures */
 };
 
-
 /*
  * OP GETCPUINFO
  *
  * Retrieve system CPU information.
  */
-
 
 struct pmc_classinfo {
 	enum pmc_class	pm_class;	/* class id */
@@ -996,7 +994,6 @@ struct pmc_binding {
 	int	pb_cpu;		/* if so, to which CPU */
 };
 
-
 struct pmc_mdep;
 
 /*
@@ -1133,7 +1130,7 @@ extern struct pmc_debugflags pmc_debugflags;
 		CTR6(KTR_PMC, #M ":" #N ":" #L  ": " F, p1, p2, p3, p4,	\
 		    p5, p6);						\
 } while (0)
-	
+
 /* Major numbers */
 #define	PMC_DEBUG_MAJ_CPU		0 /* cpu switches */
 #define	PMC_DEBUG_MAJ_CSW		1 /* context switches */
